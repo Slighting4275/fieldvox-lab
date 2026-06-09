@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 package org.fieldvox.lab;
 
 import android.app.Activity;

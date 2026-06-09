@@ -58,4 +58,4 @@ Linux prototype/tools:
 
 ## License
 
-GPL-3.0-or-later. See LICENSE.
+GPL-3.0-or-later. See LICENSE for the project notice and COPYING for the full GNU GPL version 3 text.
