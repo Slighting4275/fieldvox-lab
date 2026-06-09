@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef FV_CORE_H
 #define FV_CORE_H
 

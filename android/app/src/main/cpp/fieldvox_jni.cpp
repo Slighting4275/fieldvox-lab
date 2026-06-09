@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #include <jni.h>
 #include <android/log.h>
 #include <android/sensor.h>
