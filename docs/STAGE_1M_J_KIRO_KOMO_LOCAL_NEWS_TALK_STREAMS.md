@@ -9,7 +9,7 @@ FieldVox Stage 1M-J keeps the phonetic-grain VOX engine and adds Seattle-local s
 
 ## Source-bank rule
 
-The active bank should remain spoken-word focused:
+The active bank remains spoken-word focused:
 
 - Local news.
 - Public affairs.

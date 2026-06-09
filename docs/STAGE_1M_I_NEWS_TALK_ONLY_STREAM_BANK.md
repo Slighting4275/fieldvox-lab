@@ -1,6 +1,6 @@
 # Stage 1M-I: news/talk-only stream bank
 
-FieldVox Stage 1M-I introduced the phonetic-grain VOX engine but restricts the online stream bank to spoken-word sources.
+FieldVox Stage 1M-I introduced the spoken-word-only stream-bank rule.
 
 ## Included source types
 
@@ -24,14 +24,6 @@ FieldVox Stage 1M-I introduced the phonetic-grain VOX engine but restricts the o
 - Supports magnetometer, gyroscope, proximity-near, proximity-far, startup, and auto-scan gate reasons.
 - Keeps timeout-safe stream preparation.
 - Keeps microphone WAV/session recording active for evidence review.
-
-## Explicit non-goals
-
-- No word bank.
-- No text-to-speech.
-- No generated words.
-- No proprietary third-party app code, branding, database, UI assets, or marketing copy.
-
 
 ## Stage 1M-J follow-up
 
