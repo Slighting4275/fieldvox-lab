@@ -1,6 +1,20 @@
 package org.fieldvox.lab;
 
 import android.app.Activity;
+import android.util.Log;
+import android.hardware.SensorManager;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorEvent;
+import android.hardware.Sensor;
+import android.media.MediaPlayer;
+import android.media.AudioAttributes;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+import android.media.MediaRecorder;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
@@ -49,6 +63,79 @@ public class MainActivity extends Activity {
     private LinearLayout controlPanel;
     private boolean running = false;
     private boolean controlsVisible = false;
+    private Button liveButton;
+    private volatile boolean liveMonitorRunning = false;
+    private volatile boolean speakerMonitorEnabled = false;
+    private Thread liveMonitorThread;
+    private Button speakerMonitorButton;
+    private double liveNoiseFloor = 300.0;
+    private long liveLastTriggerMs = 0L;
+    private float liveOutputGain = 3.0f;
+
+    private MediaPlayer onlineCarrierPlayer;
+    private volatile boolean onlineCarrierActive = false;
+    private volatile boolean onlineCarrierPrepared = false;
+    private int onlineCarrierIndex = 0;
+    private long onlineCarrierLastGateMs = 0L;
+    private long onlineCarrierGateOpenUntilMs = 0L;
+    private long onlineCarrierNextAllowedGateMs = 0L;
+    private boolean onlineCarrierGateOpen = false;
+    private int onlineCarrierGateToken = 0;
+    private int onlineCarrierLastSweptToken = 0;
+    private boolean onlineCarrierStartupTestDone = false;
+    private int onlineCarrierSweepCount = 0;
+    private int onlineCarrierPrepareToken = 0;
+    private int onlineCarrierGranularPacketToken = 0;
+    private Runnable onlineCarrierAutoGateRunnable;
+    private float onlineCarrierMagBaseline = -1.0f;
+    private float onlineCarrierGyroBaseline = -1.0f;
+    private float onlineCarrierProximityLast = -1.0f;
+    private boolean onlineCarrierProximityNear = false;
+    private long onlineCarrierLastProximityLogMs = 0L;
+    private boolean onlineCarrierPendingProximityGate = false;
+    private String onlineCarrierPendingProximityReason = "";
+    private float onlineCarrierPendingProximityDelta = 0.0f;
+    private int onlineCarrierRegisteredSensorCount = 0;
+    private SensorManager onlineCarrierSensorManager;
+    private SensorEventListener onlineCarrierSensorListener;
+
+    private static final String[] ONLINE_CARRIER_URLS = new String[] {
+            "https://bonneville.cdnstream1.com/2643_48.aac",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/KNWNAM.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/KUOWFM_HIGH_MP3.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/KUOWFM_LOW_MP3.mp3",
+            "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
+            "https://news-stream.iowapublicradio.org/NewsLow.mp3",
+            "https://news-stream.iowapublicradio.org/News.mp3",
+            "https://wpr-ice.streamguys1.com/wpr-ideas-mp3-64",
+            "https://streams.kqed.org/kqedradio",
+            "https://vprbbc.streamguys1.com/vprbbc24.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/CSPANRADIO.mp3",
+            "https://vpr.streamguys1.com/vpr64.mp3",
+            "https://vpr.streamguys1.com/vpr24.mp3",
+            "http://161.55.224.79:88"
+    };
+
+    private static final String[] ONLINE_CARRIER_LABELS = new String[] {
+            "KIRO Newsradio Seattle 97.3",
+            "Northwest Newsradio KOMO/KNWN",
+            "KUOW Seattle News High",
+            "KUOW Seattle News Low",
+            "BBC World Service",
+            "Iowa Public Radio News Low",
+            "Iowa Public Radio News",
+            "Wisconsin Public Radio News",
+            "KQED Radio News/Talk",
+            "Vermont Public BBC Relay",
+            "C-SPAN Radio Public Affairs",
+            "Vermont Public News/Talk 64",
+            "Vermont Public News/Talk 24",
+            "NOAA Puget Sound Marine Weather"
+    };
+
+    private static final int LIVE_SAMPLE_RATE = 48000;
+    private static final int LIVE_PERMISSION_REQUEST = 4101;
+
 
     private native void nativeInit(String packageName, String filesDir);
     private native String nativeStatus();
@@ -62,9 +149,12 @@ public class MainActivity extends Activity {
     private int cooldownMs = 450;
 
     private final Runnable tick = new Runnable() {
-        @Override
         public void run() {
-            status.setText(nativeStatus());
+            if (liveMonitorRunning) {
+                status.setText("KIRO/KOMO local news VOX running\nSeattle-local news/talk streams are first in the bank. No word bank. No TTS.");
+            } else {
+                status.setText(nativeStatus());
+            }
             if (wavePanel != null) {
                 wavePanel.setRunning(running);
                 wavePanel.invalidate();
@@ -507,27 +597,992 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void toggleRun() {
-        if (!running) {
-            running = nativeStart();
-            startButton.setText(running ? "Stop" : "Start!");
-        } else {
-            nativeStop();
-            running = false;
-            startButton.setText("Start");
-            refreshSessions();
+    private void updateLiveButtons() {
+        if (liveButton != null) {
+            liveButton.setText(liveMonitorRunning ? "Auto Live: On" : "Auto Live: Arming");
         }
-        status.setText(nativeStatus());
-        wavePanel.setRunning(running);
-        wavePanel.invalidate();
+        if (startButton != null) {
+            startButton.setText(liveMonitorRunning ? "LIVE" : "ARM");
+        }
     }
+
+    private String onlineCarrierLabel() {
+        int i = Math.max(0, Math.min(onlineCarrierIndex, ONLINE_CARRIER_LABELS.length - 1));
+        return ONLINE_CARRIER_LABELS[i];
+    }
+
+    private synchronized void openOnlineCarrierGate(String reason, float delta) {
+        if (!onlineCarrierActive) {
+            android.util.Log.i("FieldVox", "PHONETIC VOX gate skipped: inactive reason=" + reason);
+            return;
+        }
+
+        if (!onlineCarrierPrepared || onlineCarrierPlayer == null) {
+            android.util.Log.i("FieldVox", "PHONETIC VOX gate skipped: carrier not ready reason=" + reason
+                    + " prepared=" + onlineCarrierPrepared);
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+
+        if (onlineCarrierGateOpen || now < onlineCarrierNextAllowedGateMs) {
+            long waitMs = Math.max(0L, onlineCarrierNextAllowedGateMs - now);
+            android.util.Log.i("FieldVox", "PHONETIC VOX gate skipped: reason=" + reason
+                    + " gate_open=" + onlineCarrierGateOpen
+                    + " wait_ms=" + waitMs);
+            return;
+        }
+
+        int grains = 2;
+        if (reason.startsWith("proximity")) {
+            grains = 2 + (int)(Math.random() * 2.0);
+        } else if ("magnetometer".equals(reason)) {
+            grains = 2 + Math.min(3, (int)Math.max(0.0f, delta / 2.0f));
+        } else if ("gyroscope".equals(reason)) {
+            grains = 1 + Math.min(3, (int)Math.max(0.0f, delta * 6.0f));
+        } else if ("startup-test".equals(reason)) {
+            grains = 2;
+        } else if ("auto-scan".equals(reason)) {
+            grains = 1 + (int)(Math.random() * 3.0);
+        }
+
+        grains = Math.max(1, Math.min(5, grains));
+        final int totalGrains = grains;
+
+        int token = ++onlineCarrierGateToken;
+        int packetToken = ++onlineCarrierGranularPacketToken;
+        onlineCarrierLastSweptToken = 0;
+        onlineCarrierGateOpen = true;
+        onlineCarrierLastGateMs = now;
+
+        int[] grainDurations = new int[grains];
+        int[] grainGaps = new int[grains];
+
+        int packetMs = 0;
+        float signature = Math.min(1.0f, Math.abs(delta) / 8.0f);
+
+        for (int i = 0; i < grains; i++) {
+            int d = 95 + (int)(Math.random() * 210.0);
+            int gap = 45 + (int)(Math.random() * 155.0);
+
+            if (reason.startsWith("proximity")) {
+                d += 35;
+                gap += 25;
+            } else if ("magnetometer".equals(reason)) {
+                d += (int)(signature * 80.0f);
+            } else if ("gyroscope".equals(reason)) {
+                d = Math.max(75, d - 30);
+                gap = Math.max(35, gap - 15);
+            }
+
+            grainDurations[i] = Math.max(65, Math.min(390, d));
+            grainGaps[i] = Math.max(30, Math.min(260, gap));
+            packetMs += grainDurations[i];
+            if (i + 1 < grains) {
+                packetMs += grainGaps[i];
+            }
+        }
+
+        int forcedSilenceMs = 1100 + (int)(Math.random() * 3600.0);
+        if (reason.startsWith("proximity")) {
+            forcedSilenceMs += 600;
+        }
+
+        onlineCarrierGateOpenUntilMs = now + packetMs;
+        onlineCarrierNextAllowedGateMs = now + packetMs + forcedSilenceMs;
+
+        String openMsg = "PHONETIC VOX packet open: " + onlineCarrierLabel()
+                + " | Reason: " + reason
+                + " delta=" + String.format(java.util.Locale.US, "%.2f", delta)
+                + " grains=" + grains
+                + " packet_ms=" + packetMs
+                + " silence_after_ms=" + forcedSilenceMs
+                + " | Real news/talk stream grains. No word bank. No TTS.";
+        android.util.Log.i("FieldVox", openMsg);
+        exportStatus.setText(openMsg);
+
+        int offsetMs = 0;
+        for (int i = 0; i < grains; i++) {
+            final int grainIndex = i + 1;
+            final int grainStart = offsetMs;
+            final int grainDuration = grainDurations[i];
+
+            handler.postDelayed(() -> {
+                synchronized (MainActivity.this) {
+                    if (token != onlineCarrierGateToken || packetToken != onlineCarrierGranularPacketToken) {
+                        return;
+                    }
+                    if (!onlineCarrierActive || onlineCarrierPlayer == null) {
+                        return;
+                    }
+                }
+
+                try {
+                    if (onlineCarrierPlayer != null) {
+                        onlineCarrierPlayer.setVolume(1.0f, 1.0f);
+                    }
+                } catch (Exception ignored) {}
+
+                android.util.Log.i("FieldVox", "PHONETIC VOX grain open: "
+                        + onlineCarrierLabel()
+                        + " grain=" + grainIndex + "/" + totalGrains
+                        + " duration_ms=" + grainDuration
+                        + " reason=" + reason
+                        + " token=" + token);
+            }, grainStart);
+
+            handler.postDelayed(() -> {
+                synchronized (MainActivity.this) {
+                    if (token != onlineCarrierGateToken || packetToken != onlineCarrierGranularPacketToken) {
+                        return;
+                    }
+                }
+
+                try {
+                    if (onlineCarrierPlayer != null) {
+                        onlineCarrierPlayer.setVolume(0.0f, 0.0f);
+                    }
+                } catch (Exception ignored) {}
+
+                android.util.Log.i("FieldVox", "PHONETIC VOX grain closed: grain="
+                        + grainIndex + "/" + totalGrains
+                        + " token=" + token);
+            }, grainStart + grainDuration);
+
+            offsetMs += grainDuration;
+            if (i + 1 < grains) {
+                offsetMs += grainGaps[i];
+            }
+        }
+
+        final int totalPacketMs = packetMs;
+
+        handler.postDelayed(() -> {
+            synchronized (MainActivity.this) {
+                if (token != onlineCarrierGateToken || packetToken != onlineCarrierGranularPacketToken
+                        || onlineCarrierLastSweptToken == token) {
+                    return;
+                }
+
+                onlineCarrierLastSweptToken = token;
+                onlineCarrierGateOpen = false;
+            }
+
+            try {
+                if (onlineCarrierPlayer != null) {
+                    onlineCarrierPlayer.setVolume(0.0f, 0.0f);
+                }
+            } catch (Exception ignored) {}
+
+            String closeMsg = "PHONETIC VOX packet closed. Forced silence gap active. Sweeping to next stream.";
+            android.util.Log.i("FieldVox", closeMsg + " token=" + token + " packet_ms=" + totalPacketMs);
+            exportStatus.setText(closeMsg);
+
+            handler.postDelayed(() -> advanceOnlineCarrierSweep("phonetic-packet-closed"), 350L);
+        }, totalPacketMs);
+    }
+
+
+    private void startOnlineCarrierAutoGate() {
+        if (onlineCarrierAutoGateRunnable != null) {
+            return;
+        }
+
+        onlineCarrierAutoGateRunnable = new Runnable() {
+            public void run() {
+                if (!onlineCarrierActive) {
+                    onlineCarrierAutoGateRunnable = null;
+                    return;
+                }
+
+                if (onlineCarrierPrepared) {
+                    openOnlineCarrierGate("auto-scan", 0.0f);
+                }
+
+                int nextDelayMs = 1700 + (int)(Math.random() * 4300.0);
+                handler.postDelayed(this, nextDelayMs);
+            }
+        };
+
+        handler.postDelayed(onlineCarrierAutoGateRunnable, 1200L);
+    }
+
+    private void stopOnlineCarrierAutoGate() {
+        if (onlineCarrierAutoGateRunnable != null) {
+            handler.removeCallbacks(onlineCarrierAutoGateRunnable);
+            onlineCarrierAutoGateRunnable = null;
+        }
+    }
+
+
+    private synchronized void queueOrOpenProximityGate(String reason, float delta) {
+        android.util.Log.i("FieldVox", "proximity gate request reason=" + reason
+                + " delta=" + delta
+                + " active=" + onlineCarrierActive
+                + " prepared=" + onlineCarrierPrepared
+                + " gate_open=" + onlineCarrierGateOpen);
+
+        if (onlineCarrierActive && onlineCarrierPrepared && !onlineCarrierGateOpen) {
+            onlineCarrierNextAllowedGateMs = Math.min(onlineCarrierNextAllowedGateMs, System.currentTimeMillis());
+            openOnlineCarrierGate(reason, delta);
+            return;
+        }
+
+        onlineCarrierPendingProximityGate = true;
+        onlineCarrierPendingProximityReason = reason;
+        onlineCarrierPendingProximityDelta = delta;
+        android.util.Log.i("FieldVox", "proximity gate queued reason=" + reason + " delta=" + delta);
+    }
+
+    private synchronized void flushPendingProximityGateIfReady() {
+        if (!onlineCarrierPendingProximityGate) {
+            return;
+        }
+
+        if (!onlineCarrierActive || !onlineCarrierPrepared || onlineCarrierGateOpen) {
+            return;
+        }
+
+        String reason = onlineCarrierPendingProximityReason;
+        float delta = onlineCarrierPendingProximityDelta;
+
+        onlineCarrierPendingProximityGate = false;
+        onlineCarrierPendingProximityReason = "";
+        onlineCarrierPendingProximityDelta = 0.0f;
+
+        onlineCarrierNextAllowedGateMs = Math.min(onlineCarrierNextAllowedGateMs, System.currentTimeMillis());
+        android.util.Log.i("FieldVox", "proximity queued gate flushing reason=" + reason + " delta=" + delta);
+        openOnlineCarrierGate(reason, delta);
+    }
+
+
+    private void startOnlineCarrierSensors() {
+        if (onlineCarrierSensorListener != null) {
+            return;
+        }
+
+        onlineCarrierSensorManager = (SensorManager)getSystemService(SENSOR_SERVICE);
+        if (onlineCarrierSensorManager == null) {
+            exportStatus.setText("Multi-sensor gate unavailable: no SensorManager.");
+            return;
+        }
+
+        onlineCarrierRegisteredSensorCount = 0;
+        onlineCarrierMagBaseline = -1.0f;
+        onlineCarrierGyroBaseline = -1.0f;
+        onlineCarrierProximityLast = -1.0f;
+        onlineCarrierProximityNear = false;
+        onlineCarrierLastProximityLogMs = 0L;
+        onlineCarrierPendingProximityGate = false;
+        onlineCarrierPendingProximityReason = "";
+        onlineCarrierPendingProximityDelta = 0.0f;
+
+        onlineCarrierSensorListener = new SensorEventListener() {
+            public void onSensorChanged(SensorEvent event) {
+                if (!onlineCarrierActive) {
+                    return;
+                }
+
+                long now = System.currentTimeMillis();
+                int type = event.sensor.getType();
+
+                if (type == Sensor.TYPE_MAGNETIC_FIELD && event.values.length >= 3) {
+                    float x = event.values[0];
+                    float y = event.values[1];
+                    float z = event.values[2];
+                    float mag = (float)Math.sqrt(x * x + y * y + z * z);
+
+                    if (onlineCarrierMagBaseline < 0.0f) {
+                        onlineCarrierMagBaseline = mag;
+                        return;
+                    }
+
+                    onlineCarrierMagBaseline = onlineCarrierMagBaseline * 0.985f + mag * 0.015f;
+                    float delta = Math.abs(mag - onlineCarrierMagBaseline);
+
+                    if (delta >= Math.max(2.10f, threshold * 0.90f)
+                            && now >= onlineCarrierNextAllowedGateMs
+                            && now - onlineCarrierLastGateMs >= Math.max(1800, cooldownMs + 1200)) {
+                        openOnlineCarrierGate("magnetometer", delta);
+                    }
+                    return;
+                }
+
+                if (type == Sensor.TYPE_GYROSCOPE && event.values.length >= 3) {
+                    float x = event.values[0];
+                    float y = event.values[1];
+                    float z = event.values[2];
+                    float rot = (float)Math.sqrt(x * x + y * y + z * z);
+
+                    if (onlineCarrierGyroBaseline < 0.0f) {
+                        onlineCarrierGyroBaseline = rot;
+                        return;
+                    }
+
+                    onlineCarrierGyroBaseline = onlineCarrierGyroBaseline * 0.965f + rot * 0.035f;
+                    float delta = Math.abs(rot - onlineCarrierGyroBaseline);
+
+                    // Gyro is movement-sensitive; use it as a secondary trigger, not a spam source.
+                    if (delta >= 0.18f
+                            && now >= onlineCarrierNextAllowedGateMs
+                            && now - onlineCarrierLastGateMs >= Math.max(1900, cooldownMs + 1300)) {
+                        openOnlineCarrierGate("gyroscope", delta);
+                    }
+                    return;
+                }
+
+                if (type == Sensor.TYPE_PROXIMITY && event.values.length >= 1) {
+                    float v = event.values[0];
+                    float maxRange = event.sensor.getMaximumRange();
+                    boolean nearNow = (v <= 0.0f) || (v < maxRange);
+
+                    if (onlineCarrierProximityLast < 0.0f) {
+                        onlineCarrierProximityLast = v;
+                        onlineCarrierProximityNear = nearNow;
+                        onlineCarrierLastProximityLogMs = now;
+                        android.util.Log.i("FieldVox", "proximity initial near=" + nearNow
+                                + " value=" + v
+                                + " max=" + maxRange);
+                        return;
+                    }
+
+                    float delta = Math.abs(v - onlineCarrierProximityLast);
+                    boolean changed = nearNow != onlineCarrierProximityNear;
+                    onlineCarrierProximityLast = v;
+                    onlineCarrierProximityNear = nearNow;
+
+                    if (changed) {
+                        android.util.Log.i("FieldVox", "proximity transition near=" + nearNow
+                                + " value=" + v
+                                + " max=" + maxRange
+                                + " delta=" + delta);
+
+                        // Proximity is an intentional user-testable environmental gate.
+                        // It may bypass the normal silence cooldown, but still cannot overlap an open gate.
+                        queueOrOpenProximityGate(nearNow ? "proximity-near" : "proximity-far", delta);
+                    } else if (now - onlineCarrierLastProximityLogMs >= 8000L) {
+                        onlineCarrierLastProximityLogMs = now;
+                        android.util.Log.i("FieldVox", "proximity steady near=" + nearNow
+                                + " value=" + v
+                                + " max=" + maxRange);
+                    }
+
+                    return;
+                }
+            }
+
+            public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+        };
+
+        Sensor magnetic = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        Sensor gyro = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        Sensor proximity = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
+
+        if (magnetic != null) {
+            onlineCarrierSensorManager.registerListener(
+                    onlineCarrierSensorListener,
+                    magnetic,
+                    SensorManager.SENSOR_DELAY_UI);
+            onlineCarrierRegisteredSensorCount++;
+        }
+
+        if (gyro != null) {
+            onlineCarrierSensorManager.registerListener(
+                    onlineCarrierSensorListener,
+                    gyro,
+                    SensorManager.SENSOR_DELAY_UI);
+            onlineCarrierRegisteredSensorCount++;
+        }
+
+        if (proximity != null) {
+            onlineCarrierSensorManager.registerListener(
+                    onlineCarrierSensorListener,
+                    proximity,
+                    SensorManager.SENSOR_DELAY_UI);
+            onlineCarrierRegisteredSensorCount++;
+        }
+
+        String msg = "Multi-sensor VOX gates armed: "
+                + "magnetometer=" + (magnetic != null)
+                + " gyroscope=" + (gyro != null)
+                + " proximity=" + (proximity != null)
+                + " microphone_recording=true";
+        android.util.Log.i("FieldVox", msg);
+        exportStatus.setText(msg);
+    }
+
+    private void stopOnlineCarrierSensors() {
+        try {
+            if (onlineCarrierSensorManager != null && onlineCarrierSensorListener != null) {
+                onlineCarrierSensorManager.unregisterListener(onlineCarrierSensorListener);
+            }
+        } catch (Exception ignored) {}
+
+        onlineCarrierSensorListener = null;
+        onlineCarrierRegisteredSensorCount = 0;
+        onlineCarrierMagBaseline = -1.0f;
+        onlineCarrierGyroBaseline = -1.0f;
+        onlineCarrierProximityLast = -1.0f;
+        onlineCarrierProximityNear = false;
+    }
+
+
+    private String startOnlineVoxCarrier() {
+        if (onlineCarrierActive && onlineCarrierPlayer != null) {
+            return "Online VOX carrier already armed: " + onlineCarrierLabel();
+        }
+
+        onlineCarrierActive = true;
+        onlineCarrierPrepared = false;
+        onlineCarrierMagBaseline = -1.0f;
+        onlineCarrierGateOpen = false;
+        onlineCarrierNextAllowedGateMs = 0L;
+        onlineCarrierGateOpenUntilMs = 0L;
+        onlineCarrierLastSweptToken = 0;
+        onlineCarrierStartupTestDone = false;
+        onlineCarrierSweepCount = 0;
+        onlineCarrierIndex = 0;
+
+        startOnlineCarrierSensors();
+        prepareOnlineCarrierAtIndex(onlineCarrierIndex);
+
+        return "KIRO/KOMO local news VOX arming. KIRO and Northwest Newsradio KOMO/KNWN are tried first; microphone records the evidence.";
+    }
+
+    private int normalizeOnlineCarrierIndex(int index) {
+        if (ONLINE_CARRIER_URLS.length <= 0) {
+            return 0;
+        }
+        int n = index % ONLINE_CARRIER_URLS.length;
+        if (n < 0) {
+            n += ONLINE_CARRIER_URLS.length;
+        }
+        return n;
+    }
+
+    private void advanceOnlineCarrierSweep(String reason) {
+        if (!onlineCarrierActive || ONLINE_CARRIER_URLS.length <= 0) {
+            return;
+        }
+
+        int next = normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
+        onlineCarrierSweepCount++;
+
+        String msg = "VOX sweep advance: "
+                + onlineCarrierLabel()
+                + " -> " + ONLINE_CARRIER_LABELS[next]
+                + "\nReason: " + reason
+                + " sweep_count=" + onlineCarrierSweepCount
+                + "\nPreparing next online stream during silence.";
+        Log.i("FieldVox", msg.replace("\n", " | "));
+        exportStatus.setText(msg);
+
+        prepareOnlineCarrierAtIndex(next);
+    }
+
+    private void prepareOnlineCarrierAtIndex(int index) {
+        if (!onlineCarrierActive) {
+            return;
+        }
+
+        stopOnlineCarrierPlayerOnly();
+
+        if (ONLINE_CARRIER_URLS.length <= 0) {
+            onlineCarrierActive = false;
+            exportStatus.setText("Buffered-proximity carrier failed: no stream sources configured.");
+            return;
+        }
+
+        index = normalizeOnlineCarrierIndex(index);
+        onlineCarrierIndex = index;
+        onlineCarrierPrepared = false;
+
+        final int prepareToken = ++onlineCarrierPrepareToken;
+        final int prepareIndex = index;
+
+        try {
+            MediaPlayer mp = new MediaPlayer();
+            onlineCarrierPlayer = mp;
+
+            mp.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build());
+
+            mp.setDataSource(ONLINE_CARRIER_URLS[index]);
+            mp.setVolume(0.0f, 0.0f);
+
+            mp.setOnPreparedListener(player -> {
+                if (prepareToken != onlineCarrierPrepareToken || onlineCarrierPlayer != player) {
+                    try { player.release(); } catch (Exception ignored) {}
+                    return;
+                }
+
+                if (!onlineCarrierActive) {
+                    try { player.release(); } catch (Exception ignored) {}
+                    return;
+                }
+
+                onlineCarrierPrepared = true;
+                player.start();
+
+                try {
+                    player.setVolume(0.0f, 0.0f);
+                } catch (Exception ignored) {}
+
+                String msg = "Timeout-safe carrier ready: " + onlineCarrierLabel()
+                        + "\nMuted until phonetic-grain gate opens. Queued proximity can now flush. No word bank. No TTS.";
+                Log.i("FieldVox", msg.replace("\n", " | "));
+                exportStatus.setText(msg);
+
+                flushPendingProximityGateIfReady();
+                startOnlineCarrierAutoGate();
+            });
+
+            mp.setOnErrorListener((player, what, extra) -> {
+                if (prepareToken != onlineCarrierPrepareToken) {
+                    return true;
+                }
+
+                try { player.release(); } catch (Exception ignored) {}
+                if (onlineCarrierPlayer == player) {
+                    onlineCarrierPlayer = null;
+                }
+
+                onlineCarrierPrepared = false;
+
+                int next = normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
+                Log.e("FieldVox", "Timeout-safe sweep MediaPlayer error what=" + what + " extra=" + extra
+                        + " source=" + onlineCarrierLabel() + " trying_next=" + ONLINE_CARRIER_LABELS[next]);
+
+                handler.postDelayed(() -> prepareOnlineCarrierAtIndex(next), 450L);
+                return true;
+            });
+
+            Log.i("FieldVox", "Preparing timeout-safe carrier: "
+                    + ONLINE_CARRIER_LABELS[index]
+                    + " url=" + ONLINE_CARRIER_URLS[index]);
+            exportStatus.setText("Preparing timeout-safe carrier: " + ONLINE_CARRIER_LABELS[index]);
+
+            mp.prepareAsync();
+
+            handler.postDelayed(() -> {
+                if (!onlineCarrierActive) {
+                    return;
+                }
+
+                if (prepareToken != onlineCarrierPrepareToken) {
+                    return;
+                }
+
+                if (onlineCarrierPrepared) {
+                    return;
+                }
+
+                String label = ONLINE_CARRIER_LABELS[prepareIndex];
+                int next = normalizeOnlineCarrierIndex(prepareIndex + 1);
+
+                Log.w("FieldVox", "Carrier prepare timeout: " + label
+                        + " -> skipping to " + ONLINE_CARRIER_LABELS[next]
+                        + " so queued proximity gates do not stall");
+
+                try {
+                    if (onlineCarrierPlayer != null) {
+                        onlineCarrierPlayer.release();
+                    }
+                } catch (Exception ignored) {}
+
+                onlineCarrierPlayer = null;
+                onlineCarrierPrepared = false;
+                onlineCarrierPrepareToken++;
+
+                handler.postDelayed(() -> prepareOnlineCarrierAtIndex(next), 300L);
+            }, 8500L);
+        } catch (Exception e) {
+            onlineCarrierPrepared = false;
+            int next = normalizeOnlineCarrierIndex(index + 1);
+
+            Log.e("FieldVox", "Timeout-safe sweep prepare exception source="
+                    + ONLINE_CARRIER_LABELS[index]
+                    + " next=" + ONLINE_CARRIER_LABELS[next]
+                    + " error=" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+
+            handler.postDelayed(() -> prepareOnlineCarrierAtIndex(next), 450L);
+        }
+    }
+
+
+
+    private void stopOnlineCarrierPlayerOnly() {
+        MediaPlayer mp = onlineCarrierPlayer;
+        onlineCarrierPlayer = null;
+        if (mp != null) {
+            try { mp.stop(); } catch (Exception ignored) {}
+            try { mp.release(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void stopOnlineVoxCarrier() {
+        stopOnlineCarrierAutoGate();
+        onlineCarrierActive = false;
+        onlineCarrierPrepared = false;
+        onlineCarrierPrepareToken++;
+        onlineCarrierGateOpen = false;
+        onlineCarrierNextAllowedGateMs = 0L;
+        onlineCarrierGateOpenUntilMs = 0L;
+        onlineCarrierGateToken++;
+        onlineCarrierStartupTestDone = false;
+        stopOnlineCarrierSensors();
+        stopOnlineCarrierPlayerOnly();
+    }
+
+
+
+    private void autoStartEverythingOnLaunch() {
+        if (liveMonitorRunning) {
+            updateLiveButtons();
+            return;
+        }
+
+        speakerMonitorEnabled = false;
+        updateSpeakerMonitorButton();
+
+        if (!hasMicPermission()) {
+            requestMicPermissionForLiveMonitor();
+            String msg = "Microphone permission needed once. After permission is granted, FieldVox opens directly into live capture.";
+            exportStatus.setText(msg);
+            status.setText(msg);
+            updateLiveButtons();
+            return;
+        }
+
+        String result = startLiveMonitor();
+        String carrier = startOnlineVoxCarrier();
+        exportStatus.setText("KIRO/KOMO local news VOX + live capture started.\n" + result + "\n" + carrier);
+        status.setText(result + "\n" + carrier);
+        updateLiveButtons();
+    }
+
+
+
+
+    private void updateSpeakerMonitorButton() {
+        if (speakerMonitorButton != null) {
+            speakerMonitorButton.setText(speakerMonitorEnabled ? "Speaker Monitor: On" : "Speaker Monitor: Off");
+        }
+    }
+
+    private void toggleSpeakerMonitor() {
+        speakerMonitorEnabled = !speakerMonitorEnabled;
+        updateSpeakerMonitorButton();
+        String msg = speakerMonitorEnabled
+                ? "Speaker Monitor ON. You may hear raw mic noise/hiss. Turn it OFF for silent listening/recording."
+                : "Speaker Monitor OFF. Live Monitor still records actual mic audio silently. This is the recommended default.";
+        exportStatus.setText(msg);
+        status.setText(msg);
+    }
+
+    private short boostedSample(short in) {
+        int v = Math.round((float)in * liveOutputGain);
+        if (v > 32767) return 32767;
+        if (v < -32768) return -32768;
+        return (short)v;
+    }
+
+
+    private boolean hasMicPermission() {
+        return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestMicPermissionForLiveMonitor() {
+        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, LIVE_PERMISSION_REQUEST);
+    }
+
+    private static byte[] makeWavHeader(long pcmBytes) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(44);
+        b.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+
+        int byteRate = LIVE_SAMPLE_RATE * 2;
+        int blockAlign = 2;
+        int riffSize = (int)Math.min(36L + pcmBytes, 0x7fffffffL);
+        int dataSize = (int)Math.min(pcmBytes, 0x7fffffffL);
+
+        b.put(new byte[]{'R','I','F','F'});
+        b.putInt(riffSize);
+        b.put(new byte[]{'W','A','V','E'});
+        b.put(new byte[]{'f','m','t',' '});
+        b.putInt(16);
+        b.putShort((short)1);
+        b.putShort((short)1);
+        b.putInt(LIVE_SAMPLE_RATE);
+        b.putInt(byteRate);
+        b.putShort((short)blockAlign);
+        b.putShort((short)16);
+        b.put(new byte[]{'d','a','t','a'});
+        b.putInt(dataSize);
+        return b.array();
+    }
+
+    private static void writeJsonLine(java.io.FileOutputStream out, String line) throws IOException {
+        out.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        out.write('\n');
+        out.flush();
+    }
+
+    private static void rewriteWavHeader(File wav, long pcmBytes) throws IOException {
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wav, "rw")) {
+            raf.seek(0);
+            raf.write(makeWavHeader(pcmBytes));
+        }
+    }
+
+    private String startLiveMonitor() {
+        if (liveMonitorRunning) {
+            return "Realtime EVP monitor already running.";
+        }
+
+        if (!hasMicPermission()) {
+            requestMicPermissionForLiveMonitor();
+            return "Microphone permission requested. Allow it, then tap Live Monitor again.";
+        }
+
+        File dir = new File(getFilesDir(), "fieldvox-sessions");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            return "Could not create session folder.";
+        }
+
+        final long startMs = System.currentTimeMillis();
+        final String stem = "session-" + (startMs / 1000L) + "-live";
+        final File jsonl = new File(dir, stem + ".jsonl");
+        final File wav = new File(dir, stem + ".wav");
+
+        liveMonitorRunning = true;
+        liveNoiseFloor = 300.0;
+        liveLastTriggerMs = 0L;
+
+        if (liveButton != null) {
+            updateLiveButtons();
+        }
+
+        liveMonitorThread = new Thread(() -> {
+            AudioRecord record = null;
+            AudioTrack track = null;
+            long pcmBytes = 0L;
+            long lastUiMs = 0L;
+
+            try (java.io.FileOutputStream jsonOut = new java.io.FileOutputStream(jsonl, false);
+                 java.io.FileOutputStream wavOut = new java.io.FileOutputStream(wav, false)) {
+
+                writeJsonLine(jsonOut,
+                        "{\"event\":\"live_monitor_start\",\"mode\":\"realtime_evp_monitor\",\"sample_rate\":48000,"
+                        + "\"source\":\"microphone\",\"online_carrier\":true,\"carrier\":\"kiro_komo_local_news_talk_phonetic_sweep\",\"generated_words\":false,\"word_bank\":false,"
+                        + "\"note\":\"actual microphone audio only; no app-generated speech\",\"unix_ms\":"
+                        + startMs + "}");
+
+                wavOut.write(makeWavHeader(0));
+
+                int minIn = AudioRecord.getMinBufferSize(
+                        LIVE_SAMPLE_RATE,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT);
+
+                int minOut = AudioTrack.getMinBufferSize(
+                        LIVE_SAMPLE_RATE,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT);
+
+                int bufferBytes = Math.max(4096, Math.max(minIn, minOut) * 2);
+                if (bufferBytes < 4096) {
+                    bufferBytes = 4096;
+                }
+
+                record = new AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        LIVE_SAMPLE_RATE,
+                        AudioFormat.CHANNEL_IN_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        bufferBytes);
+
+                if (record.getState() != AudioRecord.STATE_INITIALIZED) {
+                    throw new IOException("AudioRecord failed to initialize.");
+                }
+
+                track = new AudioTrack(
+                        AudioManager.STREAM_MUSIC,
+                        LIVE_SAMPLE_RATE,
+                        AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT,
+                        bufferBytes,
+                        AudioTrack.MODE_STREAM);
+
+                short[] samples = new short[bufferBytes / 2];
+                short[] monitorSamples = new short[bufferBytes / 2];
+                byte[] pcm = new byte[bufferBytes];
+
+                record.startRecording();
+                track.setVolume(1.0f);
+                track.play();
+
+                handler.post(() -> {
+                    status.setText("Realtime EVP monitor started\\nUse headphones to avoid feedback.\\nNo word bank. No generated speech.");
+                    refreshSessions();
+                });
+
+                while (liveMonitorRunning) {
+                    int n = record.read(samples, 0, samples.length);
+                    if (n <= 0) {
+                        continue;
+                    }
+
+                    long sumSquares = 0L;
+                    int peak = 0;
+
+                    for (int i = 0; i < n; i++) {
+                        int v = samples[i];
+                        int av = Math.abs(v);
+                        if (av > peak) {
+                            peak = av;
+                        }
+                        sumSquares += (long)v * (long)v;
+                        pcm[i * 2] = (byte)(v & 0xff);
+                        pcm[i * 2 + 1] = (byte)((v >> 8) & 0xff);
+                        monitorSamples[i] = boostedSample(samples[i]);
+                    }
+
+                    wavOut.write(pcm, 0, n * 2);
+                    pcmBytes += (long)n * 2L;
+
+                    if (speakerMonitorEnabled) {
+                        track.write(monitorSamples, 0, n);
+                    }
+
+                    double rms = Math.sqrt((double)sumSquares / (double)n);
+                    if (rms > liveNoiseFloor) {
+                        liveNoiseFloor = liveNoiseFloor * 0.95 + rms * 0.05;
+                    } else {
+                        liveNoiseFloor = liveNoiseFloor * 0.995 + rms * 0.005;
+                    }
+
+                    double gate = Math.max(900.0, liveNoiseFloor * 3.0);
+                    long nowMs = System.currentTimeMillis();
+
+                    if (rms >= gate && nowMs - liveLastTriggerMs >= Math.max(250, cooldownMs)) {
+                        liveLastTriggerMs = nowMs;
+                        long offsetMs = nowMs - startMs;
+                        writeJsonLine(jsonOut,
+                                "{\"event\":\"trigger\",\"mode\":\"realtime_evp_monitor\",\"source\":\"microphone\","
+                                + "\"generated_words\":false,\"word_bank\":false,"
+                                + "\"offset_ms\":" + offsetMs
+                                + ",\"rms\":" + String.format(java.util.Locale.US, "%.2f", rms)
+                                + ",\"peak\":" + peak
+                                + ",\"gate\":" + String.format(java.util.Locale.US, "%.2f", gate)
+                                + ",\"unix_ms\":" + nowMs + "}");
+                    }
+
+                    if (nowMs - lastUiMs > 700L) {
+                        lastUiMs = nowMs;
+                        final int seconds = (int)((nowMs - startMs) / 1000L);
+                        final String msg = "Realtime EVP monitor: " + seconds + "s\\n"
+                                + "Mic -> live audio output. Use headphones.\\n"
+                                + "RMS " + String.format(java.util.Locale.US, "%.0f", rms)
+                                + " / gate " + String.format(java.util.Locale.US, "%.0f", gate)
+                                + " / peak " + peak + "\\n"
+                                + "No word bank. No generated speech.";
+                        handler.post(() -> status.setText(msg));
+                    }
+                }
+
+                long stopMs = System.currentTimeMillis();
+                writeJsonLine(jsonOut,
+                        "{\"event\":\"live_monitor_stop\",\"mode\":\"realtime_evp_monitor\",\"pcm_bytes\":"
+                        + pcmBytes + ",\"duration_ms\":" + (stopMs - startMs)
+                        + ",\"generated_words\":false,\"word_bank\":false,\"unix_ms\":" + stopMs + "}");
+
+            } catch (Exception e) {
+                final String err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                handler.post(() -> status.setText("Realtime EVP monitor error: " + err));
+            } finally {
+                try {
+                    if (record != null) {
+                        try { record.stop(); } catch (Exception ignored) {}
+                        record.release();
+                    }
+                } catch (Exception ignored) {}
+
+                try {
+                    if (track != null) {
+                        try { track.stop(); } catch (Exception ignored) {}
+                        track.release();
+                    }
+                } catch (Exception ignored) {}
+
+                try {
+                    rewriteWavHeader(wav, pcmBytes);
+                } catch (Exception ignored) {}
+
+                liveMonitorRunning = false;
+                handler.post(() -> {
+                    if (liveButton != null) {
+                        updateLiveButtons();
+                    }
+                    updateLiveButtons();
+                    refreshSessions();
+                    exportStatus.setText("Auto live session saved:\\n" + jsonl.getName() + "\\n" + wav.getName());
+                });
+            }
+        }, "FieldVox-Realtime-EVP-Monitor");
+
+        liveMonitorThread.start();
+
+        return "KIRO/KOMO local news VOX starting. No word bank; no TTS.";
+    }
+
+    private String stopLiveMonitor() {
+        if (!liveMonitorRunning) {
+            updateLiveButtons();
+            return "Auto live session is not running.";
+        }
+
+        liveMonitorRunning = false;
+        updateLiveButtons();
+        return "Auto live session finalizing WAV header...";
+    }
+
+
+    private void toggleLiveMonitor() {
+        String msg;
+        if (liveMonitorRunning) {
+            msg = "Auto Live is already running.\nNo Stop button needed. Leave or close the app to finalize the WAV.";
+        } else {
+            autoStartEverythingOnLaunch();
+            msg = "Auto Live is arming.";
+        }
+        exportStatus.setText(msg);
+        status.setText(msg);
+        updateLiveButtons();
+    }
+
+
+    private void toggleRun() {
+        String msg;
+        if (liveMonitorRunning) {
+            msg = "Hands-free auto mode is already live.\nNo Start/Stop needed. Leave or close the app to finalize the session.";
+        } else {
+            autoStartEverythingOnLaunch();
+            msg = "Hands-free auto mode is arming.\nNo Start/Stop needed.";
+        }
+        exportStatus.setText(msg);
+        status.setText(msg);
+        updateLiveButtons();
+    }
+
+
 
     private void toggleControls() {
         controlsVisible = !controlsVisible;
         controlPanel.setVisibility(controlsVisible ? View.VISIBLE : View.GONE);
     }
 
-    @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
@@ -549,7 +1604,7 @@ public class MainActivity extends Activity {
         subtitle.setShadowLayer(8.0f, 0.0f, 0.0f, Color.WHITE);
         root.addView(subtitle);
 
-        TextView stage = makeLabel("Stage 1J-A • session manifest console", Color.LTGRAY, 12);
+        TextView stage = makeLabel("Stage 1M-J • KIRO/KOMO local news VOX", Color.LTGRAY, 12);
         stage.setPadding(0, dp(this, 8), 0, dp(this, 18));
         root.addView(stage);
 
@@ -593,7 +1648,7 @@ public class MainActivity extends Activity {
 
         root.addView(bottom);
 
-        exportStatus = makeLabel("Exports: Downloads/FieldVoxLab • Share uses content URIs", Color.rgb(255, 230, 160), 12);
+        exportStatus = makeLabel("Local news/talk grains • no word bank/TTS", Color.rgb(255, 230, 160), 12);
         exportStatus.setPadding(0, dp(this, 4), 0, dp(this, 8));
         root.addView(exportStatus);
 
@@ -624,9 +1679,19 @@ public class MainActivity extends Activity {
         manifestButton.setTextSize(14);
         manifestButton.setPadding(0, 0, 0, 0);
 
+        liveButton = makeWideButton("Live Monitor");
+        liveButton.setTextSize(14);
+        liveButton.setPadding(0, 0, 0, 0);
+
+        speakerMonitorButton = makeWideButton("Speaker Monitor: Off");
+        speakerMonitorButton.setTextSize(14);
+        speakerMonitorButton.setPadding(0, 0, 0, 0);
+
         controlPanel.addView(exportAllButton);
         controlPanel.addView(shareAllButton);
         controlPanel.addView(manifestButton);
+        controlPanel.addView(liveButton);
+        controlPanel.addView(speakerMonitorButton);
         controlPanel.addView(thresholdLabel);
         controlPanel.addView(thresholdBar);
         controlPanel.addView(cooldownLabel);
@@ -664,32 +1729,26 @@ public class MainActivity extends Activity {
         setContentView(root);
 
         thresholdBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 threshold = 0.50f + ((float) progress / 100.0f);
                 nativeSetThreshold(threshold);
                 updateLabels();
             }
 
-            @Override
             public void onStartTrackingTouch(SeekBar seekBar) {}
 
-            @Override
             public void onStopTrackingTouch(SeekBar seekBar) {}
         });
 
         cooldownBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 cooldownMs = 100 + progress;
                 nativeSetCooldownMs(cooldownMs);
                 updateLabels();
             }
 
-            @Override
             public void onStartTrackingTouch(SeekBar seekBar) {}
 
-            @Override
             public void onStopTrackingTouch(SeekBar seekBar) {}
         });
 
@@ -737,11 +1796,48 @@ public class MainActivity extends Activity {
             status.setText(nativeStatus());
         });
 
+        liveButton.setOnClickListener(v -> toggleLiveMonitor());
+        speakerMonitorButton.setOnClickListener(v -> toggleSpeakerMonitor());
+        updateSpeakerMonitorButton();
+
         handler.post(tick);
+    
+        handler.postDelayed(() -> autoStartEverythingOnLaunch(), 700);
+}
+
+
+    protected void onResume() {
+        super.onResume();
+        handler.postDelayed(() -> autoStartEverythingOnLaunch(), 350);
     }
 
-    @Override
+
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == LIVE_PERMISSION_REQUEST) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                handler.postDelayed(() -> autoStartEverythingOnLaunch(), 250);
+            } else {
+                String msg = "Microphone permission denied. FieldVox cannot auto-start live capture without mic permission.";
+                exportStatus.setText(msg);
+                status.setText(msg);
+                updateLiveButtons();
+            }
+        }
+    }
+
+
+    protected void onStop() {
+        stopOnlineVoxCarrier();
+        liveMonitorRunning = false;
+        updateLiveButtons();
+        super.onStop();
+    }
+
     protected void onDestroy() {
+        stopOnlineVoxCarrier();
+        liveMonitorRunning = false;
         nativeStop();
         handler.removeCallbacks(tick);
         super.onDestroy();
@@ -771,7 +1867,6 @@ public class MainActivity extends Activity {
             fill.setStyle(Paint.Style.FILL);
         }
 
-        @Override
         protected void onDraw(Canvas c) {
             super.onDraw(c);
 
@@ -858,7 +1953,6 @@ public class MainActivity extends Activity {
             phase = (phase + 1) % 1000;
         }
 
-        @Override
         protected void onDraw(Canvas c) {
             super.onDraw(c);
 

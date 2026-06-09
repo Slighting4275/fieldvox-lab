@@ -11,7 +11,7 @@ android {
         minSdk = 30
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0-stage1j-a-export-session-manifest"
+        versionName = "0.1.0-stage1m-j-kiro-komo-local-news-vox"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
