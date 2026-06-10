@@ -11,13 +11,17 @@
 #include <unistd.h>
 
 /*
- * FieldVox Stage 1O-B Native Source Provenance + Timeline Audit
+ * FieldVox Stage 1P-A Native Source Provenance + Timeline + Sweep Schedule Audit
  * GPL-3.0-or-later project code.
  *
  * Native C responsibilities:
  * - maintain a ring buffer of recent stream/sensor/gate/hit timeline events
- * - serialize per-hit source audit JSON with timeline_snapshot
- * - write per-hit JSON, JSONL ledger, and README under app-private hit bundle
+ * - generate deterministic evidence-grade sweep scheduler records
+ * - serialize per-hit source audit JSON with timeline_snapshot and sweep_engine
+ * - write per-hit JSON, JSONL ledgers, slot catalog, scheduler manifest, and README
+ *
+ * Stage 1P-A does not alter audio playback yet. Java/Android still owns playback.
+ * Native C records the deterministic schedule evidence layer first.
  *
  * Native C does not:
  * - generate words
@@ -28,13 +32,14 @@
  */
 
 static const unsigned char FVSA_MAGIC_BLOB[] = {
-    0x46, 0x56, 0x53, 0x41, 0x01, 0x0b, 0x43, 0x4a,
+    0x46, 0x56, 0x53, 0x41, 0x01, 0x1a, 0x43, 0x4a,
     0x4e, 0x49, 0x00, 0x1f, 0x0a, 0x7e, 0x5a, 0xc3
 };
 
 #define FVSA_TIMELINE_CAP 256
 #define FVSA_TIMELINE_KIND_CAP 64
 #define FVSA_TIMELINE_DETAIL_CAP 1024
+#define FVSA_SWEEP_SLOT_COUNT 4
 
 typedef struct FvsaTimelineEvent {
     long long unix_ms;
@@ -43,9 +48,39 @@ typedef struct FvsaTimelineEvent {
     char detail[FVSA_TIMELINE_DETAIL_CAP];
 } FvsaTimelineEvent;
 
+typedef struct FvsaSweepSlot {
+    int slot;
+    const char *station_uuid;
+    const char *station_name;
+    const char *country_code;
+    const char *language;
+    const char *stream_url_hash;
+    const char *source_label;
+} FvsaSweepSlot;
+
+typedef struct FvsaSweepEvent {
+    unsigned long long schedule_seq;
+    unsigned long long seed;
+    long long unix_ms;
+    int slot;
+    int dwell_ms;
+    int jitter_ms;
+    const FvsaSweepSlot *slot_info;
+} FvsaSweepEvent;
+
 static pthread_mutex_t fvsa_timeline_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t fvsa_sweep_mutex = PTHREAD_MUTEX_INITIALIZER;
 static FvsaTimelineEvent fvsa_timeline[FVSA_TIMELINE_CAP];
 static unsigned long long fvsa_timeline_seq = 0ULL;
+static unsigned long long fvsa_sweep_seq = 0ULL;
+static unsigned long long fvsa_sweep_state = 0x4656534153503141ULL; /* "FVSASP1A" */
+
+static const FvsaSweepSlot fvsa_slots[FVSA_SWEEP_SLOT_COUNT] = {
+    {0, "stage1p-a-slot-kiro", "KIRO Newsradio Seattle 97.3", "US", "en", "hash_pending_kiro_2643_48_aac", "KIRO Newsradio Seattle 97.3"},
+    {1, "stage1p-a-slot-nwnews", "Northwest Newsradio KOMO/KNWN", "US", "en", "hash_pending_northwest_newsradio", "Northwest Newsradio KOMO/KNWN"},
+    {2, "stage1p-a-slot-kuow", "KUOW", "US", "en", "hash_pending_kuow", "KUOW"},
+    {3, "stage1p-a-slot-bbc", "BBC", "GB", "en", "hash_pending_bbc", "BBC"}
+};
 
 static long long fvsa_now_ms(void) {
     struct timespec ts;
@@ -62,6 +97,16 @@ static uint64_t fvsa_fnv1a64(const unsigned char *data, size_t len) {
         h *= 1099511628211ULL;
     }
     return h;
+}
+
+static unsigned long long fvsa_xorshift64star(unsigned long long x) {
+    if (x == 0ULL) {
+        x = 0x9e3779b97f4a7c15ULL;
+    }
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    return x * 2685821657736338717ULL;
 }
 
 static char *fvsa_strdup_local(const char *s) {
@@ -252,6 +297,202 @@ static char *fvsa_timeline_snapshot_json(long long window_ms) {
     return out;
 }
 
+static FvsaSweepEvent fvsa_sweep_next_c(const char *hit_id, const char *hit_json) {
+    uint64_t hit_mix = fvsa_fnv1a64((const unsigned char *)(hit_id ? hit_id : ""), strlen(hit_id ? hit_id : ""));
+    hit_mix ^= fvsa_fnv1a64((const unsigned char *)(hit_json ? hit_json : ""), strlen(hit_json ? hit_json : ""));
+
+    pthread_mutex_lock(&fvsa_sweep_mutex);
+
+    fvsa_sweep_state ^= hit_mix;
+    fvsa_sweep_state = fvsa_xorshift64star(fvsa_sweep_state + fvsa_sweep_seq + 0x9e3779b97f4a7c15ULL);
+
+    FvsaSweepEvent ev;
+    ev.schedule_seq = fvsa_sweep_seq++;
+    ev.seed = fvsa_sweep_state;
+    ev.unix_ms = fvsa_now_ms();
+    ev.slot = (int)(ev.seed % FVSA_SWEEP_SLOT_COUNT);
+    ev.dwell_ms = 160 + (int)((ev.seed >> 8) % 121ULL);
+    ev.jitter_ms = (int)((ev.seed >> 17) % 61ULL);
+    ev.slot_info = &fvsa_slots[ev.slot];
+
+    pthread_mutex_unlock(&fvsa_sweep_mutex);
+
+    return ev;
+}
+
+static char *fvsa_sweep_engine_json(const FvsaSweepEvent *ev) {
+    if (ev == NULL || ev->slot_info == NULL) {
+        return fvsa_strdup_local("{}");
+    }
+
+    size_t cap = 2048;
+    char *out = (char *)malloc(cap);
+    if (out == NULL) {
+        return NULL;
+    }
+
+    snprintf(
+        out,
+        cap,
+        "{"
+        "\"stage\":\"1P-A\","
+        "\"scheduler\":\"native_c_deterministic\","
+        "\"seed_hex\":\"%016llx\","
+        "\"slot_count\":%d,"
+        "\"active_slot\":%d,"
+        "\"dwell_ms\":%d,"
+        "\"jitter_ms\":%d,"
+        "\"overlap_policy\":\"single_open_slot\","
+        "\"schedule_seq\":%llu,"
+        "\"stationuuid\":\"%s\","
+        "\"station_name\":\"%s\","
+        "\"countrycode\":\"%s\","
+        "\"language\":\"%s\","
+        "\"stream_url_hash\":\"%s\""
+        "}",
+        (unsigned long long)ev->seed,
+        FVSA_SWEEP_SLOT_COUNT,
+        ev->slot,
+        ev->dwell_ms,
+        ev->jitter_ms,
+        (unsigned long long)ev->schedule_seq,
+        ev->slot_info->station_uuid,
+        ev->slot_info->station_name,
+        ev->slot_info->country_code,
+        ev->slot_info->language,
+        ev->slot_info->stream_url_hash
+    );
+
+    return out;
+}
+
+static char *fvsa_sweep_event_json(const FvsaSweepEvent *ev) {
+    if (ev == NULL || ev->slot_info == NULL) {
+        return fvsa_strdup_local("{}\n");
+    }
+
+    size_t cap = 2048;
+    char *out = (char *)malloc(cap);
+    if (out == NULL) {
+        return NULL;
+    }
+
+    snprintf(
+        out,
+        cap,
+        "{"
+        "\"event\":\"sweep_slot\","
+        "\"event_type\":\"sweep_slot\","
+        "\"stage\":\"1P-A\","
+        "\"seq\":%llu,"
+        "\"unix_ms\":%lld,"
+        "\"slot\":%d,"
+        "\"stationuuid\":\"%s\","
+        "\"station_name\":\"%s\","
+        "\"countrycode\":\"%s\","
+        "\"language\":\"%s\","
+        "\"stream_url_hash\":\"%s\","
+        "\"dwell_ms\":%d,"
+        "\"jitter_ms\":%d,"
+        "\"seed_hex\":\"%016llx\","
+        "\"scheduler\":\"native_c_deterministic\","
+        "\"overlap_policy\":\"single_open_slot\","
+        "\"generated_words\":false,"
+        "\"word_bank\":false,"
+        "\"tts\":false"
+        "}\n",
+        (unsigned long long)ev->schedule_seq,
+        ev->unix_ms,
+        ev->slot,
+        ev->slot_info->station_uuid,
+        ev->slot_info->station_name,
+        ev->slot_info->country_code,
+        ev->slot_info->language,
+        ev->slot_info->stream_url_hash,
+        ev->dwell_ms,
+        ev->jitter_ms,
+        (unsigned long long)ev->seed
+    );
+
+    return out;
+}
+
+static char *fvsa_source_slots_json(void) {
+    size_t cap = 4096;
+    char *out = (char *)malloc(cap);
+    if (out == NULL) {
+        return NULL;
+    }
+
+    size_t len = 0;
+    int wrote = snprintf(out + len, cap - len,
+        "{\"event_type\":\"source_slots\",\"stage\":\"1P-A\",\"slot_count\":%d,\"slots\":[",
+        FVSA_SWEEP_SLOT_COUNT);
+    if (wrote < 0 || (size_t)wrote >= cap - len) {
+        free(out);
+        return NULL;
+    }
+    len += (size_t)wrote;
+
+    for (int i = 0; i < FVSA_SWEEP_SLOT_COUNT; i++) {
+        const FvsaSweepSlot *s = &fvsa_slots[i];
+        wrote = snprintf(
+            out + len,
+            cap - len,
+            "%s{\"slot\":%d,\"stationuuid\":\"%s\",\"station_name\":\"%s\",\"countrycode\":\"%s\",\"language\":\"%s\",\"stream_url_hash\":\"%s\",\"source_label\":\"%s\"}",
+            i == 0 ? "" : ",",
+            s->slot,
+            s->station_uuid,
+            s->station_name,
+            s->country_code,
+            s->language,
+            s->stream_url_hash,
+            s->source_label
+        );
+        if (wrote < 0 || (size_t)wrote >= cap - len) {
+            break;
+        }
+        len += (size_t)wrote;
+    }
+
+    snprintf(out + len, cap - len,
+        "],\"generated_words\":false,\"word_bank\":false,\"tts\":false}\n");
+    return out;
+}
+
+static char *fvsa_sweep_manifest_json(void) {
+    size_t cap = 2048;
+    char *out = (char *)malloc(cap);
+    if (out == NULL) {
+        return NULL;
+    }
+
+    snprintf(
+        out,
+        cap,
+        "{"
+        "\"event_type\":\"sweep_manifest\","
+        "\"stage\":\"1P-A\","
+        "\"scheduler\":\"native_c_deterministic\","
+        "\"slot_count\":%d,"
+        "\"overlap_policy\":\"single_open_slot\","
+        "\"dwell_ms_min\":160,"
+        "\"dwell_ms_max\":280,"
+        "\"jitter_ms_min\":0,"
+        "\"jitter_ms_max\":60,"
+        "\"audio_engine_changed\":false,"
+        "\"java_playback_owner\":true,"
+        "\"native_scheduler_evidence_only\":true,"
+        "\"generated_words\":false,"
+        "\"word_bank\":false,"
+        "\"tts\":false"
+        "}\n",
+        FVSA_SWEEP_SLOT_COUNT
+    );
+
+    return out;
+}
+
 static int fvsa_write_all(int fd, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
@@ -411,6 +652,28 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         }
     }
 
+    FvsaSweepEvent sweep_ev = fvsa_sweep_next_c(hit, hit_json);
+    char *sweep_engine_json = fvsa_sweep_engine_json(&sweep_ev);
+    char *sweep_event_json = fvsa_sweep_event_json(&sweep_ev);
+    char *slots_json = fvsa_source_slots_json();
+    char *manifest_json = fvsa_sweep_manifest_json();
+
+    if (sweep_engine_json == NULL || sweep_event_json == NULL || slots_json == NULL || manifest_json == NULL) {
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
+        free(hit_json_escaped);
+        free(sweep_engine_json);
+        free(sweep_event_json);
+        free(slots_json);
+        free(manifest_json);
+        return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED sweep_alloc");
+    }
+
+    fvsa_timeline_record_c("sweep_slot", sweep_event_json);
+
     char *timeline_json = fvsa_timeline_snapshot_json(60000LL);
     if (timeline_json == NULL) {
         timeline_json = fvsa_strdup_local("[]");
@@ -422,11 +685,15 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         free(hit_esc);
         free(hit_file_safe);
         free(hit_json_escaped);
+        free(sweep_engine_json);
+        free(sweep_event_json);
+        free(slots_json);
+        free(manifest_json);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED timeline_alloc");
     }
 
     long long now_ms = fvsa_now_ms();
-    size_t cap = strlen(hit_json) + strlen(timeline_json) + strlen(dir) + strlen(hit_esc) + strlen(magic_hex) + 8192;
+    size_t cap = strlen(hit_json) + strlen(timeline_json) + strlen(sweep_engine_json) + strlen(dir) + strlen(hit_esc) + strlen(magic_hex) + 12000;
     char *audit = (char *)malloc(cap);
     if (audit == NULL) {
         free(dir);
@@ -436,6 +703,10 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         free(hit_file_safe);
         free(hit_json_escaped);
         free(timeline_json);
+        free(sweep_engine_json);
+        free(sweep_event_json);
+        free(slots_json);
+        free(manifest_json);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED alloc_audit");
     }
 
@@ -445,14 +716,15 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         "{"
         "\"event\":\"source_audit\","
         "\"event_type\":\"source_audit\","
-        "\"stage\":\"1O-B\","
-        "\"audit_format_version\":2,"
+        "\"stage\":\"1P-A\","
+        "\"audit_format_version\":3,"
         "\"native_writer\":\"c_jni\","
         "\"implementation_language\":\"C\","
         "\"binary_magic_hex\":\"%s\","
         "\"audit_unix_ms\":%lld,"
         "\"hit_id\":\"%s\","
         "\"hit_json_fnv1a64\":\"%s\","
+        "\"sweep_engine\":%s,"
         "\"timeline_window_ms\":60000,"
         "\"timeline_snapshot\":%s,"
         "\"source_hit_json\":%s%s%s,"
@@ -467,6 +739,7 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         now_ms,
         hit_esc,
         hash_hex,
+        sweep_engine_json,
         timeline_json,
         raw_is_object ? "" : "\"",
         raw_is_object ? raw_object : hit_json_escaped,
@@ -481,15 +754,23 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         free(hit_file_safe);
         free(hit_json_escaped);
         free(timeline_json);
+        free(sweep_engine_json);
+        free(sweep_event_json);
+        free(slots_json);
+        free(manifest_json);
         free(audit);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED snprintf");
     }
 
-    size_t path_cap = strlen(dir) + strlen(hit_file_safe) + 128;
+    size_t path_cap = strlen(dir) + strlen(hit_file_safe) + 160;
     char *per_hit_path = (char *)malloc(path_cap);
     char *ledger_path = (char *)malloc(path_cap);
     char *readme_path = (char *)malloc(path_cap);
-    if (per_hit_path == NULL || ledger_path == NULL || readme_path == NULL) {
+    char *schedule_path = (char *)malloc(path_cap);
+    char *slots_path = (char *)malloc(path_cap);
+    char *manifest_path = (char *)malloc(path_cap);
+    if (per_hit_path == NULL || ledger_path == NULL || readme_path == NULL ||
+        schedule_path == NULL || slots_path == NULL || manifest_path == NULL) {
         free(dir);
         free(hit);
         free(hit_json);
@@ -497,24 +778,38 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         free(hit_file_safe);
         free(hit_json_escaped);
         free(timeline_json);
+        free(sweep_engine_json);
+        free(sweep_event_json);
+        free(slots_json);
+        free(manifest_json);
         free(audit);
         free(per_hit_path);
         free(ledger_path);
         free(readme_path);
+        free(schedule_path);
+        free(slots_path);
+        free(manifest_path);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED alloc_path");
     }
 
     snprintf(per_hit_path, path_cap, "%s/source_audit_%s.json", dir, hit_file_safe);
     snprintf(ledger_path, path_cap, "%s/fieldvox-source-audit.jsonl", dir);
     snprintf(readme_path, path_cap, "%s/SOURCE_AUDIT_README.txt", dir);
+    snprintf(schedule_path, path_cap, "%s/sweep_schedule.jsonl", dir);
+    snprintf(slots_path, path_cap, "%s/source_slots.json", dir);
+    snprintf(manifest_path, path_cap, "%s/sweep_manifest.json", dir);
 
     const char *readme =
         "FieldVox Native Source Audit\n"
         "\n"
         "These files are generated by native C/JNI code.\n"
-        "Stage 1O-B adds a native C ring buffer timeline snapshot to each marked hit.\n"
-        "The timeline may include carrier preparation, ready/timeout events, ADB test triggers,\n"
-        "hit events, and full hit JSON details containing stream, gate, and sensor metadata.\n"
+        "Stage 1P-A adds a deterministic native C sweep schedule evidence layer.\n"
+        "This stage records scheduler metadata and source slots but does not change playback.\n"
+        "\n"
+        "sweep_manifest.json describes scheduler policy.\n"
+        "source_slots.json describes source slot identities.\n"
+        "sweep_schedule.jsonl appends one deterministic sweep_slot event per marked hit.\n"
+        "source_audit_*.json embeds sweep_engine, timeline_snapshot, and source_hit_json.\n"
         "\n"
         "The native writer does not generate words, does not use a word bank, does not use TTS,\n"
         "and does not open network connections.\n"
@@ -522,7 +817,10 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
 
     if (fvsa_write_file(per_hit_path, audit, 0) != 0 ||
         fvsa_write_file(ledger_path, audit, 1) != 0 ||
-        fvsa_write_file(readme_path, readme, 0) != 0) {
+        fvsa_write_file(readme_path, readme, 0) != 0 ||
+        fvsa_write_file(schedule_path, sweep_event_json, 1) != 0 ||
+        fvsa_write_file(slots_path, slots_json, 0) != 0 ||
+        fvsa_write_file(manifest_path, manifest_json, 0) != 0) {
         free(dir);
         free(hit);
         free(hit_json);
@@ -530,20 +828,29 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         free(hit_file_safe);
         free(hit_json_escaped);
         free(timeline_json);
+        free(sweep_engine_json);
+        free(sweep_event_json);
+        free(slots_json);
+        free(manifest_json);
         free(audit);
         free(per_hit_path);
         free(ledger_path);
         free(readme_path);
+        free(schedule_path);
+        free(slots_path);
+        free(manifest_path);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED write");
     }
 
-    char result[512];
+    char result[640];
     snprintf(
         result,
         sizeof(result),
-        "NATIVE_SOURCE_AUDIT_OK hit_id=%s hash=%s writer=c_jni timeline=ring_buffer",
+        "NATIVE_SOURCE_AUDIT_OK hit_id=%s hash=%s writer=c_jni timeline=ring_buffer sweep=slot_%d seq=%llu",
         hit,
-        hash_hex
+        hash_hex,
+        sweep_ev.slot,
+        (unsigned long long)sweep_ev.schedule_seq
     );
 
     free(dir);
@@ -553,10 +860,17 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
     free(hit_file_safe);
     free(hit_json_escaped);
     free(timeline_json);
+    free(sweep_engine_json);
+    free(sweep_event_json);
+    free(slots_json);
+    free(manifest_json);
     free(audit);
     free(per_hit_path);
     free(ledger_path);
     free(readme_path);
+    free(schedule_path);
+    free(slots_path);
+    free(manifest_path);
 
     return (*env)->NewStringUTF(env, result);
 }
