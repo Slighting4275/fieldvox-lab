@@ -18,7 +18,7 @@ Export Manifest creates fieldvox-session-manifest.tsv from matched JSONL/WAV ses
 
 ## Project status
 
-Verified on Pixel 7 / GrapheneOS:
+Verified on Pixel 9 Pro XL / GrapheneOS:
 
 - Android package: org.fieldvox.lab
 - Version: 0.1.0-stage1j-a-export-session-manifest
