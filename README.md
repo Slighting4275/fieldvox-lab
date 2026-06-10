@@ -321,28 +321,36 @@ FieldVox Lab should not be used for health, safety, legal, financial, grief, or 
 <!-- FIELDVOX_LATEST_NATIVE_AUDIO_BEGIN -->
 ## Latest native audio work
 
-FieldVox Lab now has a verified native C binary-blob station ring feeding bounded source-grain field tests. This is an experimental EVP/ITC session-review tool, not proof of paranormal communication.
+FieldVox Lab now uses a native C binary-blob station ring with separated visible channel timing and network-audio dwell timing. This is an experimental EVP/ITC session-review tool, not proof of paranormal communication.
 
 ### Current audio state
 
-- **Stage 1Q-F:** disabled long-form live stream playback after earlier radio-style stream testing proved unsuitable for the EVP/ITC workflow.
-- **Stage 1R-A:** added native C AAudio proof using a static 64-sample PCM waveform blob.
-- **Stage 1R-B:** added a native C short-window sequencer with controlled burst/gap timing.
-- **Stage 1S-A:** added native C AAudio microphone metrics.
-- **Stage 1S-B:** added native C AAudio microphone baseline profiling.
-- **Stage 1S-C:** added a native C/JNI policy kill switch for the legacy carrier path.
-- **Stage 1S-D:** removed stale visible carrier UI text using a C patcher.
-- **Stage 1T-B:** restored audible bounded source/voice grains for field testing.
 - **Stage 1U-E:** verified a native C binary station blob with a 1000-logical-slot ring driving runtime source selection.
-- Stage 1U-E field verification: native blob decoder probe passed, ring_count=1000, 24 native ring slots logged, 19 native station selections logged, carrier seen, grain seen, sweep seen, and user heard voices/source grains.
-- Current voice behavior is controlled source/radio grain playback plus microphone and field metrics for later human review.
+- **Stage 1U-K:** improved the visible UI with a dark/neon polish pass and a small three-digit channel-number display.
+- **Stage 1U-M2:** changed the native C-defined visible sweep cadence to 1000 ms per channel.
+- **Stage 1U-N:** separated the visible channel clock from network audio source switching.
+- Stage 1U-N keeps the visible three-digit channel number ticking at about 1000 ms.
+- Stage 1U-N changes network/source audio dwell to 6000 ms so internet streams have time to prepare and buffer.
+- Stage 1U-N removes the duplicate GUI repaint from the station-selection path.
+- Stage 1U-N removes the one-second audio reset path that prevented audible stream content from settling.
+- User field check after Stage 1U-N: the app was working well and audible voices/source content were heard.
+- The station ring and timing constants are controlled by native C/JNI and binary blob metadata.
+- Java is used only where Android UI, lifecycle, permission, scheduler, MediaPlayer preparation, or JNI platform glue requires it.
 - There is no word bank and no TTS.
 - The app does not create messages for users.
 - This audio pipeline is not an interpreter, not a translation system, not EVP evidence, and not proof of paranormal communication.
 
-### Implementation policy
+### Timing model
 
-Use C/native/lower-level code and binary blobs for app behavior whenever possible. Use Java only where Android UI, lifecycle, permission, or JNI platform glue requires it. Stage 1U-E still uses transitional Android media glue for source preparation; the next deeper-native decoder path should use native media extraction/codec decode feeding AAudio PCM output.
+- Visible channel clock: 1000 ms.
+- Network/source audio dwell: 6000 ms.
+- Native station ring: 1000 logical slots.
+- GUI display: three-digit channel number only.
+- Main GUI does not display raw station names or raw stream URLs.
+
+### Network reality
+
+The current source ring contains internet stream metadata/URLs inside native C binary blob data. Because online audio streams require network connection, preparation, buffering, and decoding, the app does not try to reconnect audio every visible channel tick. Instead, Stage 1U-N lets the visible channel clock move separately while the audio source dwells long enough to become audible.
 
 ### Privacy and source policy
 

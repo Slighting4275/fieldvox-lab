@@ -6,6 +6,11 @@
 
 #define FV1U_TAG "FieldVox"
 #define FV1U_RING_COUNT 1000u
+#define FV1U_FAST_SWEEP_PERIOD_MS 1000u
+#define FV1U_AUDIO_DWELL_PERIOD_MS 6000u
+/* FIELDVOX_STAGE1U_N_AUDIO_DWELL_SINGLE_GUI_TICK: source/audio dwell is slower than visible channel clock for network streams. */
+/* FIELDVOX_STAGE1U_L_FAST_NATIVE_SWEEP: previous 180 ms fast sweep marker. */
+/* FIELDVOX_STAGE1U_M_ONE_SECOND_NATIVE_SWEEP: user-tuned 1000 ms/channel cadence from native C. */
 #define FV1U_BASE_COUNT 16u
 #define FV1U_MAGIC 0x46563155u /* FV1U */
 
@@ -143,6 +148,20 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UStationAt(JNIEnv *env, jobject t
     return (*env)->NewStringUTF(env, buf);
 }
 
+
+JNIEXPORT jint JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeStage1ULFastSweepPeriodMs(JNIEnv *env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return (jint)FV1U_FAST_SWEEP_PERIOD_MS;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeStage1UNAudioDwellPeriodMs(JNIEnv *env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    return (jint)FV1U_AUDIO_DWELL_PERIOD_MS;
+}
 JNIEXPORT jstring JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeStage1UDecoderProbe(JNIEnv *env, jobject thiz) {
     (void) thiz;

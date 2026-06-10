@@ -76,6 +76,14 @@ public class MainActivity extends Activity {
     // FIELDVOX_STAGE1T_B_FORCE_BOUNDED_GRAIN_FIELD_TEST
     // FIELDVOX_STAGE1U_A_NATIVE_BLOB_1000_RING
     // FIELDVOX_STAGE1U_E_NATIVE_BLOB_CLASS_SCOPE_WIRE
+    // FIELDVOX_STAGE1U_K_BEAUTIFY_TINY_VISIBLE_CHANNEL
+    // FIELDVOX_STAGE1U_L_FAST_NATIVE_SWEEP
+    // FIELDVOX_STAGE1U_M_ONE_SECOND_NATIVE_SWEEP
+    // FIELDVOX_STAGE1U_N_AUDIO_DWELL_SINGLE_GUI_TICK
+    // Visible channel clock remains 1000 ms; network audio source dwell is 6000 ms to allow buffering.
+    // Native C now defines a user-tuned 1000 ms/channel cadence.
+    // Native C defines a user-tuned 1000 ms/channel cadence.
+    // Existing visible status area becomes a small three-digit channel number box; app controls get dark/neon polish.
     // Runtime source selection uses the native C binary station blob ring.
     // Native C binary station-blob ring: 1000 logical stations, continuous sweep scaffold.
     // Temporary forced bounded source-grain field test; no generated words and no proof claims.
@@ -89,10 +97,19 @@ public class MainActivity extends Activity {
     private native int nativeStage1UStationRingCount();
     private native String nativeStage1UStationAt(int logicalIndex);
     private native String nativeStage1UDecoderProbe();
+    private native int nativeStage1ULFastSweepPeriodMs();
+    private native int nativeStage1UNAudioDwellPeriodMs();
 
     private int stage1UNativeLogicalCursor = 0;
     private int stage1ULastRingCount = 0;
     private String stage1ULastNativeStationJson = "";
+    private android.os.Handler stage1ULFastSweepHandler = null;
+    private java.lang.Runnable stage1ULFastSweepRunnable = null;
+    private boolean stage1ULFastSweepStarted = false;
+    private int stage1ULFastSweepCursor = 0;
+    private android.os.Handler stage1UNAudioDwellHandler = null;
+    private java.lang.Runnable stage1UNAudioDwellRunnable = null;
+    private boolean stage1UNAudioDwellStarted = false;
     private boolean stage1UProbeLogged = false;
 
 
@@ -1852,6 +1869,252 @@ public class MainActivity extends Activity {
     }
 
 
+
+    private String stage1KThreeDigitChannelNumber(int logicalIndex) {
+        int safe = logicalIndex;
+        if (safe < 0) safe = 0;
+        int ring = stage1ULastRingCount > 0 ? stage1ULastRingCount : 1000;
+        if (ring <= 0) ring = 1000;
+        safe = safe % ring;
+        return String.format(java.util.Locale.US, "%03d", safe);
+    }
+
+    private android.graphics.drawable.GradientDrawable stage1KRoundRect(int color, int strokeColor, float radiusDp, int strokeDp) {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setShape(android.graphics.drawable.GradientDrawable.RECTANGLE);
+        g.setColor(color);
+        g.setCornerRadius(radiusDp * getResources().getDisplayMetrics().density);
+        if (strokeDp > 0) {
+            g.setStroke((int) (strokeDp * getResources().getDisplayMetrics().density), strokeColor);
+        }
+        return g;
+    }
+
+    private boolean stage1KOldStatusText(CharSequence rawText) {
+        if (rawText == null) return false;
+        String t = rawText.toString();
+        if (t.length() == 0) return false;
+        return t.contains("BOUNDED FIELD")
+                || t.contains("Bounded field")
+                || t.contains("bounded field")
+                || t.contains("bounded station")
+                || t.contains("Bounded station")
+                || t.contains("Legacy carrier")
+                || t.contains("legacy carrier")
+                || t.contains("Realtime EVP monitor")
+                || t.contains("Native C short audio window")
+                || t.contains("Long-form station playback")
+                || t.contains("This does not prove")
+                || t.contains("No word bank")
+                || t.contains("generated speech")
+                || t.contains("native audio safety mode")
+                || t.contains("NATIVE BLOB SWEEP")
+                || t.contains("source: native C binary blob")
+                || t.contains("Stage 1U-F native channel display");
+    }
+
+    private void stage1KHideOldStatusText(android.view.View root) {
+        if (root == null) return;
+        if (root instanceof android.widget.TextView) {
+            android.widget.TextView tv = (android.widget.TextView) root;
+            if (tv != exportStatus && stage1KOldStatusText(tv.getText())) {
+                tv.setText("");
+                tv.setVisibility(android.view.View.GONE);
+                return;
+            }
+        }
+        if (root instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) root;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                stage1KHideOldStatusText(group.getChildAt(i));
+            }
+        }
+    }
+
+    private void stage1KBeautifyTree(android.view.View root) {
+        if (root == null) return;
+        try {
+            if (root instanceof android.widget.Button) {
+                android.widget.Button b = (android.widget.Button) root;
+                b.setTextColor(0xFFFFFFFF);
+                b.setTextSize(15.0f);
+                b.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                b.setAllCaps(false);
+                b.setBackground(stage1KRoundRect(0xFF151722, 0xFF6FE7FF, 8.0f, 1));
+                b.setPadding(10, 8, 10, 8);
+            } else if (root instanceof android.widget.TextView) {
+                android.widget.TextView tv = (android.widget.TextView) root;
+                if (tv != exportStatus) {
+                    tv.setTextColor(0xFFE8F7FF);
+                    tv.setShadowLayer(6.0f, 0.0f, 0.0f, 0xAA6FE7FF);
+                }
+            }
+            if (root instanceof android.view.ViewGroup) {
+                android.view.ViewGroup group = (android.view.ViewGroup) root;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    stage1KBeautifyTree(group.getChildAt(i));
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void stage1KMakeExportStatusTinyNumberBox(String number) {
+        if (exportStatus == null || number == null) return;
+        exportStatus.setVisibility(android.view.View.VISIBLE);
+        exportStatus.setText(number);
+        exportStatus.setSingleLine(true);
+        exportStatus.setIncludeFontPadding(false);
+        exportStatus.setGravity(android.view.Gravity.CENTER);
+        exportStatus.setTextSize(22.0f);
+        exportStatus.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        exportStatus.setTextColor(0xFFFFFFFF);
+        exportStatus.setShadowLayer(8.0f, 0.0f, 0.0f, 0xFF6FE7FF);
+        exportStatus.setBackground(stage1KRoundRect(0xFF07121A, 0xFF6FE7FF, 8.0f, 1));
+        int w = (int) (58.0f * getResources().getDisplayMetrics().density);
+        int h = (int) (34.0f * getResources().getDisplayMetrics().density);
+        android.view.ViewGroup.LayoutParams lp = exportStatus.getLayoutParams();
+        if (lp != null) {
+            lp.width = w;
+            lp.height = h;
+            exportStatus.setLayoutParams(lp);
+        }
+        exportStatus.setPadding(0, 0, 0, 0);
+        exportStatus.bringToFront();
+    }
+
+    private void stage1KShowChannelNumberOnly(final int logicalIndex) {
+        try {
+            final String number = stage1KThreeDigitChannelNumber(logicalIndex);
+            appendStage1QDLiveEvent("native_station_ring_gui_number_only", null, "ready", number);
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        android.view.View root = getWindow() != null ? getWindow().getDecorView() : null;
+                        stage1KBeautifyTree(root);
+                        stage1KHideOldStatusText(root);
+                        stage1KMakeExportStatusTinyNumberBox(number);
+                        if (root != null) {
+                            for (int delay = 120; delay <= 3600; delay += 240) {
+                                final int d = delay;
+                                root.postDelayed(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        try {
+                                            android.view.View r = getWindow() != null ? getWindow().getDecorView() : null;
+                                            stage1KBeautifyTree(r);
+                                            stage1KHideOldStatusText(r);
+                                            stage1KMakeExportStatusTinyNumberBox(number);
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                }, d);
+                            }
+                        }
+                    } catch (Throwable t) {
+                        android.util.Log.w("FieldVox", "Stage 1U-K tiny channel GUI failed: " + t);
+                    }
+                }
+            });
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private int stage1ULFastSweepPeriodMs() {
+        try {
+            int ms = nativeStage1ULFastSweepPeriodMs();
+            if (ms < 60) return 60;
+            if (ms > 1500) return 1500;
+            return ms;
+        } catch (Throwable ignored) {
+            return 1000;
+        }
+    }
+
+    private void stage1ULFastSweepTick() {
+        try {
+            int ring = nativeStage1UStationRingCount();
+            if (ring <= 0) ring = 1000;
+            int logical = stage1ULFastSweepCursor % ring;
+            stage1ULFastSweepCursor = (logical + 1) % ring;
+            stage1KShowChannelNumberOnly(logical);
+            appendStage1QDLiveEvent("native_station_ring_one_second_sweep", null, "ready",
+                    String.format(java.util.Locale.US, "%03d period_ms=%d", logical, stage1ULFastSweepPeriodMs()));
+            appendStage1QDLiveEvent("native_station_ring_one_second_gui_tick_only", null, "ready",
+                    String.format(java.util.Locale.US, "%03d period_ms=%d", logical, stage1ULFastSweepPeriodMs()));
+        } catch (Throwable t) {
+            appendStage1QDLiveEvent("native_station_ring_one_second_sweep_error", null, "error", String.valueOf(t));
+        }
+    }
+
+    private void stage1ULStartFastNativeSweep() {
+        if (stage1ULFastSweepStarted) return;
+        stage1ULFastSweepStarted = true;
+        if (stage1ULFastSweepHandler == null) {
+            stage1ULFastSweepHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        }
+        appendStage1QDLiveEvent("native_station_ring_one_second_sweep_started", null, "ready",
+                "period_ms=" + stage1ULFastSweepPeriodMs());
+        stage1ULFastSweepRunnable = new java.lang.Runnable() {
+            @Override
+            public void run() {
+                try {
+                    stage1ULFastSweepTick();
+                    if (stage1ULFastSweepHandler != null) {
+                        stage1ULFastSweepHandler.postDelayed(this, stage1ULFastSweepPeriodMs());
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        };
+        stage1ULFastSweepHandler.postDelayed(stage1ULFastSweepRunnable, 80);
+        stage1UNStartAudioDwellSweep();
+    }
+
+    private int stage1UNAudioDwellPeriodMs() {
+        try {
+            int ms = nativeStage1UNAudioDwellPeriodMs();
+            if (ms < 3000) return 3000;
+            if (ms > 10000) return 10000;
+            return ms;
+        } catch (Throwable ignored) {
+            return 6000;
+        }
+    }
+
+    private void stage1UNAudioDwellTick() {
+        try {
+            appendStage1QDLiveEvent("native_station_ring_audio_dwell_sweep", null, "ready",
+                    "period_ms=" + stage1UNAudioDwellPeriodMs());
+            advanceOnlineCarrierSweep("stage1u_n_audio_dwell_source_sweep");
+        } catch (Throwable t) {
+            appendStage1QDLiveEvent("native_station_ring_audio_dwell_sweep_skip", null, "skip", String.valueOf(t));
+        }
+    }
+
+    private void stage1UNStartAudioDwellSweep() {
+        if (stage1UNAudioDwellStarted) return;
+        stage1UNAudioDwellStarted = true;
+        if (stage1UNAudioDwellHandler == null) {
+            stage1UNAudioDwellHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        }
+        appendStage1QDLiveEvent("native_station_ring_audio_dwell_started", null, "ready",
+                "period_ms=" + stage1UNAudioDwellPeriodMs());
+        stage1UNAudioDwellRunnable = new java.lang.Runnable() {
+            @Override
+            public void run() {
+                try {
+                    stage1UNAudioDwellTick();
+                    if (stage1UNAudioDwellHandler != null) {
+                        stage1UNAudioDwellHandler.postDelayed(this, stage1UNAudioDwellPeriodMs());
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        };
+        stage1UNAudioDwellHandler.postDelayed(stage1UNAudioDwellRunnable, 650);
+    }
     private String stage1UJsonValue(String json, String key) {
         if (json == null || key == null) return "";
         String needle = "\"" + key + "\":";
@@ -1902,6 +2165,8 @@ public class MainActivity extends Activity {
             appendStage1QDLiveEvent("native_blob_decoder_probe", null, "complete", probe);
             int ringCount = nativeStage1UStationRingCount();
             appendStage1QDLiveEvent("native_station_ring_ready", null, "ready", "ring_count=" + ringCount);
+            stage1KShowChannelNumberOnly(0);
+            stage1ULStartFastNativeSweep();
             android.util.Log.i("FieldVox", "Stage 1U-E native binary blob ring ready count=" + ringCount + " probe=" + probe);
             for (int i = 0; i < 24; i++) {
                 appendStage1QDLiveEvent("native_station_ring_slot", null, "ready", nativeStage1UStationAt(i));
@@ -2017,6 +2282,7 @@ public class MainActivity extends Activity {
             String stage1UNativeUrl = stage1UNativeStationUrl(stage1UNativeLogicalCursor++);
             if (stage1UNativeUrl != null) {
                 appendStage1QDLiveEvent("native_station_ring_selected", null, "ready", stage1ULastNativeStationJson);
+                appendStage1QDLiveEvent("native_station_ring_gui_selection_suppressed", null, "ready", stage1ULastNativeStationJson);
                 android.util.Log.i("FieldVox", "Stage 1U-E native binary blob selected " + stage1UNativeStationLabel(stage1UNativeLogicalCursor - 1));
             }
             mp.setDataSource(stage1UNativeUrl != null ? stage1UNativeUrl : (ONLINE_CARRIER_URLS[index]));
