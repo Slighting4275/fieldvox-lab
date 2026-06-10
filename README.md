@@ -1,8 +1,8 @@
 # FieldVox Lab
 
-FieldVox Lab is a clean-room open-source experimental Android and Linux project for environmental-sensor-triggered audio session recording.
+FieldVox Lab is an experimental app for recording audio sessions and keeping a clear record of what happened during those sessions.
 
-It records local session artifacts such as JSONL event logs, WAV audio, exported session pairs, and readable session manifests. The Android app includes controls for session recording, app-private session browsing, replace-safe public export to Downloads/FieldVoxLab, share actions using Android content URIs, and TSV manifest export.
+In normal use, you start a session, record audio, mark anything interesting that you hear, and export the files for review. The app saves the recording, the matching session log, and a simple session list so you can tell which audio file goes with which log file. Exported files are placed in `Downloads/FieldVoxLab` so they are easier to find, copy, or share.
 
 ## Current Android checkpoint
 
