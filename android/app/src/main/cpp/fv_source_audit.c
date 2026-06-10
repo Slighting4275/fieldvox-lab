@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,26 +11,41 @@
 #include <unistd.h>
 
 /*
- * FieldVox Stage 1O-A Native Source Provenance Audit
+ * FieldVox Stage 1O-B Native Source Provenance + Timeline Audit
  * GPL-3.0-or-later project code.
  *
- * This module intentionally keeps provenance serialization in native C:
- * - no word bank
- * - no TTS
- * - no generated phrase synthesis
- * - no network access
- * - no broad storage access
+ * Native C responsibilities:
+ * - maintain a ring buffer of recent stream/sensor/gate/hit timeline events
+ * - serialize per-hit source audit JSON with timeline_snapshot
+ * - write per-hit JSON, JSONL ledger, and README under app-private hit bundle
  *
- * Java passes the already-created hit JSON object. C wraps it in a native
- * audit record, adds binary magic/versioning/hash metadata, writes a per-hit
- * JSON file, and appends a JSONL ledger beside the hit bundle.
+ * Native C does not:
+ * - generate words
+ * - use a word bank
+ * - use TTS
+ * - open network connections
+ * - use broad storage
  */
 
-/* Small binary blob marker for native audit records: "FVSA\1\0CJNI\0" */
 static const unsigned char FVSA_MAGIC_BLOB[] = {
-    0x46, 0x56, 0x53, 0x41, 0x01, 0x00, 0x43, 0x4a,
+    0x46, 0x56, 0x53, 0x41, 0x01, 0x0b, 0x43, 0x4a,
     0x4e, 0x49, 0x00, 0x1f, 0x0a, 0x7e, 0x5a, 0xc3
 };
+
+#define FVSA_TIMELINE_CAP 256
+#define FVSA_TIMELINE_KIND_CAP 64
+#define FVSA_TIMELINE_DETAIL_CAP 1024
+
+typedef struct FvsaTimelineEvent {
+    long long unix_ms;
+    unsigned long long seq;
+    char kind[FVSA_TIMELINE_KIND_CAP];
+    char detail[FVSA_TIMELINE_DETAIL_CAP];
+} FvsaTimelineEvent;
+
+static pthread_mutex_t fvsa_timeline_mutex = PTHREAD_MUTEX_INITIALIZER;
+static FvsaTimelineEvent fvsa_timeline[FVSA_TIMELINE_CAP];
+static unsigned long long fvsa_timeline_seq = 0ULL;
 
 static long long fvsa_now_ms(void) {
     struct timespec ts;
@@ -41,35 +57,45 @@ static long long fvsa_now_ms(void) {
 
 static uint64_t fvsa_fnv1a64(const unsigned char *data, size_t len) {
     uint64_t h = 1469598103934665603ULL;
-    size_t i;
-    for (i = 0; i < len; i++) {
+    for (size_t i = 0; i < len; i++) {
         h ^= (uint64_t)data[i];
         h *= 1099511628211ULL;
     }
     return h;
 }
 
-static char *fvsa_jstring(JNIEnv *env, jstring s) {
+static char *fvsa_strdup_local(const char *s) {
     if (s == NULL) {
-        char *z = (char *)calloc(1, 1);
-        return z;
+        s = "";
     }
-    const char *tmp = (*env)->GetStringUTFChars(env, s, NULL);
-    if (tmp == NULL) {
-        char *z = (char *)calloc(1, 1);
-        return z;
-    }
-    size_t n = strlen(tmp);
+    size_t n = strlen(s);
     char *out = (char *)malloc(n + 1);
     if (out != NULL) {
-        memcpy(out, tmp, n + 1);
+        memcpy(out, s, n + 1);
     }
+    return out;
+}
+
+static char *fvsa_jstring(JNIEnv *env, jstring s) {
+    if (s == NULL) {
+        return fvsa_strdup_local("");
+    }
+
+    const char *tmp = (*env)->GetStringUTFChars(env, s, NULL);
+    if (tmp == NULL) {
+        return fvsa_strdup_local("");
+    }
+
+    char *out = fvsa_strdup_local(tmp);
     (*env)->ReleaseStringUTFChars(env, s, tmp);
     return out;
 }
 
 static char *fvsa_json_escape(const char *s) {
-    if (s == NULL) s = "";
+    if (s == NULL) {
+        s = "";
+    }
+
     size_t extra = 0;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         switch (*p) {
@@ -81,14 +107,18 @@ static char *fvsa_json_escape(const char *s) {
                 extra++;
                 break;
             default:
-                if (*p < 0x20) extra += 5;
+                if (*p < 0x20) {
+                    extra += 5;
+                }
                 break;
         }
     }
 
     size_t n = strlen(s);
     char *out = (char *)malloc(n + extra + 1);
-    if (!out) return NULL;
+    if (out == NULL) {
+        return NULL;
+    }
 
     char *q = out;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
@@ -112,15 +142,129 @@ static char *fvsa_json_escape(const char *s) {
     return out;
 }
 
+static void fvsa_copy_trunc(char *dst, size_t cap, const char *src) {
+    if (dst == NULL || cap == 0) {
+        return;
+    }
+    if (src == NULL) {
+        src = "";
+    }
+
+    size_t n = strlen(src);
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
+static void fvsa_timeline_record_c(const char *kind, const char *detail) {
+    if (kind == NULL || kind[0] == 0) {
+        kind = "unknown";
+    }
+    if (detail == NULL) {
+        detail = "";
+    }
+
+    pthread_mutex_lock(&fvsa_timeline_mutex);
+
+    unsigned long long seq = fvsa_timeline_seq++;
+    FvsaTimelineEvent *ev = &fvsa_timeline[seq % FVSA_TIMELINE_CAP];
+    ev->seq = seq;
+    ev->unix_ms = fvsa_now_ms();
+    fvsa_copy_trunc(ev->kind, sizeof(ev->kind), kind);
+    fvsa_copy_trunc(ev->detail, sizeof(ev->detail), detail);
+
+    pthread_mutex_unlock(&fvsa_timeline_mutex);
+}
+
+static char *fvsa_timeline_snapshot_json(long long window_ms) {
+    long long now = fvsa_now_ms();
+    size_t cap = 1024 + ((size_t)FVSA_TIMELINE_CAP * 2600);
+    char *out = (char *)malloc(cap);
+    if (out == NULL) {
+        return NULL;
+    }
+
+    size_t len = 0;
+    int first = 1;
+    int wrote = snprintf(out + len, cap - len, "[");
+    if (wrote < 0 || (size_t)wrote >= cap - len) {
+        free(out);
+        return NULL;
+    }
+    len += (size_t)wrote;
+
+    pthread_mutex_lock(&fvsa_timeline_mutex);
+
+    unsigned long long end = fvsa_timeline_seq;
+    unsigned long long start = (end > FVSA_TIMELINE_CAP) ? (end - FVSA_TIMELINE_CAP) : 0ULL;
+
+    for (unsigned long long seq = start; seq < end; seq++) {
+        FvsaTimelineEvent ev = fvsa_timeline[seq % FVSA_TIMELINE_CAP];
+        if (ev.seq != seq) {
+            continue;
+        }
+        if (window_ms > 0 && ev.unix_ms > 0 && now > ev.unix_ms && (now - ev.unix_ms) > window_ms) {
+            continue;
+        }
+
+        char *kind_esc = fvsa_json_escape(ev.kind);
+        char *detail_esc = fvsa_json_escape(ev.detail);
+        if (kind_esc == NULL || detail_esc == NULL) {
+            free(kind_esc);
+            free(detail_esc);
+            continue;
+        }
+
+        wrote = snprintf(
+            out + len,
+            cap - len,
+            "%s{\"seq\":%llu,\"unix_ms\":%lld,\"age_ms\":%lld,\"event_kind\":\"%s\",\"detail\":\"%s\"}",
+            first ? "" : ",",
+            (unsigned long long)ev.seq,
+            ev.unix_ms,
+            (ev.unix_ms > 0 && now >= ev.unix_ms) ? (now - ev.unix_ms) : 0LL,
+            kind_esc,
+            detail_esc
+        );
+
+        free(kind_esc);
+        free(detail_esc);
+
+        if (wrote < 0 || (size_t)wrote >= cap - len) {
+            break;
+        }
+
+        len += (size_t)wrote;
+        first = 0;
+    }
+
+    pthread_mutex_unlock(&fvsa_timeline_mutex);
+
+    if (len + 2 >= cap) {
+        out[cap - 2] = ']';
+        out[cap - 1] = 0;
+    } else {
+        snprintf(out + len, cap - len, "]");
+    }
+
+    return out;
+}
+
 static int fvsa_write_all(int fd, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t w = write(fd, buf + off, len - off);
         if (w < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR) {
+                continue;
+            }
             return -1;
         }
-        if (w == 0) return -1;
+        if (w == 0) {
+            return -1;
+        }
         off += (size_t)w;
     }
     return 0;
@@ -129,30 +273,75 @@ static int fvsa_write_all(int fd, const char *buf, size_t len) {
 static int fvsa_write_file(const char *path, const char *buf, int append) {
     int flags = O_WRONLY | O_CREAT;
     flags |= append ? O_APPEND : O_TRUNC;
+
     int fd = open(path, flags, 0600);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        return -1;
+    }
+
     int rc = fvsa_write_all(fd, buf, strlen(buf));
-    if (fsync(fd) != 0 && rc == 0) rc = -1;
-    if (close(fd) != 0 && rc == 0) rc = -1;
+    if (fsync(fd) != 0 && rc == 0) {
+        rc = -1;
+    }
+    if (close(fd) != 0 && rc == 0) {
+        rc = -1;
+    }
     return rc;
 }
 
 static int fvsa_ensure_dir(const char *path) {
-    if (path == NULL || path[0] == 0) return -1;
-    if (mkdir(path, 0700) == 0) return 0;
-    if (errno == EEXIST) return 0;
+    if (path == NULL || path[0] == 0) {
+        return -1;
+    }
+    if (mkdir(path, 0700) == 0) {
+        return 0;
+    }
+    if (errno == EEXIST) {
+        return 0;
+    }
     return -1;
 }
 
 static char *fvsa_basename_safe(const char *s) {
     char *esc = fvsa_json_escape(s ? s : "unknown");
-    if (!esc) return NULL;
+    if (esc == NULL) {
+        return NULL;
+    }
+
     for (char *p = esc; *p; p++) {
         if (*p == '/' || *p == '\\' || *p == ':' || *p == ' ' || *p == '"' || *p == '\'') {
             *p = '_';
         }
     }
     return esc;
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeTimelineRecord(
+        JNIEnv *env,
+        jobject self,
+        jstring eventKind,
+        jstring detail) {
+    (void)self;
+
+    char *kind = fvsa_jstring(env, eventKind);
+    char *det = fvsa_jstring(env, detail);
+
+    if (kind == NULL || det == NULL) {
+        free(kind);
+        free(det);
+        return (*env)->NewStringUTF(env, "NATIVE_TIMELINE_RECORD_FAILED alloc");
+    }
+
+    fvsa_timeline_record_c(kind, det);
+
+    char result[192];
+    snprintf(result, sizeof(result), "NATIVE_TIMELINE_RECORD_OK kind=%s", kind[0] ? kind : "empty");
+
+    free(kind);
+    free(det);
+
+    return (*env)->NewStringUTF(env, result);
 }
 
 JNIEXPORT jstring JNICALL
@@ -168,13 +357,17 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
     char *hit = fvsa_jstring(env, hitId);
     char *hit_json = fvsa_jstring(env, hitJsonObject);
 
-    if (!dir || !hit || !hit_json) {
-        free(dir); free(hit); free(hit_json);
+    if (dir == NULL || hit == NULL || hit_json == NULL) {
+        free(dir);
+        free(hit);
+        free(hit_json);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED alloc");
     }
 
     if (fvsa_ensure_dir(dir) != 0) {
-        free(dir); free(hit); free(hit_json);
+        free(dir);
+        free(hit);
+        free(hit_json);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED mkdir");
     }
 
@@ -190,8 +383,12 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
 
     char *hit_esc = fvsa_json_escape(hit);
     char *hit_file_safe = fvsa_basename_safe(hit);
-    if (!hit_esc || !hit_file_safe) {
-        free(dir); free(hit); free(hit_json); free(hit_esc); free(hit_file_safe);
+    if (hit_esc == NULL || hit_file_safe == NULL) {
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED escape");
     }
 
@@ -204,18 +401,41 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
     char *hit_json_escaped = NULL;
     if (!raw_is_object) {
         hit_json_escaped = fvsa_json_escape(hit_json);
-        if (!hit_json_escaped) {
-            free(dir); free(hit); free(hit_json); free(hit_esc); free(hit_file_safe);
+        if (hit_json_escaped == NULL) {
+            free(dir);
+            free(hit);
+            free(hit_json);
+            free(hit_esc);
+            free(hit_file_safe);
             return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED escape_hit_json");
         }
     }
 
-    long long now_ms = fvsa_now_ms();
+    char *timeline_json = fvsa_timeline_snapshot_json(60000LL);
+    if (timeline_json == NULL) {
+        timeline_json = fvsa_strdup_local("[]");
+    }
+    if (timeline_json == NULL) {
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
+        free(hit_json_escaped);
+        return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED timeline_alloc");
+    }
 
-    size_t cap = strlen(hit_json) + strlen(dir) + strlen(hit_esc) + strlen(magic_hex) + 4096;
+    long long now_ms = fvsa_now_ms();
+    size_t cap = strlen(hit_json) + strlen(timeline_json) + strlen(dir) + strlen(hit_esc) + strlen(magic_hex) + 8192;
     char *audit = (char *)malloc(cap);
-    if (!audit) {
-        free(dir); free(hit); free(hit_json); free(hit_esc); free(hit_file_safe); free(hit_json_escaped);
+    if (audit == NULL) {
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
+        free(hit_json_escaped);
+        free(timeline_json);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED alloc_audit");
     }
 
@@ -225,14 +445,16 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         "{"
         "\"event\":\"source_audit\","
         "\"event_type\":\"source_audit\","
-        "\"stage\":\"1O-A\","
-        "\"audit_format_version\":1,"
+        "\"stage\":\"1O-B\","
+        "\"audit_format_version\":2,"
         "\"native_writer\":\"c_jni\","
         "\"implementation_language\":\"C\","
         "\"binary_magic_hex\":\"%s\","
         "\"audit_unix_ms\":%lld,"
         "\"hit_id\":\"%s\","
         "\"hit_json_fnv1a64\":\"%s\","
+        "\"timeline_window_ms\":60000,"
+        "\"timeline_snapshot\":%s,"
         "\"source_hit_json\":%s%s%s,"
         "\"generated_words\":false,"
         "\"word_bank\":false,"
@@ -245,13 +467,21 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         now_ms,
         hit_esc,
         hash_hex,
+        timeline_json,
         raw_is_object ? "" : "\"",
         raw_is_object ? raw_object : hit_json_escaped,
         raw_is_object ? "" : "\""
     );
 
     if (n < 0 || (size_t)n >= cap) {
-        free(dir); free(hit); free(hit_json); free(hit_esc); free(hit_file_safe); free(hit_json_escaped); free(audit);
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
+        free(hit_json_escaped);
+        free(timeline_json);
+        free(audit);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED snprintf");
     }
 
@@ -259,9 +489,18 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
     char *per_hit_path = (char *)malloc(path_cap);
     char *ledger_path = (char *)malloc(path_cap);
     char *readme_path = (char *)malloc(path_cap);
-    if (!per_hit_path || !ledger_path || !readme_path) {
-        free(dir); free(hit); free(hit_json); free(hit_esc); free(hit_file_safe); free(hit_json_escaped); free(audit);
-        free(per_hit_path); free(ledger_path); free(readme_path);
+    if (per_hit_path == NULL || ledger_path == NULL || readme_path == NULL) {
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
+        free(hit_json_escaped);
+        free(timeline_json);
+        free(audit);
+        free(per_hit_path);
+        free(ledger_path);
+        free(readme_path);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED alloc_path");
     }
 
@@ -273,8 +512,9 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         "FieldVox Native Source Audit\n"
         "\n"
         "These files are generated by native C/JNI code.\n"
-        "They wrap each marked-hit JSON object with provenance metadata, a binary magic marker,\n"
-        "and an FNV-1a hash of the hit JSON text.\n"
+        "Stage 1O-B adds a native C ring buffer timeline snapshot to each marked hit.\n"
+        "The timeline may include carrier preparation, ready/timeout events, ADB test triggers,\n"
+        "hit events, and full hit JSON details containing stream, gate, and sensor metadata.\n"
         "\n"
         "The native writer does not generate words, does not use a word bank, does not use TTS,\n"
         "and does not open network connections.\n"
@@ -283,15 +523,28 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
     if (fvsa_write_file(per_hit_path, audit, 0) != 0 ||
         fvsa_write_file(ledger_path, audit, 1) != 0 ||
         fvsa_write_file(readme_path, readme, 0) != 0) {
-        free(dir); free(hit); free(hit_json); free(hit_esc); free(hit_file_safe); free(hit_json_escaped);
-        free(audit); free(per_hit_path); free(ledger_path); free(readme_path);
+        free(dir);
+        free(hit);
+        free(hit_json);
+        free(hit_esc);
+        free(hit_file_safe);
+        free(hit_json_escaped);
+        free(timeline_json);
+        free(audit);
+        free(per_hit_path);
+        free(ledger_path);
+        free(readme_path);
         return (*env)->NewStringUTF(env, "NATIVE_SOURCE_AUDIT_FAILED write");
     }
 
     char result[512];
-    snprintf(result, sizeof(result),
-             "NATIVE_SOURCE_AUDIT_OK hit_id=%s hash=%s writer=c_jni files=source_audit_json,fieldvox-source-audit.jsonl",
-             hit, hash_hex);
+    snprintf(
+        result,
+        sizeof(result),
+        "NATIVE_SOURCE_AUDIT_OK hit_id=%s hash=%s writer=c_jni timeline=ring_buffer",
+        hit,
+        hash_hex
+    );
 
     free(dir);
     free(hit);
@@ -299,6 +552,7 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
     free(hit_esc);
     free(hit_file_safe);
     free(hit_json_escaped);
+    free(timeline_json);
     free(audit);
     free(per_hit_path);
     free(ledger_path);

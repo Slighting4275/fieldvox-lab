@@ -155,6 +155,7 @@ public class MainActivity extends Activity {
     private static final int LIVE_PERMISSION_REQUEST = 4101;
 
 
+    private native String nativeTimelineRecord(String eventKind, String detail);
     private native String nativeSourceAuditHit(String hitDirPath, String hitId, String hitJsonObject);
     private native void nativeInit(String packageName, String filesDir);
     private native String nativeStatus();
@@ -757,6 +758,18 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+
+    private void recordNativeTimelineEvent(String eventKind, String detail) {
+        try {
+            String timelineResult = nativeTimelineRecord(
+                    eventKind == null ? "unknown" : eventKind,
+                    detail == null ? "" : detail);
+            Log.i("FieldVox", timelineResult);
+        } catch (Throwable nativeTimelineThrowable) {
+            Log.w("FieldVox", "Native timeline record failed", nativeTimelineThrowable);
+        }
+    }
+
     private void markCandidateHit(String label) {
         long now = System.currentTimeMillis();
         String sessionStem = currentLiveSessionStem == null ? "" : currentLiveSessionStem;
@@ -777,6 +790,7 @@ public class MainActivity extends Activity {
         String jsonLine = buildHitJsonLine(hitId, now, cleanedLabel, sessionStem, offsetMs);
 
             try {
+                recordNativeTimelineEvent("mark_hit", jsonLine);
                 String sourceAuditResult = nativeSourceAuditHit(hitMarkerDir().getAbsolutePath(), hitId, jsonLine);
                 Log.i("FieldVox", sourceAuditResult);
             } catch (Throwable sourceAuditThrowable) {
@@ -1077,6 +1091,7 @@ public class MainActivity extends Activity {
 
         if (exportRequested) {
             Log.i("FieldVox", "ADB EXPORT HITS requested");
+        recordNativeTimelineEvent("adb_export_hits_requested", "EXPORT_HITS");
             handler.postDelayed(() -> {
                 String result = exportHits();
                 Log.i("FieldVox", "ADB EXPORT HITS result: " + result.replace("\n", " | "));
@@ -1103,6 +1118,7 @@ public class MainActivity extends Activity {
         final String finalLabel = label;
 
         Log.i("FieldVox", "ADB MARK HIT requested label_len=" + finalLabel.length());
+        recordNativeTimelineEvent("adb_mark_hit_requested", "label_len=" + finalLabel.length());
 
         handler.postDelayed(() -> {
             markCandidateHit(finalLabel);
