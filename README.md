@@ -65,95 +65,222 @@ This is an AND-style combined copyleft policy, not an OR-choice. The intent is t
 See `LICENSE` for the full combined notice and full license texts. See `COPYING` for the GNU GPL text, `COPYING.AGPL` for the GNU AGPL text, and `docs/COMBINED_GPL_AGPL_LICENSE_POLICY.md` for the project policy.
 
 <!-- FIELDVOX_CURRENT_FEATURES_START -->
-## Current Android features
+## What FieldVox Lab is
 
-Verified checkpoint: **Stage 1P-B canonical source-catalog JSON**
-Current Codeberg `main`: `3d7eef9` / `3d7eef950d029e46836e29ceeba71339a63d36fc`
-Latest commit subject: `Canonicalize Stage 1P-B source catalog JSON`
+FieldVox Lab is an experimental Android app for recording field-audio sessions and keeping a clear record of what happened during those sessions.
 
-FieldVox Lab is a clean-room experimental field-audio tool. It records sessions, marks user-perceived hits, exports blind-review bundles, and keeps source/audit metadata for later review. It is not evidence of paranormal activity by itself and should not be used for health, safety, legal, financial, grief, or other important life decisions.
+A simple way to think about it:
 
-### Live VOX session engine
+- The app listens and records audio.
+- It watches sensor and session state while recording.
+- You can press **MARK HIT** when you hear something interesting.
+- The app saves the audio, the session log, and the hit marker together.
+- The app can export review files so someone can listen first and read labels later.
 
-- Android app package: `org.fieldvox.lab`.
-- Multi-sensor VOX gates using environmental sensor state plus microphone recording state.
-- Timeout-safe live carrier rotation so stalled stream preparation does not block queued gates.
-- App-private session recording with WAV audio and JSONL session logs.
-- Session browser, refresh, export, and share flows.
-- Export path uses Android public Downloads through the app export flow; no broad storage permission is required.
+FieldVox Lab is **not proof of paranormal communication**. It does not prove that a word, phrase, voice, or message came from any outside source. It is a logging and review tool. Any hit label is a user-perceived label, not a confirmed message.
 
-### Evidence-grade hit marker and blind review export
+Current verified Codeberg checkpoint: `e6045f8` / `e6045f876d3d1980709358efd05efe38235ccaa7`
+Latest commit subject: `Document Stage 1P-B canonical source catalog`
 
-- Visible **MARK HIT** control during live sessions.
-- Optional user label / perceived phrase prompt.
-- Hit records store user-perceived text only.
-- Hit JSON and JSONL records explicitly set:
-  - `generated_words=false`
-  - `word_bank=false`
-  - `tts=false`
-- Blind review bundle export includes:
-  - `blind_review_clip_*.wav`
-  - `*_context.wav`
-  - per-hit JSON
-  - `fieldvox-hit-events.jsonl`
-  - `HIT_REVIEW_INSTRUCTIONS.txt`
-  - `TRUTH_DO_NOT_SHOW_LISTENERS.tsv`
+## What a non-technical person should know
+
+### What happens when you run a session
+
+When you start a session, FieldVox Lab records the session audio and keeps a matching event log. The audio is saved as a WAV file. The log is saved as a JSONL file, which is just a line-by-line text log of events.
+
+For example, one session may create:
+
+- `session-123.wav` — the sound recording
+- `session-123.jsonl` — the matching event log
+
+Those two files belong together. The WAV is what you listen to. The JSONL is the timeline of what the app recorded about the session.
+
+### What MARK HIT means
+
+If you hear something interesting, you can press **MARK HIT**. The app records the time of that hit and lets you add an optional label for what you think you heard.
+
+The important rule is this: FieldVox records **what you typed or marked**. It does not generate words for you.
+
+Hit records explicitly say:
+
+- `generated_words=false`
+- `word_bank=false`
+- `tts=false`
+
+That means the app is not using a word bank, not using text-to-speech, and not generating phrases.
+
+### What blind review export means
+
+A blind review export is meant to make review more fair.
+
+The app can export audio clips with neutral names, plus a separate truth file. The idea is that a listener can hear the clip first without being told what the expected phrase is. After listening, the reviewer can compare their notes against the truth file.
+
+Exported review files can include:
+
+- blind review WAV clips
+- context WAV clips from around the hit
+- hit JSON files
+- `fieldvox-hit-events.jsonl`
+- `HIT_REVIEW_INSTRUCTIONS.txt`
+- `TRUTH_DO_NOT_SHOW_LISTENERS.tsv`
+
+### What Export Manifest means
+
+Export Manifest creates a simple table-of-contents file named:
+
+- `fieldvox-session-manifest.tsv`
+
+This file lists complete session pairs where the app found both:
+
+- a session JSONL log
+- a matching session WAV recording
+
+That makes it easier to know which audio file belongs with which log file. It is like a checklist for exported sessions.
+
+The manifest is exported to:
+
+- `Downloads/FieldVoxLab`
+
+That makes it easier to find from Android Files, copy to a computer, or share for review.
+
+### What source audit means
+
+A source audit is extra proof-of-process information. It records what the app knew about the session, hit, timeline, and source metadata when a hit was marked.
+
+It does not prove that a hit is paranormal. It helps reviewers see what the app did and what files were created.
+
+## For technical people: what the app does
+
+### Android app identity
+
+- Package: `org.fieldvox.lab`
+- Main activity: `org.fieldvox.lab/.MainActivity`
+- Main Java source: `android/app/src/main/java/org/fieldvox/lab/MainActivity.java`
+- Native C/JNI audit source: `android/app/src/main/cpp/fv_source_audit.c`
+
+### Storage model
+
+FieldVox Lab keeps working session files in app-private storage and exports review files to public Downloads through the app export flow.
+
+App-private working data includes:
+
+- session WAV files
+- session JSONL files
+- hit JSON files
+- native source-audit JSON files
+- native scheduler/audit JSON and JSONL files
+
+Public exported files go under:
+
+- `Downloads/FieldVoxLab`
+
+The app is designed to avoid broad storage permissions. Exported public files are user-facing review artifacts.
+
+### Session files
+
+A normal session can produce matched file pairs:
+
+- `session-<id>.wav`
+- `session-<id>.jsonl`
+
+The WAV file contains recorded audio. The JSONL file contains session events, sensor/gate metadata, source metadata, hit marker events, and audit-related records.
+
+The export manifest file:
+
+- `fieldvox-session-manifest.tsv`
+
+lists matched JSONL/WAV session pairs so reviewers can connect each audio recording to its matching event log.
+
+### Hit marker records
+
+When the user marks a hit, the app creates structured hit records with fields such as:
+
+- `event_type=hit_marker`
+- hit ID
+- session ID
+- hit offset/time
+- optional `user_label`
+- optional `perceived_phrase`
+- source label/source URL metadata when available
+- gate reason and packet metadata
+- sensor/gate state
+- `generated_words=false`
+- `word_bank=false`
+- `tts=false`
+
+The label is user-perceived. The app should not describe labels as confirmed words or confirmed messages.
 
 ### Native C source provenance audit
 
-FieldVox includes native C/JNI audit code in `android/app/src/main/cpp/fv_source_audit.c`.
+The app includes native C/JNI audit writing in:
 
-The native audit writer creates:
+- `android/app/src/main/cpp/fv_source_audit.c`
+
+Native audit exports include:
 
 - `source_audit_*.json`
 - `fieldvox-source-audit.jsonl`
 - `SOURCE_AUDIT_README.txt`
 
-Each source-audit record wraps the original hit JSON as `source_hit_json` and records native metadata such as:
+Each source-audit record can include:
 
 - `native_writer="c_jni"`
 - `implementation_language="C"`
 - binary magic marker
 - hit JSON hash
+- `source_hit_json`
 - `network_access_from_native=false`
 - `generated_words=false`
 - `word_bank=false`
 - `tts=false`
 
+The native audit writer does not open network connections and does not generate text.
+
 ### Native C timeline ring buffer
 
-Stage 1O-B added a native C ring buffer for recent event timeline state. Each native source-audit export can include:
+Stage 1O-B added a native C ring buffer for recent event timeline state.
+
+Source-audit records can include:
 
 - `timeline_window_ms=60000`
 - `timeline_snapshot[]`
-- timeline event kinds such as ADB test requests, marked-hit events, and native sweep events
+
+The timeline can contain recent event kinds such as:
+
+- ADB test requests
+- marked-hit events
+- native sweep events
+- carrier/source state events when recorded
+
+This helps reviewers understand what the app believed was happening around the time of a hit.
 
 ### Native C deterministic sweep scheduler audit
 
-Stage 1P-A added an evidence-grade deterministic scheduler layer. This records schedule evidence only; it does **not** change the audio playback engine yet.
+Stage 1P-A added a deterministic native scheduler evidence layer. This records scheduler evidence. It does not change audio playback yet.
 
-Native sweep export files:
+Native sweep files include:
 
 - `sweep_schedule.jsonl`
 - `sweep_manifest.json`
 - `source_slots.json`
 
-Each hit source audit can include a `sweep_engine` block with:
+A hit source audit can include a `sweep_engine` block with:
 
 - scheduler: `native_c_deterministic`
 - deterministic seed
 - active slot
-- dwell and jitter timing
-- schedule sequence number
+- dwell timing
+- jitter timing
+- schedule sequence
 - overlap policy: `single_open_slot`
-- station/source slot identity
+- source slot identity
 - stream URL hash placeholder
 
 ### Stage 1P-B source-catalog policy and canonical JSON
 
-Stage 1P-B hardens the native source-slot catalog metadata so exported audit files are Radio Browser-compatible and parser-friendly before live dynamic station discovery is added.
+Stage 1P-B hardens source-slot metadata so it is ready for future Radio Browser style station discovery.
 
-The canonical Stage 1P-B export now records:
+The exported policy fields include:
 
 - `catalog_provider=manual_seed_v1_radio_browser_compatible`
 - `radio_browser_compatible=true`
@@ -163,28 +290,22 @@ The canonical Stage 1P-B export now records:
 - `http_user_agent_policy=speaking_agent_required`
 - `raw_stream_urls_exported=false`
 
-The canonicalization commit removed duplicate policy keys from `sweep_manifest.json` and validated app-private and exported JSON with a duplicate-key detector. The exported files verified in Stage 1P-B include:
-
-- `fieldvox-source-audit.jsonl`
-- `source_audit_*.json`
-- `sweep_manifest.json`
-- `source_slots.json`
-- `sweep_schedule.jsonl`
+The canonical Stage 1P-B commit removed duplicate JSON object names from `sweep_manifest.json` and validated both app-private and exported JSON with a duplicate-key detector.
 
 Playback remains unchanged in Stage 1P-B.
 
-### Clean-room and safety position
+## Clean-room and safety position
 
-FieldVox Lab does not use proprietary app branding, assets, databases, or marketing copy from any commercial paranormal app. It does not include a haunted-place database. It is an experimental audio/session logging tool, not a claim generator.
+FieldVox Lab is a clean-room open-source experimental tool. It does not use proprietary branding, assets, databases, or marketing copy from any commercial paranormal app. It does not include a haunted-place database.
 
-The app should be described as:
+Use careful language:
 
-- experimental
-- clean-room
-- open-source
-- user-labeled
-- evidence-audit oriented
-- not proof of paranormal communication
+- say “user-perceived hit”
+- say “marked hit”
+- say “review clip”
+- say “session log”
+- do not say the app proves communication
+- do not say the app confirms words or messages
 
-Avoid describing hit labels as confirmed words or messages. They are user-perceived labels recorded for later blind review.
+FieldVox Lab should not be used for health, safety, legal, financial, grief, or other important life decisions.
 <!-- FIELDVOX_CURRENT_FEATURES_END -->
