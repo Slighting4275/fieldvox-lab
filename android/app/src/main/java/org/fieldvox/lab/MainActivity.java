@@ -72,6 +72,10 @@ public class MainActivity extends Activity {
     private native String nativeProbeStage1SMicBaseline(int windowCount, int windowMs, int gapMs);
 
 
+    // FIELDVOX_STAGE1T_A_BOUNDED_VOICE_FIELD_TEST
+    // FIELDVOX_STAGE1T_B_FORCE_BOUNDED_GRAIN_FIELD_TEST
+    // Temporary forced bounded source-grain field test; no generated words and no proof claims.
+    // Temporary bounded source-grain field test; no generated words and no proof claims.
     // FIELDVOX_STAGE1S_D_C_UI_TEXT_KILL
     // Stale carrier UI labels removed by C patcher.
     // FIELDVOX_STAGE1S_C_NATIVE_CARRIER_KILL
@@ -180,9 +184,9 @@ public class MainActivity extends Activity {
 
     private static final String[] ONLINE_CARRIER_URLS = new String[] {
             "https://bonneville.cdnstream1.com/2643_48.aac",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/native-safetyAM.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/native-safetyFM_HIGH_MP3.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/native-safetyFM_LOW_MP3.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/bounded-fieldAM.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/bounded-fieldFM_HIGH_MP3.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/bounded-fieldFM_LOW_MP3.mp3",
             "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
             "https://news-stream.iowapublicradio.org/NewsLow.mp3",
             "https://news-stream.iowapublicradio.org/News.mp3",
@@ -199,7 +203,7 @@ public class MainActivity extends Activity {
             "Legacy carrier disabled",
             "Legacy carrier disabled",
             "Legacy carrier disabled",
-            "native-safety Seattle News Low",
+            "bounded-field Seattle News Low",
             "BBC World Service",
             "Iowa Public Radio News Low",
             "Iowa Public Radio News",
@@ -1377,7 +1381,7 @@ public class MainActivity extends Activity {
         }
 
         if (!onlineCarrierPrepared || onlineCarrierPlayer == null) {
-            android.util.Log.i("FieldVox", "PHONETIC VOX gate skipped: carrier not ready reason=" + reason
+            android.util.Log.i("FieldVox", "BOUNDED FIELD WAITING FOR CARRIER reason=" + reason
                     + " prepared=" + onlineCarrierPrepared);
             return;
         }
@@ -1462,13 +1466,13 @@ public class MainActivity extends Activity {
             return;
         }
 
-        String openMsg = "Native safety packet blocked: " + onlineCarrierLabel()
+        String openMsg = "BOUNDED FIELD PACKET OPEN: " + onlineCarrierLabel()
                 + " | Reason: " + reason
                 + " delta=" + String.format(java.util.Locale.US, "%.2f", delta)
                 + " grains=" + grains
                 + " packet_ms=" + packetMs
                 + " silence_after_ms=" + forcedSilenceMs
-                + " | native safety metrics. No word bank. No TTS.";
+                + " | bounded field metrics. No word bank. No TTS.";
         android.util.Log.i("FieldVox", openMsg);
         exportStatus.setText(openMsg);
 
@@ -1494,7 +1498,7 @@ public class MainActivity extends Activity {
                     }
                 } catch (Exception ignored) {}
 
-                android.util.Log.i("FieldVox", "Native safety grain blocked: "
+                android.util.Log.i("FieldVox", "BOUNDED FIELD GRAIN OPEN: "
                         + onlineCarrierLabel()
                         + " grain=" + grainIndex + "/" + totalGrains
                         + " duration_ms=" + grainDuration
@@ -1545,7 +1549,7 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {}
 
-            String closeMsg = "Native safety packet closed. Forced silence gap active. Sweeping to next stream.";
+            String closeMsg = "BOUNDED FIELD PACKET CLOSED. Forced silence gap active. Sweeping to next stream.";
             android.util.Log.i("FieldVox", closeMsg + " token=" + token + " packet_ms=" + totalPacketMs);
             exportStatus.setText(closeMsg);
 
@@ -1820,7 +1824,7 @@ public class MainActivity extends Activity {
         startOnlineCarrierSensors();
         prepareOnlineCarrierAtIndex(onlineCarrierIndex);
 
-        return "Legacy radio carriers are blocked. Microphone metrics are logged only; no radio output.";
+        return "Bounded station sweep is active. Microphone and field metrics are logged for review.";
     }
 
     private int normalizeOnlineCarrierIndex(int index) {
@@ -1892,7 +1896,7 @@ public class MainActivity extends Activity {
         int next = normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
         onlineCarrierSweepCount++;
 
-        String msg = "Native safety sweep blocked: "
+        String msg = "BOUNDED FIELD SWEEP: "
                 + onlineCarrierLabel()
                 + " -> " + ONLINE_CARRIER_LABELS[next]
                 + "\nReason: " + reason
@@ -1957,7 +1961,7 @@ public class MainActivity extends Activity {
                     player.setVolume(0.0f, 0.0f);
                 } catch (Exception ignored) {}
 
-                String msg = "Legacy carrier disabled: " + onlineCarrierLabel()
+                String msg = "BOUNDED FIELD CARRIER: " + onlineCarrierLabel()
                         + "\nMuted until phonetic-grain gate opens. Queued proximity can now flush. No word bank. No TTS.";
                 Log.i("FieldVox", msg.replace("\n", " | "));
                 exportStatus.setText(msg);
@@ -1986,10 +1990,10 @@ public class MainActivity extends Activity {
                 return true;
             });
 
-            Log.i("FieldVox", "Legacy carrier disabled: "
+            Log.i("FieldVox", "BOUNDED FIELD CARRIER: "
                     + ONLINE_CARRIER_LABELS[index]
                     + " url=" + ONLINE_CARRIER_URLS[index]);
-            exportStatus.setText("Legacy carrier disabled: " + ONLINE_CARRIER_LABELS[index]);
+            exportStatus.setText("BOUNDED FIELD CARRIER: " + ONLINE_CARRIER_LABELS[index]);
 
             mp.prepareAsync();
 
@@ -2085,7 +2089,7 @@ public class MainActivity extends Activity {
 
         String result = startLiveMonitor();
         String carrier = startOnlineVoxCarrier();
-        exportStatus.setText("Native audio safety mode active.\n" + result + "\n" + carrier);
+        exportStatus.setText("Bounded station + field sweep active.\n" + result + "\n" + carrier);
         status.setText(result + "\n" + carrier);
         updateLiveButtons();
     }
@@ -2319,7 +2323,7 @@ public class MainActivity extends Activity {
                         lastUiMs = nowMs;
                         final int seconds = (int)((nowMs - startMs) / 1000L);
                         final String msg = "Realtime EVP monitor: " + seconds + "s\\n"
-                                + "Mic -> no radio output.\\n"
+                                + "Mic + bounded station grains.\\n"
                                 + "RMS " + String.format(java.util.Locale.US, "%.0f", rms)
                                 + " / gate " + String.format(java.util.Locale.US, "%.0f", gate)
                                 + " / peak " + peak + "\\n"
@@ -2370,7 +2374,7 @@ public class MainActivity extends Activity {
 
         liveMonitorThread.start();
 
-        return "Legacy radio carrier disabled. No word bank; no TTS.";
+        return "Bounded voice/radio grains enabled. No word bank; no TTS.";
     }
 
     private String stopLiveMonitor() {
@@ -2442,7 +2446,7 @@ public class MainActivity extends Activity {
         subtitle.setShadowLayer(8.0f, 0.0f, 0.0f, Color.WHITE);
         root.addView(subtitle);
 
-        TextView stage = makeLabel("Stage 1S-D • Native audio safety mode", Color.LTGRAY, 12);
+        TextView stage = makeLabel("Stage 1T-A • Bounded station + field sweep", Color.LTGRAY, 12);
         stage.setPadding(0, dp(this, 8), 0, dp(this, 18));
         root.addView(stage);
 

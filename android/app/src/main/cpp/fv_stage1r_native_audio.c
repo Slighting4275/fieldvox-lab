@@ -577,7 +577,10 @@ JNIEXPORT jboolean JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeStage1SCDisableLegacyCarrier(JNIEnv *env, jobject thiz) {
     (void) env;
     (void) thiz;
-    return JNI_TRUE;
+    // FIELDVOX_STAGE1T_A_BOUNDED_VOICE_FIELD_TEST
+    // FIELDVOX_STAGE1T_B_FORCE_BOUNDED_GRAIN_FIELD_TEST
+    // Temporary field-test mode: allow bounded station/field carrier windows.
+    return JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
