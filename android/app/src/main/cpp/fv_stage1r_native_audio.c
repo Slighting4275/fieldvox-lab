@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
 
@@ -246,4 +247,142 @@ Java_org_fieldvox_lab_MainActivity_nativePlayStage1RWindowSequence(
                         (int) burst_count, (int) burst_ms, (int) gap_ms);
 
     return 0;
+}
+
+
+// FIELDVOX_STAGE1S_A_NATIVE_MIC_METRICS
+// Native microphone metrics window.
+// Records no message, performs no translation, and makes no EVP determination.
+static uint32_t fv_stage1s_isqrt_u64(uint64_t x) {
+    uint64_t op = x;
+    uint64_t res = 0;
+    uint64_t one = 1ULL << 62;
+    while (one > op) one >>= 2;
+    while (one != 0) {
+        if (op >= res + one) {
+            op -= res + one;
+            res = (res >> 1) + one;
+        } else {
+            res >>= 1;
+        }
+        one >>= 2;
+    }
+    return (uint32_t) res;
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeProbeStage1SMicWindow(
+        JNIEnv *env,
+        jobject thiz,
+        jint duration_ms) {
+    (void) thiz;
+
+    if (duration_ms < 120) duration_ms = 120;
+    if (duration_ms > 2000) duration_ms = 2000;
+
+    AAudioStreamBuilder *builder = 0;
+    AAudioStream *stream = 0;
+
+    aaudio_result_t r = AAudio_createStreamBuilder(&builder);
+    if (r != AAUDIO_OK || builder == 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "rc=-21 step=create_builder result=%d", (int) r);
+        return (*env)->NewStringUTF(env, msg);
+    }
+
+    AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT);
+    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setChannelCount(builder, 1);
+    AAudioStreamBuilder_setSampleRate(builder, 48000);
+
+    r = AAudioStreamBuilder_openStream(builder, &stream);
+    AAudioStreamBuilder_delete(builder);
+    builder = 0;
+
+    if (r != AAUDIO_OK || stream == 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "rc=-22 step=open_input result=%d", (int) r);
+        return (*env)->NewStringUTF(env, msg);
+    }
+
+    int32_t sample_rate = AAudioStream_getSampleRate(stream);
+    if (sample_rate <= 0) sample_rate = 48000;
+
+    r = AAudioStream_requestStart(stream);
+    if (r != AAUDIO_OK) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "rc=-23 step=request_start result=%d", (int) r);
+        AAudioStream_close(stream);
+        return (*env)->NewStringUTF(env, msg);
+    }
+
+    const int32_t target_frames = (int32_t) (((int64_t) sample_rate * (int64_t) duration_ms) / 1000);
+    int32_t frames_done = 0;
+    int16_t buffer[192];
+
+    uint64_t sum_sq = 0;
+    uint64_t sum_abs = 0;
+    int32_t peak = 0;
+    int32_t zero_crossings = 0;
+    int32_t have_prev = 0;
+    int32_t prev = 0;
+    int32_t read_calls = 0;
+
+    while (frames_done < target_frames && read_calls < 2000) {
+        int32_t want = target_frames - frames_done;
+        if (want > 192) want = 192;
+
+        aaudio_result_t got = AAudioStream_read(stream, buffer, want, 100000000L);
+        read_calls++;
+
+        if (got < 0) {
+            char msg[192];
+            snprintf(msg, sizeof(msg), "rc=-24 step=read result=%d frames=%d", (int) got, (int) frames_done);
+            AAudioStream_requestStop(stream);
+            AAudioStream_close(stream);
+            return (*env)->NewStringUTF(env, msg);
+        }
+
+        if (got == 0) {
+            continue;
+        }
+
+        for (int32_t i = 0; i < got; i++) {
+            int32_t v = buffer[i];
+            int32_t av = v < 0 ? -v : v;
+            if (av > peak) peak = av;
+            sum_abs += (uint64_t) av;
+            sum_sq += (uint64_t) ((int64_t) v * (int64_t) v);
+            if (have_prev) {
+                if ((prev < 0 && v >= 0) || (prev >= 0 && v < 0)) zero_crossings++;
+            }
+            prev = v;
+            have_prev = 1;
+        }
+
+        frames_done += (int32_t) got;
+    }
+
+    AAudioStream_requestStop(stream);
+    AAudioStream_close(stream);
+
+    uint32_t avg_abs = frames_done > 0 ? (uint32_t) (sum_abs / (uint64_t) frames_done) : 0;
+    uint32_t rms = frames_done > 0 ? fv_stage1s_isqrt_u64(sum_sq / (uint64_t) frames_done) : 0;
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "rc=0 duration_ms=%d sample_rate=%d frames=%d peak=%d rms=%u avg_abs=%u zero_crossings=%d read_calls=%d",
+             (int) duration_ms,
+             (int) sample_rate,
+             (int) frames_done,
+             (int) peak,
+             (unsigned) rms,
+             (unsigned) avg_abs,
+             (int) zero_crossings,
+             (int) read_calls);
+
+    __android_log_print(ANDROID_LOG_INFO, FV_TAG, "native mic metrics: %s", msg);
+    return (*env)->NewStringUTF(env, msg);
 }

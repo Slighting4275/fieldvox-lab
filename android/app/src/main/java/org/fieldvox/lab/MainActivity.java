@@ -65,6 +65,9 @@ public class MainActivity extends Activity {
     // FIELDVOX_STAGE1R_B_NATIVE_WINDOW_SEQUENCER
     private native int nativePlayStage1RWindowSequence(int burstCount, int burstMs, int gapMs, float amplitude);
 
+    // FIELDVOX_STAGE1S_A_NATIVE_MIC_METRICS
+    private native String nativeProbeStage1SMicWindow(int durationMs);
+
 
     // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
     private TextView liveStreamStatusText;
@@ -2849,6 +2852,16 @@ public class MainActivity extends Activity {
                 appendStage1QDLiveEvent("native_window_sequence_started", null, "started", "C_AAudio static_pcm_blob bursts=5 burst_ms=110 gap_ms=70");
                 int seqRc = nativePlayStage1RWindowSequence(5, 110, 70, 0.28f);
                 appendStage1QDLiveEvent("native_window_sequence_complete", null, seqRc == 0 ? "complete" : "error", "C_AAudio rc=" + seqRc + " bursts=5 burst_ms=110 gap_ms=70");
+
+                appendStage1QDLiveEvent("native_mic_metrics_started", null, "started", "C_AAudio input_metrics duration_ms=900");
+                String micDetail;
+                try {
+                    micDetail = nativeProbeStage1SMicWindow(900);
+                } catch (Throwable t) {
+                    micDetail = "rc=-99 step=java_throwable detail=" + t.toString();
+                }
+                appendStage1QDLiveEvent("native_mic_metrics_complete", null, micDetail.startsWith("rc=0") ? "complete" : "error", micDetail);
+
 
             } catch (Throwable t) {
                 appendStage1QDLiveEvent("native_short_audio_window_error", null, "error", t.toString());
