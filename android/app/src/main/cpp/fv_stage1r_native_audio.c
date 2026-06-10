@@ -386,3 +386,185 @@ Java_org_fieldvox_lab_MainActivity_nativeProbeStage1SMicWindow(
     __android_log_print(ANDROID_LOG_INFO, FV_TAG, "native mic metrics: %s", msg);
     return (*env)->NewStringUTF(env, msg);
 }
+
+
+// FIELDVOX_STAGE1S_B_NATIVE_MIC_BASELINE
+// Native microphone baseline profiler.
+// Collects windowed signal metrics only; stores no audio and makes no interpretation.
+JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeProbeStage1SMicBaseline(
+        JNIEnv *env,
+        jobject thiz,
+        jint window_count,
+        jint window_ms,
+        jint gap_ms) {
+    (void) thiz;
+
+    if (window_count < 2) window_count = 2;
+    if (window_count > 12) window_count = 12;
+    if (window_ms < 80) window_ms = 80;
+    if (window_ms > 500) window_ms = 500;
+    if (gap_ms < 0) gap_ms = 0;
+    if (gap_ms > 250) gap_ms = 250;
+
+    AAudioStreamBuilder *builder = 0;
+    AAudioStream *stream = 0;
+
+    aaudio_result_t r = AAudio_createStreamBuilder(&builder);
+    if (r != AAUDIO_OK || builder == 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "rc=-31 step=create_builder result=%d", (int) r);
+        return (*env)->NewStringUTF(env, msg);
+    }
+
+    AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_INPUT);
+    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_I16);
+    AAudioStreamBuilder_setChannelCount(builder, 1);
+    AAudioStreamBuilder_setSampleRate(builder, 48000);
+
+    r = AAudioStreamBuilder_openStream(builder, &stream);
+    AAudioStreamBuilder_delete(builder);
+    builder = 0;
+
+    if (r != AAUDIO_OK || stream == 0) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "rc=-32 step=open_input result=%d", (int) r);
+        return (*env)->NewStringUTF(env, msg);
+    }
+
+    int32_t sample_rate = AAudioStream_getSampleRate(stream);
+    if (sample_rate <= 0) sample_rate = 48000;
+
+    r = AAudioStream_requestStart(stream);
+    if (r != AAUDIO_OK) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "rc=-33 step=request_start result=%d", (int) r);
+        AAudioStream_close(stream);
+        return (*env)->NewStringUTF(env, msg);
+    }
+
+    int16_t buffer[192];
+
+    uint64_t total_frames = 0;
+    uint64_t total_sum_sq = 0;
+    uint64_t total_sum_abs = 0;
+    int32_t total_zero_crossings = 0;
+    int32_t read_calls = 0;
+
+    int32_t peak_min = 32767;
+    int32_t peak_max = 0;
+    uint32_t rms_min = 0xffffffffU;
+    uint32_t rms_max = 0;
+    uint64_t rms_sum = 0;
+
+    for (int32_t w = 0; w < window_count; w++) {
+        const int32_t target_frames = (int32_t) (((int64_t) sample_rate * (int64_t) window_ms) / 1000);
+        int32_t frames_done = 0;
+        uint64_t win_sum_sq = 0;
+        uint64_t win_sum_abs = 0;
+        int32_t win_peak = 0;
+        int32_t win_zc = 0;
+        int32_t have_prev = 0;
+        int32_t prev = 0;
+
+        while (frames_done < target_frames && read_calls < 5000) {
+            int32_t want = target_frames - frames_done;
+            if (want > 192) want = 192;
+
+            aaudio_result_t got = AAudioStream_read(stream, buffer, want, 100000000L);
+            read_calls++;
+
+            if (got < 0) {
+                char msg[192];
+                snprintf(msg, sizeof(msg), "rc=-34 step=read result=%d window=%d frames=%d", (int) got, (int) w, (int) frames_done);
+                AAudioStream_requestStop(stream);
+                AAudioStream_close(stream);
+                return (*env)->NewStringUTF(env, msg);
+            }
+
+            if (got == 0) {
+                continue;
+            }
+
+            for (int32_t i = 0; i < got; i++) {
+                int32_t v = buffer[i];
+                int32_t av = v < 0 ? -v : v;
+                if (av > win_peak) win_peak = av;
+                win_sum_abs += (uint64_t) av;
+                win_sum_sq += (uint64_t) ((int64_t) v * (int64_t) v);
+                if (have_prev) {
+                    if ((prev < 0 && v >= 0) || (prev >= 0 && v < 0)) win_zc++;
+                }
+                prev = v;
+                have_prev = 1;
+            }
+
+            frames_done += (int32_t) got;
+        }
+
+        uint32_t win_rms = frames_done > 0 ? fv_stage1s_isqrt_u64(win_sum_sq / (uint64_t) frames_done) : 0;
+
+        if (win_peak < peak_min) peak_min = win_peak;
+        if (win_peak > peak_max) peak_max = win_peak;
+        if (win_rms < rms_min) rms_min = win_rms;
+        if (win_rms > rms_max) rms_max = win_rms;
+
+        rms_sum += (uint64_t) win_rms;
+        total_frames += (uint64_t) frames_done;
+        total_sum_sq += win_sum_sq;
+        total_sum_abs += win_sum_abs;
+        total_zero_crossings += win_zc;
+
+        if (gap_ms > 0 && w + 1 < window_count) {
+            const int32_t gap_frames = (int32_t) (((int64_t) sample_rate * (int64_t) gap_ms) / 1000);
+            int32_t gap_done = 0;
+            while (gap_done < gap_frames && read_calls < 5000) {
+                int32_t want = gap_frames - gap_done;
+                if (want > 192) want = 192;
+                aaudio_result_t got = AAudioStream_read(stream, buffer, want, 100000000L);
+                read_calls++;
+                if (got < 0) {
+                    char msg[192];
+                    snprintf(msg, sizeof(msg), "rc=-35 step=gap_read result=%d window=%d", (int) got, (int) w);
+                    AAudioStream_requestStop(stream);
+                    AAudioStream_close(stream);
+                    return (*env)->NewStringUTF(env, msg);
+                }
+                gap_done += (int32_t) got;
+            }
+        }
+    }
+
+    AAudioStream_requestStop(stream);
+    AAudioStream_close(stream);
+
+    if (peak_min == 32767) peak_min = 0;
+    if (rms_min == 0xffffffffU) rms_min = 0;
+
+    uint32_t rms_avg = window_count > 0 ? (uint32_t) (rms_sum / (uint64_t) window_count) : 0;
+    uint32_t total_rms = total_frames > 0 ? fv_stage1s_isqrt_u64(total_sum_sq / total_frames) : 0;
+    uint32_t avg_abs = total_frames > 0 ? (uint32_t) (total_sum_abs / total_frames) : 0;
+
+    char msg[320];
+    snprintf(msg, sizeof(msg),
+             "rc=0 windows=%d window_ms=%d gap_ms=%d sample_rate=%d frames=%llu peak_min=%d peak_max=%d rms_min=%u rms_max=%u rms_avg=%u total_rms=%u avg_abs=%u zero_crossings=%d read_calls=%d",
+             (int) window_count,
+             (int) window_ms,
+             (int) gap_ms,
+             (int) sample_rate,
+             (unsigned long long) total_frames,
+             (int) peak_min,
+             (int) peak_max,
+             (unsigned) rms_min,
+             (unsigned) rms_max,
+             (unsigned) rms_avg,
+             (unsigned) total_rms,
+             (unsigned) avg_abs,
+             (int) total_zero_crossings,
+             (int) read_calls);
+
+    __android_log_print(ANDROID_LOG_INFO, FV_TAG, "native mic baseline: %s", msg);
+    return (*env)->NewStringUTF(env, msg);
+}

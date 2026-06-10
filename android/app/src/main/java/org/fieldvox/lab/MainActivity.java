@@ -68,6 +68,9 @@ public class MainActivity extends Activity {
     // FIELDVOX_STAGE1S_A_NATIVE_MIC_METRICS
     private native String nativeProbeStage1SMicWindow(int durationMs);
 
+    // FIELDVOX_STAGE1S_B_NATIVE_MIC_BASELINE
+    private native String nativeProbeStage1SMicBaseline(int windowCount, int windowMs, int gapMs);
+
 
     // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
     private TextView liveStreamStatusText;
@@ -2861,6 +2864,16 @@ public class MainActivity extends Activity {
                     micDetail = "rc=-99 step=java_throwable detail=" + t.toString();
                 }
                 appendStage1QDLiveEvent("native_mic_metrics_complete", null, micDetail.startsWith("rc=0") ? "complete" : "error", micDetail);
+
+                appendStage1QDLiveEvent("native_mic_baseline_started", null, "started", "C_AAudio baseline windows=5 window_ms=180 gap_ms=60");
+                String baselineDetail;
+                try {
+                    baselineDetail = nativeProbeStage1SMicBaseline(5, 180, 60);
+                } catch (Throwable t) {
+                    baselineDetail = "rc=-199 step=java_throwable detail=" + t.toString();
+                }
+                appendStage1QDLiveEvent("native_mic_baseline_complete", null, baselineDetail.startsWith("rc=0") ? "complete" : "error", baselineDetail);
+
 
 
             } catch (Throwable t) {

@@ -318,7 +318,6 @@ Use careful language:
 FieldVox Lab should not be used for health, safety, legal, financial, grief, or other important life decisions.
 <!-- FIELDVOX_CURRENT_FEATURES_END -->
 
-
 <!-- FIELDVOX_LATEST_NATIVE_AUDIO_BEGIN -->
 ## Latest native audio work
 
@@ -330,17 +329,22 @@ FieldVox Lab keeps long-form radio-style playback disabled while native audio wo
 - **Stage 1R-A:** added a native C AAudio proof using a static 64-sample PCM waveform blob. Java is only JNI/UI glue.
 - **Stage 1R-B:** added a native C short-window sequencer that plays five short PCM-blob bursts with controlled gaps.
 - **Stage 1S-A:** added a native C microphone metrics window using AAudio input.
-- The Stage 1S-A proof reads a short microphone window and logs only signal statistics:
-  - input window: 900 ms
+- **Stage 1S-B:** added a native C microphone baseline profiler using five short AAudio input windows.
+- Stage 1S-B logs only signal statistics:
+  - baseline windows: 5
+  - window length: 180 ms
+  - gap length: 60 ms
   - sample rate observed: 48000 Hz
   - frames read: 43200
-  - peak: 124
-  - rms: 26
-  - average absolute level: 20
-  - zero crossings: 3707
+  - peak range: 41 to 55
+  - rms range: 10 to 12
+  - rms average: 10
+  - total rms: 11
+  - average absolute level: 9
+  - zero crossings: 6613
 - Java `MediaPlayer` stream playback is not used for the native audio proof.
 - The native output tones and burst sequence are development proofs for low-level timing, playback, stop control, and audio-window boundaries.
-- The native microphone metrics proof stores no audio and performs no language interpretation.
+- The native microphone metrics and baseline proofs store no audio and perform no language interpretation.
 - This audio pipeline is not an interpreter, not a translation system, not EVP evidence, and not proof of paranormal communication.
 - FieldVox Lab does not create messages for users; it records controlled session context for later human review.
 
