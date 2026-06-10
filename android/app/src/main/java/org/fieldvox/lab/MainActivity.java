@@ -52,6 +52,17 @@ import java.util.Iterator;
 
 public class MainActivity extends Activity {
 
+    // FIELDVOX_STAGE1R_NATIVE_AUDIO_WINDOW
+    static {
+        try {
+            System.loadLibrary("fieldvox_stage1r_native");
+        } catch (UnsatisfiedLinkError ignored) {
+        }
+    }
+
+    private native int nativePlayStage1RShortBurst(int durationMs, int frequencyHz, float amplitude);
+
+
     // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
     private TextView liveStreamStatusText;
     private Button liveStreamButton;
@@ -2825,6 +2836,18 @@ public class MainActivity extends Activity {
         // FIELDVOX_STAGE1QF_DISABLE_LONG_STREAM_PLAYBACK
         stopStage1QDLiveStreamIfActive("long_stream_disabled_before_start");
         appendStage1QDLiveEvent("live_stream_disabled", null, "disabled", "Long-form radio playback disabled after Stage 1Q-D/1Q-E test. Next implementation must use short buffered windows only.");
+        appendStage1QDLiveEvent("native_short_audio_window_started", null, "started", "C_AAudio static_pcm_blob duration_ms=650");
+        new Thread(() -> {
+            int rc = -9999;
+            try {
+                rc = nativePlayStage1RShortBurst(650, 660, 0.30f);
+                appendStage1QDLiveEvent("native_short_audio_window_complete", null, rc == 0 ? "complete" : "error", "C_AAudio rc=" + rc + " duration_ms=650");
+            } catch (Throwable t) {
+                appendStage1QDLiveEvent("native_short_audio_window_error", null, "error", t.toString());
+            }
+            final int rcFinal = rc;
+            runOnUiThread(() -> setStage1QDStatus("Native C short audio window: " + (rcFinal == 0 ? "complete" : "error rc=" + rcFinal) + "\nLong-form station playback remains disabled.\nThis does not prove paranormal communication."));
+        }, "fieldvox-stage1r-native-audio-window").start();
         runOnUiThread(() -> {
             if (liveStreamButton != null) {
                 liveStreamButton.setText("Live Stream Disabled");

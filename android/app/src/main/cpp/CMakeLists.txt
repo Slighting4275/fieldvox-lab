@@ -25,3 +25,14 @@ target_link_libraries(
     aaudio
     m
 )
+
+# FIELDVOX_STAGE1R_NATIVE_AUDIO_WINDOW
+add_library(fieldvox_stage1r_native SHARED
+    fv_stage1r_native_audio.c
+)
+
+target_link_libraries(fieldvox_stage1r_native
+    android
+    log
+    aaudio
+)
