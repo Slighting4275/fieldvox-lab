@@ -58,6 +58,9 @@ Linux prototype/tools:
 
 ## License
 
-FieldVox Lab is licensed under the GNU General Public License, either version 3 of the License, or (at your option) any later version.
+FieldVox Lab is free software licensed under both the GNU General Public License version 3 or later and the GNU Affero General Public License version 3 or later.
 
-The full license text is in LICENSE. The official GNU GPL version 3 text is also kept in COPYING.
+This is an AND-style combined copyleft policy, not an OR-choice. The intent is that forks, redistributed versions, modified versions, and hosted/network-service versions remain free and open source.
+
+See `LICENSE` for the full combined notice and full license texts. See `COPYING` for the GNU GPL text, `COPYING.AGPL` for the GNU AGPL text, and `docs/COMBINED_GPL_AGPL_LICENSE_POLICY.md` for the project policy.
+
