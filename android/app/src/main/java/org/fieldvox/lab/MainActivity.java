@@ -71,6 +71,10 @@ public class MainActivity extends Activity {
     // FIELDVOX_STAGE1S_B_NATIVE_MIC_BASELINE
     private native String nativeProbeStage1SMicBaseline(int windowCount, int windowMs, int gapMs);
 
+    // FIELDVOX_STAGE1S_C_NATIVE_CARRIER_KILL
+    private native boolean nativeStage1SCDisableLegacyCarrier();
+    private native void nativeStage1SCNoteLegacyCarrierBlocked(String methodName);
+
 
     // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
     private TextView liveStreamStatusText;
@@ -1451,6 +1455,10 @@ public class MainActivity extends Activity {
         onlineCarrierLastForcedSilenceMs = forcedSilenceMs;
         onlineCarrierLastPacketUnixMs = now;
 
+        if (stage1SCBlockLegacyCarrier("phoneticPacketOpen")) {
+            return;
+        }
+
         String openMsg = "PHONETIC VOX packet open: " + onlineCarrierLabel()
                 + " | Reason: " + reason
                 + " delta=" + String.format(java.util.Locale.US, "%.2f", delta)
@@ -1544,6 +1552,9 @@ public class MainActivity extends Activity {
 
 
     private void startOnlineCarrierAutoGate() {
+        if (stage1SCBlockLegacyCarrier("startOnlineCarrierAutoGate")) {
+            return;
+        }
         if (onlineCarrierAutoGateRunnable != null) {
             return;
         }
@@ -1820,7 +1831,57 @@ public class MainActivity extends Activity {
         return n;
     }
 
+    private boolean stage1SCBlockLegacyCarrier(String methodName) {
+        boolean disabled = true;
+        try {
+            disabled = nativeStage1SCDisableLegacyCarrier();
+        } catch (Throwable ignored) {
+            disabled = true;
+        }
+        if (!disabled) {
+            return false;
+        }
+
+        onlineCarrierActive = false;
+        onlineCarrierPrepared = false;
+        onlineCarrierGateOpen = false;
+        onlineCarrierPrepareToken++;
+        onlineCarrierGateToken++;
+
+        try {
+            if (onlineCarrierPlayer != null) {
+                onlineCarrierPlayer.stop();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            if (onlineCarrierPlayer != null) {
+                onlineCarrierPlayer.release();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        onlineCarrierPlayer = null;
+
+        try {
+            appendStage1QDLiveEvent("legacy_carrier_disabled", null, "disabled", "Stage 1S-C native C policy blocked " + methodName);
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            nativeStage1SCNoteLegacyCarrierBlocked(methodName);
+        } catch (Throwable ignored) {
+        }
+
+        android.util.Log.w("FieldVox", "Stage 1S-C native C policy blocked legacy carrier path: " + methodName);
+        return true;
+    }
+
     private void advanceOnlineCarrierSweep(String reason) {
+        if (stage1SCBlockLegacyCarrier("advanceOnlineCarrierSweep")) {
+            return;
+        }
         if (!onlineCarrierActive || ONLINE_CARRIER_URLS.length <= 0) {
             return;
         }
@@ -1841,6 +1902,9 @@ public class MainActivity extends Activity {
     }
 
     private void prepareOnlineCarrierAtIndex(int index) {
+        if (stage1SCBlockLegacyCarrier("prepareOnlineCarrierAtIndex")) {
+            return;
+        }
         if (!onlineCarrierActive) {
             return;
         }

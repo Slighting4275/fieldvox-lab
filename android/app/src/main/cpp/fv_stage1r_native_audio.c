@@ -568,3 +568,24 @@ Java_org_fieldvox_lab_MainActivity_nativeProbeStage1SMicBaseline(
     __android_log_print(ANDROID_LOG_INFO, FV_TAG, "native mic baseline: %s", msg);
     return (*env)->NewStringUTF(env, msg);
 }
+
+
+// FIELDVOX_STAGE1S_C_NATIVE_CARRIER_KILL
+// Native C policy gate for disabling legacy Java stream carriers.
+// This keeps long-form MediaPlayer carrier streams disabled while native C AAudio work continues.
+JNIEXPORT jboolean JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeStage1SCDisableLegacyCarrier(JNIEnv *env, jobject thiz) {
+    (void) env;
+    (void) thiz;
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeStage1SCNoteLegacyCarrierBlocked(JNIEnv *env, jobject thiz, jstring method_name) {
+    (void) thiz;
+    const char *m = method_name ? (*env)->GetStringUTFChars(env, method_name, 0) : 0;
+    __android_log_print(ANDROID_LOG_WARN, FV_TAG, "Stage 1S-C native C blocked legacy carrier path: %s", m ? m : "unknown");
+    if (m) {
+        (*env)->ReleaseStringUTFChars(env, method_name, m);
+    }
+}

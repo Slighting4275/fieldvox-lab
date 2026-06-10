@@ -330,19 +330,16 @@ FieldVox Lab keeps long-form radio-style playback disabled while native audio wo
 - **Stage 1R-B:** added a native C short-window sequencer that plays five short PCM-blob bursts with controlled gaps.
 - **Stage 1S-A:** added a native C microphone metrics window using AAudio input.
 - **Stage 1S-B:** added a native C microphone baseline profiler using five short AAudio input windows.
-- Stage 1S-B logs only signal statistics:
-  - baseline windows: 5
-  - window length: 180 ms
-  - gap length: 60 ms
-  - sample rate observed: 48000 Hz
-  - frames read: 43200
-  - peak range: 41 to 55
-  - rms range: 10 to 12
-  - rms average: 10
-  - total rms: 11
-  - average absolute level: 9
-  - zero crossings: 6613
-- Java `MediaPlayer` stream playback is not used for the native audio proof.
+- **Stage 1S-C:** added a native C/JNI policy kill switch for the legacy Java stream carrier path.
+- Stage 1S-C was added after Pixel testing showed a separate legacy PHONETIC VOX/MediaPlayer path still preparing KOMO/KIRO/KUOW-style carrier streams.
+- The Stage 1S-C proof verified:
+  - legacy carrier block event: present
+  - KOMO/KIRO/KUOW logcat patterns: absent
+  - MediaPlayer carrier logcat patterns: absent
+  - PHONETIC VOX carrier logcat patterns: absent
+  - live stream start/connect/source-selected events: absent
+  - native C AAudio output/input tests: still available
+- Java `MediaPlayer` stream playback is not used for the current native audio proof.
 - The native output tones and burst sequence are development proofs for low-level timing, playback, stop control, and audio-window boundaries.
 - The native microphone metrics and baseline proofs store no audio and perform no language interpretation.
 - This audio pipeline is not an interpreter, not a translation system, not EVP evidence, and not proof of paranormal communication.
