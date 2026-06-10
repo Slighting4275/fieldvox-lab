@@ -7,6 +7,7 @@ add_library(
     SHARED
     fieldvox_jni.cpp
     fv_core.c
+    fv_source_audit.c
 )
 
 target_compile_features(fieldvox PRIVATE cxx_std_20)

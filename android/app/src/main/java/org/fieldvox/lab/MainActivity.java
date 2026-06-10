@@ -155,6 +155,7 @@ public class MainActivity extends Activity {
     private static final int LIVE_PERMISSION_REQUEST = 4101;
 
 
+    private native String nativeSourceAuditHit(String hitDirPath, String hitId, String hitJsonObject);
     private native void nativeInit(String packageName, String filesDir);
     private native String nativeStatus();
     private native String nativeSessionList();
@@ -774,6 +775,14 @@ public class MainActivity extends Activity {
         String hitId = "hit_" + sessionStem + "_" + now + "_" + localCount;
         String cleanedLabel = label == null ? "" : label.trim();
         String jsonLine = buildHitJsonLine(hitId, now, cleanedLabel, sessionStem, offsetMs);
+
+            try {
+                String sourceAuditResult = nativeSourceAuditHit(hitMarkerDir().getAbsolutePath(), hitId, jsonLine);
+                Log.i("FieldVox", sourceAuditResult);
+            } catch (Throwable sourceAuditThrowable) {
+                Log.w("FieldVox", "Native source audit failed", sourceAuditThrowable);
+            }
+
 
         File dir = hitMarkerDir();
         File hitJson = new File(dir, hitId + ".json");
