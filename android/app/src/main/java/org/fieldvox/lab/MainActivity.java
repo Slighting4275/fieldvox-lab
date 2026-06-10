@@ -1143,10 +1143,11 @@ public class MainActivity extends Activity {
         final android.content.Context appContext = getApplicationContext();
         new Thread(() -> {
             try {
-                org.json.JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 12);
+                org.json.JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
                 int slotCount = result.optInt("slot_count", 0);
                 String server = result.optString("server_selected", "");
-                Log.i("FieldVox", "RADIO_BROWSER_CACHE_OK slots=" + slotCount + " server=" + server);
+                int catalogCount = result.optInt("catalog_count", 0);
+                Log.i("FieldVox", "RADIO_BROWSER_CACHE_OK catalog=" + catalogCount + " slots=" + slotCount + " server=" + server);
                 runOnUiThread(() -> android.widget.Toast.makeText(
                         this,
                         "Radio Browser sources cached: " + slotCount,

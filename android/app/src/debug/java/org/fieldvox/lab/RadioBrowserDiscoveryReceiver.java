@@ -32,10 +32,11 @@ public final class RadioBrowserDiscoveryReceiver extends BroadcastReceiver {
 
         new Thread(() -> {
             try {
-                JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 12);
+                JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
                 int slotCount = result.optInt("slot_count", 0);
                 String server = result.optString("server_selected", "");
-                Log.i(TAG, "RADIO_BROWSER_CACHE_OK slots=" + slotCount + " server=" + server + " trigger=debug_receiver");
+                int catalogCount = result.optInt("catalog_count", 0);
+                Log.i(TAG, "RADIO_BROWSER_CACHE_OK catalog=" + catalogCount + " slots=" + slotCount + " server=" + server + " trigger=debug_receiver");
             } catch (Throwable t) {
                 Log.w(TAG, "RADIO_BROWSER_CACHE_FAILED trigger=debug_receiver", t);
             } finally {
