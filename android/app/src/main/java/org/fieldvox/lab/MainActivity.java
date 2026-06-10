@@ -1072,6 +1072,7 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleAdbHitMarkerIntent(intent);
+        handleRadioBrowserDiscoveryIntent(intent);
     }
 
     private void handleAdbHitMarkerIntent(Intent intent) {
@@ -1123,6 +1124,43 @@ public class MainActivity extends Activity {
         handler.postDelayed(() -> {
             markCandidateHit(finalLabel);
         }, 1200L);
+    }
+
+
+    private void handleRadioBrowserDiscoveryIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        String action = intent.getAction();
+        boolean requested = "org.fieldvox.lab.RADIO_BROWSER_DISCOVER".equals(action)
+                || intent.getBooleanExtra("fieldvox_radio_browser_discover", false);
+        if (!requested) {
+            return;
+        }
+
+        Log.i("FieldVox", "RADIO_BROWSER_DISCOVER requested");
+
+        final android.content.Context appContext = getApplicationContext();
+        new Thread(() -> {
+            try {
+                org.json.JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 12);
+                int slotCount = result.optInt("slot_count", 0);
+                String server = result.optString("server_selected", "");
+                Log.i("FieldVox", "RADIO_BROWSER_CACHE_OK slots=" + slotCount + " server=" + server);
+                runOnUiThread(() -> android.widget.Toast.makeText(
+                        this,
+                        "Radio Browser sources cached: " + slotCount,
+                        android.widget.Toast.LENGTH_LONG
+                ).show());
+            } catch (Throwable t) {
+                Log.w("FieldVox", "RADIO_BROWSER_CACHE_FAILED", t);
+                runOnUiThread(() -> android.widget.Toast.makeText(
+                        this,
+                        "Radio Browser source cache failed",
+                        android.widget.Toast.LENGTH_LONG
+                ).show());
+            }
+        }, "fieldvox-radio-browser-discovery").start();
     }
 
     private void updateLiveButtons() {
@@ -2101,6 +2139,7 @@ public class MainActivity extends Activity {
         } else {
             autoStartEverythingOnLaunch();
         handleAdbHitMarkerIntent(getIntent());
+        handleRadioBrowserDiscoveryIntent(getIntent());
             msg = "Auto Live is arming.";
         }
         exportStatus.setText(msg);
@@ -2376,7 +2415,7 @@ public class MainActivity extends Activity {
         updateSpeakerMonitorButton();
 
         handler.post(tick);
-    
+
         handler.postDelayed(() -> autoStartEverythingOnLaunch(), 700);
 }
 
