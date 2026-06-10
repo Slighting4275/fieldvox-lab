@@ -1,8 +1,8 @@
 # FieldVox Lab
 
-FieldVox Lab is an experimental EVP/ITC audio review app. EVP means Electronic Voice Phenomena: audio recordings that people later review for words, voices, or phrases they believe they heard. ITC means Instrumental Transcommunication: using electronic tools such as audio recorders, radios, live audio streams, sensors, or computers as part of a session.
+FieldVox Lab is an experimental live EVP/ITC session app. EVP means Electronic Voice Phenomena: audio recordings that people later review for words, voices, or phrases they believe they heard. ITC means Instrumental Transcommunication: using electronic tools such as audio recorders, radios, live audio streams, sensors, or computers as part of a session.
 
-FieldVox helps you record sessions, mark interesting moments, and export audio and notes for review. It does not prove that any sound is paranormal, that any voice is real, or that communication happened. It gives you organized recordings, hit markers, review clips, and logs so you can study what was captured more carefully.
+FieldVox lets you listen in real time while a session is running, mark interesting moments as they happen, and save the audio, notes, and session logs for later review. It does not prove that any sound is paranormal, that any voice is real, or that communication happened. It gives you organized recordings, live hit markers, review clips, and logs so you can study what was captured more carefully.
 
 ## Current Android checkpoint
 
@@ -67,7 +67,7 @@ See `LICENSE` for the full combined notice and full license texts. See `COPYING`
 <!-- FIELDVOX_CURRENT_FEATURES_START -->
 ## What FieldVox Lab is
 
-FieldVox Lab is an experimental Android app for EVP/ITC audio sessions and for keeping a clear record of what happened during those sessions.
+FieldVox Lab is an experimental Android app for live EVP/ITC sessions and for keeping a clear record of what happened during those sessions.
 
 A simple way to think about it:
 
@@ -90,7 +90,7 @@ EVP means Electronic Voice Phenomena. In plain language, it means recording audi
 
 ITC means Instrumental Transcommunication. In plain language, it means using electronic tools such as recorders, radios, live audio streams, sensors, or computers as part of a session.
 
-FieldVox Lab supports EVP/ITC-style review, but it does not prove that a sound is paranormal, that a voice is real, or that communication happened.
+FieldVox Lab supports live EVP/ITC sessions. You can listen while the session is running, mark interesting moments in real time, and then save or export the recording and notes for later review. It does not prove that a sound is paranormal, that a voice is real, or that communication happened.
 
 ### What happens when you run a session
 
