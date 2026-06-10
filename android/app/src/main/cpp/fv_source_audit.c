@@ -11,7 +11,7 @@
 #include <unistd.h>
 
 /*
- * FieldVox Stage 1P-A Native Source Provenance + Timeline + Sweep Schedule Audit
+ * FieldVox Stage 1P-B Native Source Provenance + Timeline + Sweep Schedule Audit
  * GPL-3.0-or-later project code.
  *
  * Native C responsibilities:
@@ -20,7 +20,7 @@
  * - serialize per-hit source audit JSON with timeline_snapshot and sweep_engine
  * - write per-hit JSON, JSONL ledgers, slot catalog, scheduler manifest, and README
  *
- * Stage 1P-A does not alter audio playback yet. Java/Android still owns playback.
+ * Stage 1P-B does not alter audio playback yet. Java/Android still owns playback.
  * Native C records the deterministic schedule evidence layer first.
  *
  * Native C does not:
@@ -335,8 +335,8 @@ static char *fvsa_sweep_engine_json(const FvsaSweepEvent *ev) {
         out,
         cap,
         "{"
-        "\"stage\":\"1P-A\","
-        "\"scheduler\":\"native_c_deterministic\","
+        "\"stage\":\"1P-B\","
+        "\"scheduler\":\"native_c_deterministic\",\"catalog_provider\":\"manual_seed_v1_radio_browser_compatible\",\"radio_browser_compatible\":true,\"uuid_policy\":\"stationuuid_required\",\"countrycode_policy\":\"countrycode_required\",\"server_discovery_policy\":\"future_dns_all_api_radio_browser_info_randomize_retry\",\"http_user_agent_policy\":\"speaking_agent_required\","
         "\"seed_hex\":\"%016llx\","
         "\"slot_count\":%d,"
         "\"active_slot\":%d,"
@@ -383,7 +383,7 @@ static char *fvsa_sweep_event_json(const FvsaSweepEvent *ev) {
         "{"
         "\"event\":\"sweep_slot\","
         "\"event_type\":\"sweep_slot\","
-        "\"stage\":\"1P-A\","
+        "\"stage\":\"1P-B\","
         "\"seq\":%llu,"
         "\"unix_ms\":%lld,"
         "\"slot\":%d,"
@@ -395,7 +395,7 @@ static char *fvsa_sweep_event_json(const FvsaSweepEvent *ev) {
         "\"dwell_ms\":%d,"
         "\"jitter_ms\":%d,"
         "\"seed_hex\":\"%016llx\","
-        "\"scheduler\":\"native_c_deterministic\","
+        "\"scheduler\":\"native_c_deterministic\",\"catalog_provider\":\"manual_seed_v1_radio_browser_compatible\",\"radio_browser_compatible\":true,\"uuid_policy\":\"stationuuid_required\",\"countrycode_policy\":\"countrycode_required\",\"server_discovery_policy\":\"future_dns_all_api_radio_browser_info_randomize_retry\",\"http_user_agent_policy\":\"speaking_agent_required\","
         "\"overlap_policy\":\"single_open_slot\","
         "\"generated_words\":false,"
         "\"word_bank\":false,"
@@ -426,7 +426,7 @@ static char *fvsa_source_slots_json(void) {
 
     size_t len = 0;
     int wrote = snprintf(out + len, cap - len,
-        "{\"event_type\":\"source_slots\",\"stage\":\"1P-A\",\"slot_count\":%d,\"slots\":[",
+        "{\"event_type\":\"source_slots\",\"stage\":\"1P-B\",\"catalog_provider\":\"manual_seed_v1_radio_browser_compatible\",\"radio_browser_compatible\":true,\"uuid_policy\":\"stationuuid_required\",\"countrycode_policy\":\"countrycode_required\",\"server_discovery_policy\":\"future_dns_all_api_radio_browser_info_randomize_retry\",\"http_user_agent_policy\":\"speaking_agent_required\",\"raw_stream_urls_exported\":false,\"slot_count\":%d,\"slots\":[",
         FVSA_SWEEP_SLOT_COUNT);
     if (wrote < 0 || (size_t)wrote >= cap - len) {
         free(out);
@@ -439,7 +439,7 @@ static char *fvsa_source_slots_json(void) {
         wrote = snprintf(
             out + len,
             cap - len,
-            "%s{\"slot\":%d,\"stationuuid\":\"%s\",\"station_name\":\"%s\",\"countrycode\":\"%s\",\"language\":\"%s\",\"stream_url_hash\":\"%s\",\"source_label\":\"%s\"}",
+            "%s{\"slot\":%d,\"stationuuid\":\"%s\",\"station_name\":\"%s\",\"countrycode\":\"%s\",\"language\":\"%s\",\"stream_url_hash\":\"%s\",\"source_label\":\"%s\",\"stationuuid_source\":\"manual_seed_pending_live_radio_browser_lookup\",\"raw_stream_url_exported\":false,\"url_hash_policy\":\"hash_only_until_live_resolution\"}",
             i == 0 ? "" : ",",
             s->slot,
             s->station_uuid,
@@ -472,15 +472,15 @@ static char *fvsa_sweep_manifest_json(void) {
         cap,
         "{"
         "\"event_type\":\"sweep_manifest\","
-        "\"stage\":\"1P-A\","
-        "\"scheduler\":\"native_c_deterministic\","
+        "\"stage\":\"1P-B\","
+        "\"scheduler\":\"native_c_deterministic\",\"catalog_provider\":\"manual_seed_v1_radio_browser_compatible\",\"radio_browser_compatible\":true,\"uuid_policy\":\"stationuuid_required\",\"countrycode_policy\":\"countrycode_required\",\"server_discovery_policy\":\"future_dns_all_api_radio_browser_info_randomize_retry\",\"http_user_agent_policy\":\"speaking_agent_required\","
         "\"slot_count\":%d,"
         "\"overlap_policy\":\"single_open_slot\","
         "\"dwell_ms_min\":160,"
         "\"dwell_ms_max\":280,"
         "\"jitter_ms_min\":0,"
         "\"jitter_ms_max\":60,"
-        "\"audio_engine_changed\":false,"
+        "\"catalog_provider\":\"manual_seed_v1_radio_browser_compatible\",\"radio_browser_compatible\":true,\"uuid_policy\":\"stationuuid_required\",\"countrycode_policy\":\"countrycode_required\",\"server_discovery_policy\":\"future_dns_all_api_radio_browser_info_randomize_retry\",\"http_user_agent_policy\":\"speaking_agent_required\",\"raw_stream_urls_exported\":false,\"audio_engine_changed\":false,"
         "\"java_playback_owner\":true,"
         "\"native_scheduler_evidence_only\":true,"
         "\"generated_words\":false,"
@@ -716,15 +716,15 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         "{"
         "\"event\":\"source_audit\","
         "\"event_type\":\"source_audit\","
-        "\"stage\":\"1P-A\","
-        "\"audit_format_version\":3,"
+        "\"stage\":\"1P-B\","
+        "\"audit_format_version\":4,"
         "\"native_writer\":\"c_jni\","
         "\"implementation_language\":\"C\","
         "\"binary_magic_hex\":\"%s\","
         "\"audit_unix_ms\":%lld,"
         "\"hit_id\":\"%s\","
         "\"hit_json_fnv1a64\":\"%s\","
-        "\"sweep_engine\":%s,"
+        "\"sweep_engine\":%s,\"source_catalog_policy\":{\"provider\":\"manual_seed_v1_radio_browser_compatible\",\"radio_browser_compatible\":true,\"uuid_policy\":\"stationuuid_required\",\"countrycode_policy\":\"countrycode_required\",\"server_discovery_policy\":\"future_dns_all_api_radio_browser_info_randomize_retry\",\"http_user_agent_policy\":\"speaking_agent_required\",\"raw_stream_urls_exported\":false},"
         "\"timeline_window_ms\":60000,"
         "\"timeline_snapshot\":%s,"
         "\"source_hit_json\":%s%s%s,"
@@ -803,11 +803,11 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
         "FieldVox Native Source Audit\n"
         "\n"
         "These files are generated by native C/JNI code.\n"
-        "Stage 1P-A adds a deterministic native C sweep schedule evidence layer.\n"
+        "Stage 1P-B adds a deterministic native C sweep schedule evidence layer.\n"
         "This stage records scheduler metadata and source slots but does not change playback.\n"
         "\n"
         "sweep_manifest.json describes scheduler policy.\n"
-        "source_slots.json describes source slot identities.\n"
+        "source_slots.json describes source slot identities and Radio Browser-compatible UUID/countrycode policy.\n"
         "sweep_schedule.jsonl appends one deterministic sweep_slot event per marked hit.\n"
         "source_audit_*.json embeds sweep_engine, timeline_snapshot, and source_hit_json.\n"
         "\n"
