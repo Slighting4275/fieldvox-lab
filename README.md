@@ -317,3 +317,34 @@ Use careful language:
 
 FieldVox Lab should not be used for health, safety, legal, financial, grief, or other important life decisions.
 <!-- FIELDVOX_CURRENT_FEATURES_END -->
+
+<!-- FIELDVOX_LATEST_NATIVE_AUDIO_BEGIN -->
+## Latest native audio work
+
+FieldVox Lab keeps long-form radio-style playback disabled while native audio work is rebuilt safely.
+
+### Current audio state
+
+- **Stage 1Q-F:** disabled long-form live stream playback after the Stage 1Q-D/1Q-E radio-style stream test proved unsuitable for the EVP/ITC workflow.
+- **Stage 1R-A:** added a native C AAudio proof using a static 64-sample PCM waveform blob. Java is only JNI/UI glue.
+- **Stage 1R-B:** added a native C short-window sequencer that plays five short PCM-blob bursts with controlled gaps.
+- The Stage 1R-B proof uses:
+  - audio engine: native C + AAudio
+  - waveform: static PCM blob
+  - sequence: 5 bursts
+  - burst length: 110 ms
+  - gap length: 70 ms
+  - amplitude: 0.28
+- Java `MediaPlayer` stream playback is not used for the native audio proof.
+- The native tone/burst audio is a development proof for low-level timing, playback, stop control, and audio-window boundaries.
+- This audio is not an interpreter, not a translation system, not EVP evidence, and not proof of paranormal communication.
+- FieldVox Lab does not create messages for users; it records controlled session context for later human review.
+
+### Implementation policy
+
+Use C/native/lower-level code for app behavior whenever possible. Use Java only where Android UI, lifecycle, permission, or JNI platform glue requires it.
+
+### Privacy and source policy
+
+Raw station stream URLs remain app-private. Public/export-safe source files must use metadata and hashes only. FieldVox Lab remains an experimental live EVP/ITC session app and should not be used for important life, health, legal, financial, grief, or safety decisions.
+<!-- FIELDVOX_LATEST_NATIVE_AUDIO_END -->

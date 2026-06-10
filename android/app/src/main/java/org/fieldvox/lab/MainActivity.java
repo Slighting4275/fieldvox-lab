@@ -62,6 +62,9 @@ public class MainActivity extends Activity {
 
     private native int nativePlayStage1RShortBurst(int durationMs, int frequencyHz, float amplitude);
 
+    // FIELDVOX_STAGE1R_B_NATIVE_WINDOW_SEQUENCER
+    private native int nativePlayStage1RWindowSequence(int burstCount, int burstMs, int gapMs, float amplitude);
+
 
     // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
     private TextView liveStreamStatusText;
@@ -2842,6 +2845,11 @@ public class MainActivity extends Activity {
             try {
                 rc = nativePlayStage1RShortBurst(650, 660, 0.30f);
                 appendStage1QDLiveEvent("native_short_audio_window_complete", null, rc == 0 ? "complete" : "error", "C_AAudio rc=" + rc + " duration_ms=650");
+
+                appendStage1QDLiveEvent("native_window_sequence_started", null, "started", "C_AAudio static_pcm_blob bursts=5 burst_ms=110 gap_ms=70");
+                int seqRc = nativePlayStage1RWindowSequence(5, 110, 70, 0.28f);
+                appendStage1QDLiveEvent("native_window_sequence_complete", null, seqRc == 0 ? "complete" : "error", "C_AAudio rc=" + seqRc + " bursts=5 burst_ms=110 gap_ms=70");
+
             } catch (Throwable t) {
                 appendStage1QDLiveEvent("native_short_audio_window_error", null, "error", t.toString());
             }
