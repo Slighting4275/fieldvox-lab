@@ -331,14 +331,10 @@ FieldVox Lab keeps long-form radio-style playback disabled while native audio wo
 - **Stage 1S-A:** added a native C microphone metrics window using AAudio input.
 - **Stage 1S-B:** added a native C microphone baseline profiler using five short AAudio input windows.
 - **Stage 1S-C:** added a native C/JNI policy kill switch for the legacy Java stream carrier path.
-- Stage 1S-C was added after Pixel testing showed a separate legacy PHONETIC VOX/MediaPlayer path still preparing KOMO/KIRO/KUOW-style carrier streams.
-- The Stage 1S-C proof verified:
-  - legacy carrier block event: present
-  - KOMO/KIRO/KUOW logcat patterns: absent
-  - MediaPlayer carrier logcat patterns: absent
-  - PHONETIC VOX carrier logcat patterns: absent
-  - live stream start/connect/source-selected events: absent
-  - native C AAudio output/input tests: still available
+- **Stage 1S-D:** removed stale visible carrier UI text and labels from the Android UI using a C patcher.
+- Stage 1S-D changes the visible mode to native audio safety mode and shows that the microphone path is metrics-only with no radio output.
+- Current audible output is native C test audio only. Voice/radio-style grains are not currently enabled.
+- The legacy carrier path remains blocked; live stream active/connect/source-selected events remain absent.
 - Java `MediaPlayer` stream playback is not used for the current native audio proof.
 - The native output tones and burst sequence are development proofs for low-level timing, playback, stop control, and audio-window boundaries.
 - The native microphone metrics and baseline proofs store no audio and perform no language interpretation.

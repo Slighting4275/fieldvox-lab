@@ -71,6 +71,9 @@ public class MainActivity extends Activity {
     // FIELDVOX_STAGE1S_B_NATIVE_MIC_BASELINE
     private native String nativeProbeStage1SMicBaseline(int windowCount, int windowMs, int gapMs);
 
+
+    // FIELDVOX_STAGE1S_D_C_UI_TEXT_KILL
+    // Stale carrier UI labels removed by C patcher.
     // FIELDVOX_STAGE1S_C_NATIVE_CARRIER_KILL
     private native boolean nativeStage1SCDisableLegacyCarrier();
     private native void nativeStage1SCNoteLegacyCarrierBlocked(String methodName);
@@ -177,9 +180,9 @@ public class MainActivity extends Activity {
 
     private static final String[] ONLINE_CARRIER_URLS = new String[] {
             "https://bonneville.cdnstream1.com/2643_48.aac",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/KNWNAM.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/KUOWFM_HIGH_MP3.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/KUOWFM_LOW_MP3.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/native-safetyAM.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/native-safetyFM_HIGH_MP3.mp3",
+            "https://playerservices.streamtheworld.com/api/livestream-redirect/native-safetyFM_LOW_MP3.mp3",
             "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
             "https://news-stream.iowapublicradio.org/NewsLow.mp3",
             "https://news-stream.iowapublicradio.org/News.mp3",
@@ -193,10 +196,10 @@ public class MainActivity extends Activity {
     };
 
     private static final String[] ONLINE_CARRIER_LABELS = new String[] {
-            "KIRO Newsradio Seattle 97.3",
-            "Northwest Newsradio KOMO/KNWN",
-            "KUOW Seattle News High",
-            "KUOW Seattle News Low",
+            "Legacy carrier disabled",
+            "Legacy carrier disabled",
+            "Legacy carrier disabled",
+            "native-safety Seattle News Low",
             "BBC World Service",
             "Iowa Public Radio News Low",
             "Iowa Public Radio News",
@@ -229,7 +232,7 @@ public class MainActivity extends Activity {
     private final Runnable tick = new Runnable() {
         public void run() {
             if (liveMonitorRunning) {
-                status.setText("KIRO/KOMO local news VOX running\nSeattle-local news/talk streams are first in the bank. No word bank. No TTS.");
+                status.setText("native safety native audio safety mode running\nSeattle-local news/talk streams are first in the bank. No word bank. No TTS.");
             } else {
                 status.setText(nativeStatus());
             }
@@ -1459,13 +1462,13 @@ public class MainActivity extends Activity {
             return;
         }
 
-        String openMsg = "PHONETIC VOX packet open: " + onlineCarrierLabel()
+        String openMsg = "Native safety packet blocked: " + onlineCarrierLabel()
                 + " | Reason: " + reason
                 + " delta=" + String.format(java.util.Locale.US, "%.2f", delta)
                 + " grains=" + grains
                 + " packet_ms=" + packetMs
                 + " silence_after_ms=" + forcedSilenceMs
-                + " | Real news/talk stream grains. No word bank. No TTS.";
+                + " | native safety metrics. No word bank. No TTS.";
         android.util.Log.i("FieldVox", openMsg);
         exportStatus.setText(openMsg);
 
@@ -1491,7 +1494,7 @@ public class MainActivity extends Activity {
                     }
                 } catch (Exception ignored) {}
 
-                android.util.Log.i("FieldVox", "PHONETIC VOX grain open: "
+                android.util.Log.i("FieldVox", "Native safety grain blocked: "
                         + onlineCarrierLabel()
                         + " grain=" + grainIndex + "/" + totalGrains
                         + " duration_ms=" + grainDuration
@@ -1542,7 +1545,7 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception ignored) {}
 
-            String closeMsg = "PHONETIC VOX packet closed. Forced silence gap active. Sweeping to next stream.";
+            String closeMsg = "Native safety packet closed. Forced silence gap active. Sweeping to next stream.";
             android.util.Log.i("FieldVox", closeMsg + " token=" + token + " packet_ms=" + totalPacketMs);
             exportStatus.setText(closeMsg);
 
@@ -1817,7 +1820,7 @@ public class MainActivity extends Activity {
         startOnlineCarrierSensors();
         prepareOnlineCarrierAtIndex(onlineCarrierIndex);
 
-        return "KIRO/KOMO local news VOX arming. KIRO and Northwest Newsradio KOMO/KNWN are tried first; microphone records the evidence.";
+        return "Legacy radio carriers are blocked. Microphone metrics are logged only; no radio output.";
     }
 
     private int normalizeOnlineCarrierIndex(int index) {
@@ -1889,7 +1892,7 @@ public class MainActivity extends Activity {
         int next = normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
         onlineCarrierSweepCount++;
 
-        String msg = "VOX sweep advance: "
+        String msg = "Native safety sweep blocked: "
                 + onlineCarrierLabel()
                 + " -> " + ONLINE_CARRIER_LABELS[next]
                 + "\nReason: " + reason
@@ -1954,7 +1957,7 @@ public class MainActivity extends Activity {
                     player.setVolume(0.0f, 0.0f);
                 } catch (Exception ignored) {}
 
-                String msg = "Timeout-safe carrier ready: " + onlineCarrierLabel()
+                String msg = "Legacy carrier disabled: " + onlineCarrierLabel()
                         + "\nMuted until phonetic-grain gate opens. Queued proximity can now flush. No word bank. No TTS.";
                 Log.i("FieldVox", msg.replace("\n", " | "));
                 exportStatus.setText(msg);
@@ -1983,10 +1986,10 @@ public class MainActivity extends Activity {
                 return true;
             });
 
-            Log.i("FieldVox", "Preparing timeout-safe carrier: "
+            Log.i("FieldVox", "Legacy carrier disabled: "
                     + ONLINE_CARRIER_LABELS[index]
                     + " url=" + ONLINE_CARRIER_URLS[index]);
-            exportStatus.setText("Preparing timeout-safe carrier: " + ONLINE_CARRIER_LABELS[index]);
+            exportStatus.setText("Legacy carrier disabled: " + ONLINE_CARRIER_LABELS[index]);
 
             mp.prepareAsync();
 
@@ -2082,7 +2085,7 @@ public class MainActivity extends Activity {
 
         String result = startLiveMonitor();
         String carrier = startOnlineVoxCarrier();
-        exportStatus.setText("KIRO/KOMO local news VOX + live capture started.\n" + result + "\n" + carrier);
+        exportStatus.setText("Native audio safety mode active.\n" + result + "\n" + carrier);
         status.setText(result + "\n" + carrier);
         updateLiveButtons();
     }
@@ -2316,7 +2319,7 @@ public class MainActivity extends Activity {
                         lastUiMs = nowMs;
                         final int seconds = (int)((nowMs - startMs) / 1000L);
                         final String msg = "Realtime EVP monitor: " + seconds + "s\\n"
-                                + "Mic -> live audio output. Use headphones.\\n"
+                                + "Mic -> no radio output.\\n"
                                 + "RMS " + String.format(java.util.Locale.US, "%.0f", rms)
                                 + " / gate " + String.format(java.util.Locale.US, "%.0f", gate)
                                 + " / peak " + peak + "\\n"
@@ -2367,7 +2370,7 @@ public class MainActivity extends Activity {
 
         liveMonitorThread.start();
 
-        return "KIRO/KOMO local news VOX starting. No word bank; no TTS.";
+        return "Legacy radio carrier disabled. No word bank; no TTS.";
     }
 
     private String stopLiveMonitor() {
@@ -2439,7 +2442,7 @@ public class MainActivity extends Activity {
         subtitle.setShadowLayer(8.0f, 0.0f, 0.0f, Color.WHITE);
         root.addView(subtitle);
 
-        TextView stage = makeLabel("Stage 1M-J • KIRO/KOMO local news VOX", Color.LTGRAY, 12);
+        TextView stage = makeLabel("Stage 1S-D • Native audio safety mode", Color.LTGRAY, 12);
         stage.setPadding(0, dp(this, 8), 0, dp(this, 18));
         root.addView(stage);
 
