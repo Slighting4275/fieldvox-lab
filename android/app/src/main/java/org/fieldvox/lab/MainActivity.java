@@ -43,8 +43,35 @@ import java.io.FileInputStream;
 import java.io.OutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
 
 public class MainActivity extends Activity {
+
+    // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
+    private TextView liveStreamStatusText;
+    private Button liveStreamButton;
+    private MediaPlayer liveStreamPlayer;
+    private FieldVoxLiveSource currentLiveSource;
+    private boolean liveStreamActive = false;
+
+    private static final class FieldVoxLiveSource {
+        String stationuuid = "";
+        String countrycode = "";
+        String sourceLabel = "";
+        String codec = "";
+        String bitrate = "";
+        String streamUrlSha256 = "";
+        String streamUrlResolvedSha256 = "";
+        String privateUrl = "";
+        String privateUrlResolved = "";
+    }
+
+
     static {
         System.loadLibrary("fieldvox");
     }
@@ -2468,6 +2495,26 @@ public class MainActivity extends Activity {
         content.addView(liveSourcesButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(this, 54)));
+
+        liveStreamStatusText = new TextView(this);
+        liveStreamStatusText.setText("Experimental Live Stream: stopped\nOne cached source only. Raw stream URLs stay app-private.\nThis does not prove paranormal communication.");
+        liveStreamStatusText.setTextSize(13.0f);
+        content.addView(liveStreamStatusText);
+
+        liveStreamButton = new Button(this);
+        liveStreamButton.setText("Start Live Stream");
+        liveStreamButton.setAllCaps(false);
+        liveStreamButton.setOnClickListener(v -> toggleStage1QDLiveStream());
+        content.addView(liveStreamButton);
+
+        if (getIntent() != null && getIntent().getBooleanExtra("fieldvox_stage1qd_autostart", false)) {
+            liveStreamButton.postDelayed(() -> {
+                if (!liveStreamActive && liveStreamPlayer == null) {
+                    startStage1QDLiveStream();
+                }
+            }, 900);
+        }
+
         content.addView(liveSourcesStatusView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
@@ -2758,4 +2805,312 @@ public class MainActivity extends Activity {
             }
         }
     }
+
+
+    // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
+    private void toggleStage1QDLiveStream() {
+        if (liveStreamActive || liveStreamPlayer != null) {
+            stopStage1QDLiveStream("button");
+            return;
+        }
+        startStage1QDLiveStream();
+    }
+
+    private void startStage1QDLiveStream() {
+        setStage1QDStatus("Experimental Live Stream: selecting cached source\nRaw stream URLs stay app-private.");
+        appendStage1QDLiveEvent("live_stream_source_selected", null, "selecting", null);
+
+        new Thread(() -> {
+            FieldVoxLiveSource src = null;
+            try {
+                src = loadStage1QDLiveSource();
+                FieldVoxLiveSource finalSrc = src;
+                runOnUiThread(() -> {
+                    currentLiveSource = finalSrc;
+                    liveStreamActive = true;
+                    if (liveStreamButton != null) {
+                        liveStreamButton.setText("Stop Live Stream");
+                    }
+                    setStage1QDStatus(formatStage1QDStatus("connecting", finalSrc, null));
+                });
+
+                appendStage1QDLiveEvent("live_stream_source_selected", src, "selected", null);
+                appendStage1QDLiveEvent("live_stream_connecting", src, "connecting", null);
+
+                String playUrl = src.privateUrlResolved != null && src.privateUrlResolved.length() > 0 ? src.privateUrlResolved : src.privateUrl;
+                if (playUrl == null || playUrl.length() == 0) {
+                    throw new IllegalStateException("private stream URL missing");
+                }
+
+                MediaPlayer mp = new MediaPlayer();
+                mp.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build());
+
+                mp.setOnPreparedListener(player -> {
+                    try {
+                        player.start();
+                    } catch (Exception ignored) {
+                    }
+                    appendStage1QDLiveEvent("live_stream_active", currentLiveSource, "active", null);
+                    runOnUiThread(() -> setStage1QDStatus(formatStage1QDStatus("active", currentLiveSource, null)));
+
+                    new Thread(() -> {
+                        try {
+                            Thread.sleep(45000);
+                        } catch (Exception ignored) {
+                        }
+                        if (liveStreamActive && liveStreamPlayer != null) {
+                            stopStage1QDLiveStream("short_dwell_complete");
+                        }
+                    }, "fieldvox-stage1qd-short-dwell-stop").start();
+                });
+
+                mp.setOnErrorListener((player, what, extra) -> {
+                    appendStage1QDLiveEvent("live_stream_error", currentLiveSource, "error", "MediaPlayer what=" + what + " extra=" + extra);
+                    runOnUiThread(() -> setStage1QDStatus(formatStage1QDStatus("error", currentLiveSource, "MediaPlayer what=" + what + " extra=" + extra)));
+                    stopStage1QDLiveStream("media_error");
+                    return true;
+                });
+
+                mp.setDataSource(playUrl);
+                runOnUiThread(() -> liveStreamPlayer = mp);
+                mp.prepareAsync();
+            } catch (Exception e) {
+                FieldVoxLiveSource finalSrc = src;
+                appendStage1QDLiveEvent("live_stream_error", finalSrc, "error", e.toString());
+                runOnUiThread(() -> {
+                    liveStreamActive = false;
+                    if (liveStreamButton != null) {
+                        liveStreamButton.setText("Start Live Stream");
+                    }
+                    setStage1QDStatus(formatStage1QDStatus("error", finalSrc, e.toString()));
+                });
+            }
+        }, "fieldvox-stage1qd-live-stream").start();
+    }
+
+    private void stopStage1QDLiveStream(String reason) {
+        FieldVoxLiveSource src = currentLiveSource;
+        MediaPlayer mp = liveStreamPlayer;
+        liveStreamPlayer = null;
+        liveStreamActive = false;
+
+        if (mp != null) {
+            try {
+                if (mp.isPlaying()) {
+                    mp.stop();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                mp.release();
+            } catch (Exception ignored) {
+            }
+        }
+
+        appendStage1QDLiveEvent("live_stream_stopped", src, "stopped", reason);
+        runOnUiThread(() -> {
+            if (liveStreamButton != null) {
+                liveStreamButton.setText("Start Live Stream");
+            }
+            setStage1QDStatus(formatStage1QDStatus("stopped", src, reason));
+        });
+    }
+
+    private FieldVoxLiveSource loadStage1QDLiveSource() throws Exception {
+        File dir = new File(getFilesDir(), "fieldvox-hits");
+        File publicSlots = new File(dir, "source_slots.json");
+        File privateCache = new File(dir, "radio_browser_station_cache_private.jsonl");
+
+        if (!publicSlots.isFile()) {
+            throw new IllegalStateException("source_slots.json missing");
+        }
+        if (!privateCache.isFile()) {
+            throw new IllegalStateException("private Radio Browser cache missing");
+        }
+
+        JSONObject root = new JSONObject(readStage1QDFile(publicSlots));
+        JSONArray slots = root.optJSONArray("slots");
+        if (slots == null) {
+            slots = root.optJSONArray("source_slots");
+        }
+        if (slots == null) {
+            slots = root.optJSONArray("session_pool");
+        }
+        if (slots == null || slots.length() == 0) {
+            throw new IllegalStateException("no cached source slots found");
+        }
+
+        JSONObject slot = slots.getJSONObject(0);
+        FieldVoxLiveSource src = new FieldVoxLiveSource();
+        src.stationuuid = pickStage1QD(slot, "stationuuid", "station_uuid", "uuid");
+        src.countrycode = pickStage1QD(slot, "countrycode", "country_code");
+        src.sourceLabel = pickStage1QD(slot, "source_label", "label", "name");
+        src.codec = pickStage1QD(slot, "codec");
+        src.bitrate = pickStage1QD(slot, "bitrate");
+        src.streamUrlSha256 = pickStage1QD(slot, "stream_url_sha256", "url_sha256");
+        src.streamUrlResolvedSha256 = pickStage1QD(slot, "stream_url_resolved_sha256", "url_resolved_sha256");
+
+        if (src.stationuuid.length() == 0) {
+            throw new IllegalStateException("selected source has no stationuuid");
+        }
+
+        BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(privateCache), StandardCharsets.UTF_8));
+        try {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (line.length() == 0) {
+                    continue;
+                }
+                JSONObject p = new JSONObject(line);
+                String puuid = pickStage1QD(p, "stationuuid", "station_uuid", "uuid");
+                if (!src.stationuuid.equals(puuid)) {
+                    continue;
+                }
+                src.privateUrl = pickStage1QD(p, "url", "stream_url");
+                src.privateUrlResolved = pickStage1QD(p, "url_resolved", "stream_url_resolved");
+                if (src.sourceLabel.length() == 0) src.sourceLabel = pickStage1QD(p, "source_label", "name");
+                if (src.countrycode.length() == 0) src.countrycode = pickStage1QD(p, "countrycode", "country_code");
+                if (src.codec.length() == 0) src.codec = pickStage1QD(p, "codec");
+                if (src.bitrate.length() == 0) src.bitrate = pickStage1QD(p, "bitrate");
+                break;
+            }
+        } finally {
+            br.close();
+        }
+
+        if ((src.privateUrl == null || src.privateUrl.length() == 0) && (src.privateUrlResolved == null || src.privateUrlResolved.length() == 0)) {
+            throw new IllegalStateException("matched private cache row has no playable URL");
+        }
+
+        return src;
+    }
+
+    private String readStage1QDFile(File f) throws Exception {
+        BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        try {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        } finally {
+            br.close();
+        }
+        return sb.toString();
+    }
+
+    private String pickStage1QD(JSONObject obj, String... keys) {
+        for (String key : keys) {
+            if (obj.has(key) && !obj.isNull(key)) {
+                Object v = obj.opt(key);
+                if (v != null) {
+                    String out = String.valueOf(v);
+                    if (out != null && out.length() > 0 && !"null".equals(out)) {
+                        return out;
+                    }
+                }
+            }
+        }
+
+        Iterator<String> it = obj.keys();
+        while (it.hasNext()) {
+            String key = it.next();
+            for (String wanted : keys) {
+                if (key.equalsIgnoreCase(wanted)) {
+                    Object v = obj.opt(key);
+                    if (v != null) {
+                        String out = String.valueOf(v);
+                        if (out != null && out.length() > 0 && !"null".equals(out)) {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+        return "";
+    }
+
+    private void setStage1QDStatus(String text) {
+        if (liveStreamStatusText != null) {
+            liveStreamStatusText.setText(text);
+        }
+    }
+
+    private String formatStage1QDStatus(String state, FieldVoxLiveSource src, String detail) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Experimental Live Stream: ").append(state == null ? "unknown" : state).append('\n');
+        sb.append("One active cached Radio Browser source. Raw URLs stay app-private.").append('\n');
+        sb.append("This does not prove paranormal communication.").append('\n');
+
+        if (src != null) {
+            sb.append("Source: ").append(safeStage1QD(src.sourceLabel)).append('\n');
+            sb.append("Country: ").append(safeStage1QD(src.countrycode)).append('\n');
+            sb.append("UUID: ").append(safeStage1QD(src.stationuuid)).append('\n');
+            sb.append("Codec/bitrate: ").append(safeStage1QD(src.codec)).append(" / ").append(safeStage1QD(src.bitrate)).append('\n');
+            sb.append("URL hash: ").append(safeStage1QD(src.streamUrlSha256)).append('\n');
+        }
+
+        if (detail != null && detail.length() > 0) {
+            sb.append("Detail: ").append(detail);
+        }
+
+        return sb.toString();
+    }
+
+    private String safeStage1QD(String s) {
+        if (s == null || s.length() == 0) {
+            return "(unknown)";
+        }
+        return s;
+    }
+
+    private void appendStage1QDLiveEvent(String eventType, FieldVoxLiveSource src, String state, String detail) {
+        try {
+            JSONObject ev = new JSONObject();
+            ev.put("event_type", eventType);
+            ev.put("stage", "1Q-D");
+            ev.put("state", state == null ? "" : state);
+            ev.put("detail", detail == null ? "" : detail);
+            ev.put("raw_stream_url_exported", false);
+            ev.put("private_cache_used", true);
+            ev.put("playback_engine_changed", true);
+
+            if (src != null) {
+                ev.put("stationuuid", src.stationuuid == null ? "" : src.stationuuid);
+                ev.put("countrycode", src.countrycode == null ? "" : src.countrycode);
+                ev.put("source_label", src.sourceLabel == null ? "" : src.sourceLabel);
+                ev.put("codec", src.codec == null ? "" : src.codec);
+                ev.put("bitrate", src.bitrate == null ? "" : src.bitrate);
+                ev.put("stream_url_sha256", src.streamUrlSha256 == null ? "" : src.streamUrlSha256);
+                ev.put("stream_url_resolved_sha256", src.streamUrlResolvedSha256 == null ? "" : src.streamUrlResolvedSha256);
+            }
+
+            appendStage1QDJsonLine(ev.toString());
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void appendStage1QDJsonLine(String line) {
+        try {
+            File dir = new File(getFilesDir(), "fieldvox-hits");
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            File out = new File(dir, "live_stream_events_stage1q_d.jsonl");
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(out, true);
+            try {
+                fos.write(line.getBytes(StandardCharsets.UTF_8));
+                fos.write('\n');
+            } finally {
+                fos.close();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+
 }
