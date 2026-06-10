@@ -29,6 +29,7 @@ target_link_libraries(
 # FIELDVOX_STAGE1R_NATIVE_AUDIO_WINDOW
 add_library(fieldvox_stage1r_native SHARED
     fv_stage1r_native_audio.c
+        fv_stage1u_native_blob_decoder.c
 )
 
 target_link_libraries(fieldvox_stage1r_native

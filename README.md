@@ -321,20 +321,20 @@ FieldVox Lab should not be used for health, safety, legal, financial, grief, or 
 <!-- FIELDVOX_LATEST_NATIVE_AUDIO_BEGIN -->
 ## Latest native audio work
 
-FieldVox Lab now has a field-tested bounded station/source voice-grain mode. This is an experimental EVP/ITC session-review tool, not proof of paranormal communication.
+FieldVox Lab now has a verified native C binary-blob station ring feeding bounded source-grain field tests. This is an experimental EVP/ITC session-review tool, not proof of paranormal communication.
 
 ### Current audio state
 
-- **Stage 1Q-F:** disabled long-form live stream playback after the Stage 1Q-D/1Q-E radio-style stream test proved unsuitable for the EVP/ITC workflow.
-- **Stage 1R-A:** added a native C AAudio proof using a static 64-sample PCM waveform blob. Java is only JNI/UI glue.
-- **Stage 1R-B:** added a native C short-window sequencer that plays five short PCM-blob bursts with controlled gaps.
-- **Stage 1S-A:** added a native C microphone metrics window using AAudio input.
-- **Stage 1S-B:** added a native C microphone baseline profiler using five short AAudio input windows.
-- **Stage 1S-C:** added a native C/JNI policy kill switch for the legacy Java stream carrier path.
-- **Stage 1S-D:** removed stale visible carrier UI text and labels from the Android UI using a C patcher.
-- **Stage 1T-B:** restored audible bounded station/source voice grains for field testing.
-- Stage 1T-B field test passed with native AAudio tests checked, carrier activity seen, grain open/close seen, source sweep seen, and user-confirmed audible voices.
-- Stage 1T-B confirmed source switching during the field test.
+- **Stage 1Q-F:** disabled long-form live stream playback after earlier radio-style stream testing proved unsuitable for the EVP/ITC workflow.
+- **Stage 1R-A:** added native C AAudio proof using a static 64-sample PCM waveform blob.
+- **Stage 1R-B:** added a native C short-window sequencer with controlled burst/gap timing.
+- **Stage 1S-A:** added native C AAudio microphone metrics.
+- **Stage 1S-B:** added native C AAudio microphone baseline profiling.
+- **Stage 1S-C:** added a native C/JNI policy kill switch for the legacy carrier path.
+- **Stage 1S-D:** removed stale visible carrier UI text using a C patcher.
+- **Stage 1T-B:** restored audible bounded source/voice grains for field testing.
+- **Stage 1U-E:** verified a native C binary station blob with a 1000-logical-slot ring driving runtime source selection.
+- Stage 1U-E field verification: native blob decoder probe passed, ring_count=1000, 24 native ring slots logged, 19 native station selections logged, carrier seen, grain seen, sweep seen, and user heard voices/source grains.
 - Current voice behavior is controlled source/radio grain playback plus microphone and field metrics for later human review.
 - There is no word bank and no TTS.
 - The app does not create messages for users.
@@ -342,9 +342,9 @@ FieldVox Lab now has a field-tested bounded station/source voice-grain mode. Thi
 
 ### Implementation policy
 
-Use C/native/lower-level code for app behavior whenever possible. Use Java only where Android UI, lifecycle, permission, or JNI platform glue requires it. Stage 1T-B is a transitional field-test path; a later native decoder path should replace Java MediaPlayer source preparation.
+Use C/native/lower-level code and binary blobs for app behavior whenever possible. Use Java only where Android UI, lifecycle, permission, or JNI platform glue requires it. Stage 1U-E still uses transitional Android media glue for source preparation; the next deeper-native decoder path should use native media extraction/codec decode feeding AAudio PCM output.
 
 ### Privacy and source policy
 
-Raw station stream URLs remain app-private. Public/export-safe source files must use metadata and hashes only. FieldVox Lab remains an experimental live EVP/ITC session app and should not be used for important life, health, legal, financial, grief, or safety decisions.
+Raw station stream URLs remain app-private. Public/export-safe source files should use metadata and hashes only. FieldVox Lab remains an experimental live EVP/ITC session app and should not be used for important life, health, legal, financial, grief, or safety decisions.
 <!-- FIELDVOX_LATEST_NATIVE_AUDIO_END -->

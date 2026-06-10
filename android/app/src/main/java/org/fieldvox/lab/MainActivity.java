@@ -74,6 +74,10 @@ public class MainActivity extends Activity {
 
     // FIELDVOX_STAGE1T_A_BOUNDED_VOICE_FIELD_TEST
     // FIELDVOX_STAGE1T_B_FORCE_BOUNDED_GRAIN_FIELD_TEST
+    // FIELDVOX_STAGE1U_A_NATIVE_BLOB_1000_RING
+    // FIELDVOX_STAGE1U_E_NATIVE_BLOB_CLASS_SCOPE_WIRE
+    // Runtime source selection uses the native C binary station blob ring.
+    // Native C binary station-blob ring: 1000 logical stations, continuous sweep scaffold.
     // Temporary forced bounded source-grain field test; no generated words and no proof claims.
     // Temporary bounded source-grain field test; no generated words and no proof claims.
     // FIELDVOX_STAGE1S_D_C_UI_TEXT_KILL
@@ -81,6 +85,15 @@ public class MainActivity extends Activity {
     // FIELDVOX_STAGE1S_C_NATIVE_CARRIER_KILL
     private native boolean nativeStage1SCDisableLegacyCarrier();
     private native void nativeStage1SCNoteLegacyCarrierBlocked(String methodName);
+
+    private native int nativeStage1UStationRingCount();
+    private native String nativeStage1UStationAt(int logicalIndex);
+    private native String nativeStage1UDecoderProbe();
+
+    private int stage1UNativeLogicalCursor = 0;
+    private int stage1ULastRingCount = 0;
+    private String stage1ULastNativeStationJson = "";
+    private boolean stage1UProbeLogged = false;
 
 
     // STAGE_1Q_D_ONE_STREAM_LIVE_PLAYBACK
@@ -1838,6 +1851,66 @@ public class MainActivity extends Activity {
         return n;
     }
 
+
+    private String stage1UJsonValue(String json, String key) {
+        if (json == null || key == null) return "";
+        String needle = "\"" + key + "\":";
+        int p = json.indexOf(needle);
+        if (p < 0) return "";
+        p += needle.length();
+        while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
+        if (p >= json.length()) return "";
+        if (json.charAt(p) == '"') {
+            int q = json.indexOf('"', p + 1);
+            if (q <= p) return "";
+            return json.substring(p + 1, q);
+        }
+        int q = p;
+        while (q < json.length() && json.charAt(q) != ',' && json.charAt(q) != '}') q++;
+        return json.substring(p, q).trim();
+    }
+
+    private String stage1UNativeStationUrl(int logicalIndex) {
+        try {
+            stage1ULastRingCount = nativeStage1UStationRingCount();
+            stage1ULastNativeStationJson = nativeStage1UStationAt(logicalIndex);
+            String url = stage1UJsonValue(stage1ULastNativeStationJson, "url");
+            if (url != null && url.startsWith("http")) return url;
+        } catch (Throwable t) {
+            android.util.Log.w("FieldVox", "Stage 1U-E native binary blob ring lookup failed: " + t);
+        }
+        return null;
+    }
+
+    private String stage1UNativeStationLabel(int logicalIndex) {
+        try {
+            if (logicalIndex < 0) logicalIndex = 0;
+            String json = nativeStage1UStationAt(logicalIndex);
+            String label = stage1UJsonValue(json, "label");
+            String logical = stage1UJsonValue(json, "logical");
+            if (label != null && label.length() > 0) return label + " [native-slot " + logical + "]";
+        } catch (Throwable ignored) {
+        }
+        return "native-slot " + logicalIndex;
+    }
+
+    private void stage1ULogNativeRingProbeOnce() {
+        if (stage1UProbeLogged) return;
+        stage1UProbeLogged = true;
+        try {
+            String probe = nativeStage1UDecoderProbe();
+            appendStage1QDLiveEvent("native_blob_decoder_probe", null, "complete", probe);
+            int ringCount = nativeStage1UStationRingCount();
+            appendStage1QDLiveEvent("native_station_ring_ready", null, "ready", "ring_count=" + ringCount);
+            android.util.Log.i("FieldVox", "Stage 1U-E native binary blob ring ready count=" + ringCount + " probe=" + probe);
+            for (int i = 0; i < 24; i++) {
+                appendStage1QDLiveEvent("native_station_ring_slot", null, "ready", nativeStage1UStationAt(i));
+            }
+        } catch (Throwable t) {
+            appendStage1QDLiveEvent("native_station_ring_error", null, "error", String.valueOf(t));
+            android.util.Log.w("FieldVox", "Stage 1U-E native binary blob ring probe failed: " + t);
+        }
+    }
     private boolean stage1SCBlockLegacyCarrier(String methodName) {
         boolean disabled = true;
         try {
@@ -1940,7 +2013,13 @@ public class MainActivity extends Activity {
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build());
 
-            mp.setDataSource(ONLINE_CARRIER_URLS[index]);
+            stage1ULogNativeRingProbeOnce();
+            String stage1UNativeUrl = stage1UNativeStationUrl(stage1UNativeLogicalCursor++);
+            if (stage1UNativeUrl != null) {
+                appendStage1QDLiveEvent("native_station_ring_selected", null, "ready", stage1ULastNativeStationJson);
+                android.util.Log.i("FieldVox", "Stage 1U-E native binary blob selected " + stage1UNativeStationLabel(stage1UNativeLogicalCursor - 1));
+            }
+            mp.setDataSource(stage1UNativeUrl != null ? stage1UNativeUrl : (ONLINE_CARRIER_URLS[index]));
             mp.setVolume(0.0f, 0.0f);
 
             mp.setOnPreparedListener(player -> {
@@ -2089,7 +2168,7 @@ public class MainActivity extends Activity {
 
         String result = startLiveMonitor();
         String carrier = startOnlineVoxCarrier();
-        exportStatus.setText("Bounded station + field sweep active.\n" + result + "\n" + carrier);
+        exportStatus.setText("Native blob station ring active.\n" + result + "\n" + carrier);
         status.setText(result + "\n" + carrier);
         updateLiveButtons();
     }
@@ -2428,6 +2507,8 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        stage1ULogNativeRingProbeOnce();
+
         nativeInit(getPackageName(), getFilesDir().getAbsolutePath());
         nativeSetThreshold(threshold);
         nativeSetCooldownMs(cooldownMs);
@@ -2446,7 +2527,7 @@ public class MainActivity extends Activity {
         subtitle.setShadowLayer(8.0f, 0.0f, 0.0f, Color.WHITE);
         root.addView(subtitle);
 
-        TextView stage = makeLabel("Stage 1T-A • Bounded station + field sweep", Color.LTGRAY, 12);
+        TextView stage = makeLabel("Stage 1U-A • Native blob 1000-ring", Color.LTGRAY, 12);
         stage.setPadding(0, dp(this, 8), 0, dp(this, 18));
         root.addView(stage);
 
