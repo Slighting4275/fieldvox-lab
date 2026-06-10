@@ -72,6 +72,10 @@ public class MainActivity extends Activity {
     private Button speakerMonitorButton;
     private Button markHitButton;
     private Button exportHitsButton;
+
+    // FIELDVOX_STAGE1Q_C_VISIBLE_SOURCE_CATALOG
+    private android.widget.Button liveSourcesButton;
+    private android.widget.TextView liveSourcesStatusView;
     private final Object hitMarkerLock = new Object();
     private final ArrayList<String> pendingHitJsonLines = new ArrayList<>();
     private File currentLiveJsonlFile;
@@ -1162,6 +1166,137 @@ public class MainActivity extends Activity {
                 ).show());
             }
         }, "fieldvox-radio-browser-discovery").start();
+    }
+
+
+    // FIELDVOX_STAGE1Q_C_VISIBLE_SOURCE_CATALOG
+    private java.io.File liveSourceSlotsFile() {
+        return new java.io.File(new java.io.File(getFilesDir(), "fieldvox-hits"), "source_slots.json");
+    }
+
+    private java.io.File liveSourceCatalogFile() {
+        return new java.io.File(new java.io.File(getFilesDir(), "fieldvox-hits"), "radio_browser_catalog.json");
+    }
+
+    private String readSmallTextFile(java.io.File file, int maxBytes) throws java.io.IOException {
+        if (file == null || !file.isFile()) {
+            return "";
+        }
+        java.io.FileInputStream in = new java.io.FileInputStream(file);
+        try {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int total = 0;
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                total += n;
+                if (total > maxBytes) {
+                    throw new java.io.IOException("file too large for UI preview: " + file.getName());
+                }
+                out.write(buf, 0, n);
+            }
+            return out.toString("UTF-8");
+        } finally {
+            in.close();
+        }
+    }
+
+    private String buildLiveSourcesStatusText() {
+        java.io.File sourceSlots = liveSourceSlotsFile();
+        java.io.File catalogFile = liveSourceCatalogFile();
+
+        if (!sourceSlots.isFile()) {
+            return "Live Source Catalog\n"
+                    + "No cached live sources yet.\n"
+                    + "Playback: unchanged\n"
+                    + "Raw URLs: private only";
+        }
+
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(readSmallTextFile(sourceSlots, 1024 * 1024));
+            String stage = root.optString("stage", "unknown");
+            int catalogCount = root.optInt("catalog_count", 0);
+            int slotCount = root.optInt("slot_count", 0);
+            String server = root.optString("server_selected", "unknown");
+            boolean playbackChanged = root.optBoolean("playback_engine_changed", false);
+            boolean rawExported = root.optBoolean("raw_stream_urls_exported", true);
+            String policy = root.optString("source_pool_policy", "unknown");
+
+            return "Live Source Catalog\n"
+                    + "Stage: " + stage + "\n"
+                    + "Catalog cached: " + catalogCount + " stations\n"
+                    + "Session pool: " + slotCount + " stations\n"
+                    + "Server: " + server + "\n"
+                    + "Policy: " + policy + "\n"
+                    + "Playback: " + (playbackChanged ? "changed" : "unchanged") + "\n"
+                    + "Raw URLs exported: " + rawExported + "\n"
+                    + "Catalog file: " + (catalogFile.isFile() ? "present" : "missing") + "\n"
+                    + "Raw URLs: private only";
+        } catch (Throwable t) {
+            return "Live Source Catalog\n"
+                    + "Could not read source cache.\n"
+                    + "Error: " + t.getClass().getSimpleName() + "\n"
+                    + "Playback: unchanged\n"
+                    + "Raw URLs: private only";
+        }
+    }
+
+    private String buildLiveSourcesDialogText() {
+        java.lang.StringBuilder b = new java.lang.StringBuilder();
+        b.append(buildLiveSourcesStatusText()).append("\n\n");
+
+        try {
+            org.json.JSONObject root = new org.json.JSONObject(readSmallTextFile(liveSourceSlotsFile(), 1024 * 1024));
+            org.json.JSONArray slots = root.optJSONArray("slots");
+            if (slots == null || slots.length() == 0) {
+                b.append("No session pool entries found.");
+                return b.toString();
+            }
+
+            b.append("Sample session pool labels:\n");
+            int max = Math.min(16, slots.length());
+            for (int i = 0; i < max; i++) {
+                org.json.JSONObject slot = slots.optJSONObject(i);
+                if (slot == null) {
+                    continue;
+                }
+                String label = slot.optString("source_label", "unknown");
+                String country = slot.optString("countrycode", "--");
+                String codec = slot.optString("codec", "--");
+                int bitrate = slot.optInt("bitrate", 0);
+                b.append(i + 1)
+                        .append(". ")
+                        .append(label)
+                        .append(" [")
+                        .append(country)
+                        .append(" / ")
+                        .append(codec)
+                        .append(" / ")
+                        .append(bitrate)
+                        .append("kbps]\n");
+            }
+
+            b.append("\nRaw stream URLs are not shown here. They remain app-private.");
+        } catch (Throwable t) {
+            b.append("Could not preview session pool: ").append(t.getClass().getSimpleName());
+        }
+
+        return b.toString();
+    }
+
+    private void refreshLiveSourcesStatus() {
+        if (liveSourcesStatusView != null) {
+            liveSourcesStatusView.setText(buildLiveSourcesStatusText());
+        }
+    }
+
+    private void showLiveSourcesDialog() {
+        refreshLiveSourcesStatus();
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Live Source Catalog")
+                .setMessage(buildLiveSourcesDialogText())
+                .setPositiveButton("OK", null)
+                .show();
     }
 
     private void updateLiveButtons() {
@@ -2313,9 +2448,30 @@ public class MainActivity extends Activity {
         exportHitsButton = makeWideButton("Export Hits");
         exportHitsButton.setTextSize(16);
         exportHitsButton.setContentDescription("Export Hits");
+
+        liveSourcesButton = makeWideButton("Live Sources");
+        liveSourcesButton.setTextSize(16.0f);
+        liveSourcesButton.setContentDescription("Live Sources");
+        liveSourcesButton.setMinHeight(dp(this, 54));
+
+        liveSourcesStatusView = new android.widget.TextView(this);
+        liveSourcesStatusView.setTextSize(14.0f);
+        liveSourcesStatusView.setTextColor(android.graphics.Color.WHITE);
+        liveSourcesStatusView.setPadding(dp(this, 12), dp(this, 8), dp(this, 12), dp(this, 8));
+        liveSourcesStatusView.setText("Live Source Catalog\nLoading cached source summary...");
+        liveSourcesStatusView.setContentDescription("Live Source Catalog Status");
+        liveSourcesButton.setOnClickListener(v -> showLiveSourcesDialog());
+        refreshLiveSourcesStatus();
         content.addView(exportHitsButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(this, 54)));
+        content.addView(liveSourcesButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(this, 54)));
+        content.addView(liveSourcesStatusView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
 
         content.addView(sessions);
 
@@ -2422,6 +2578,8 @@ public class MainActivity extends Activity {
 
 
     protected void onResume() {
+        // FIELDVOX_STAGE1Q_C_ONRESUME_REFRESH
+        refreshLiveSourcesStatus();
         super.onResume();
         // ADB_MARK_HIT_EXISTING_ONRESUME_POLL: deterministic test hook because UIAutomator cannot idle during live VOX.
         handler.postDelayed(() -> handleAdbHitMarkerIntent(getIntent()), 900L);
