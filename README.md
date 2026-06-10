@@ -67,9 +67,9 @@ See `LICENSE` for the full combined notice and full license texts. See `COPYING`
 <!-- FIELDVOX_CURRENT_FEATURES_START -->
 ## Current Android features
 
-Verified checkpoint: **Stage 1P-A native sweep scheduler audit**
-Current Codeberg `main`: `efbc0a6` / `efbc0a6140aef81f1c4cd68584984ce7c1eb2454`
-Latest commit subject: `Add Stage 1P-A native sweep scheduler audit`
+Verified checkpoint: **Stage 1P-B canonical source-catalog JSON**
+Current Codeberg `main`: `3d7eef9` / `3d7eef950d029e46836e29ceeba71339a63d36fc`
+Latest commit subject: `Canonicalize Stage 1P-B source catalog JSON`
 
 FieldVox Lab is a clean-room experimental field-audio tool. It records sessions, marks user-perceived hits, exports blind-review bundles, and keeps source/audit metadata for later review. It is not evidence of paranormal activity by itself and should not be used for health, safety, legal, financial, grief, or other important life decisions.
 
@@ -101,7 +101,7 @@ FieldVox Lab is a clean-room experimental field-audio tool. It records sessions,
 
 ### Native C source provenance audit
 
-FieldVox now includes native C/JNI audit code in `android/app/src/main/cpp/fv_source_audit.c`.
+FieldVox includes native C/JNI audit code in `android/app/src/main/cpp/fv_source_audit.c`.
 
 The native audit writer creates:
 
@@ -128,13 +128,11 @@ Stage 1O-B added a native C ring buffer for recent event timeline state. Each na
 - `timeline_snapshot[]`
 - timeline event kinds such as ADB test requests, marked-hit events, and native sweep events
 
-This makes hit review easier because the export can show what the app believed was happening immediately before and during the marked hit.
-
 ### Native C deterministic sweep scheduler audit
 
-Stage 1P-A added an evidence-grade deterministic scheduler layer. This stage records schedule evidence only; it does **not** change the audio playback engine yet.
+Stage 1P-A added an evidence-grade deterministic scheduler layer. This records schedule evidence only; it does **not** change the audio playback engine yet.
 
-New native sweep export files:
+Native sweep export files:
 
 - `sweep_schedule.jsonl`
 - `sweep_manifest.json`
@@ -150,9 +148,30 @@ Each hit source audit can include a `sweep_engine` block with:
 - overlap policy: `single_open_slot`
 - station/source slot identity
 - stream URL hash placeholder
-- `audio_engine_changed=false` in the manifest
 
-The current source-slot labels are limited to clean source names used by FieldVox Lab, including KIRO Newsradio Seattle 97.3, Northwest Newsradio KOMO/KNWN, KUOW, and BBC.
+### Stage 1P-B source-catalog policy and canonical JSON
+
+Stage 1P-B hardens the native source-slot catalog metadata so exported audit files are Radio Browser-compatible and parser-friendly before live dynamic station discovery is added.
+
+The canonical Stage 1P-B export now records:
+
+- `catalog_provider=manual_seed_v1_radio_browser_compatible`
+- `radio_browser_compatible=true`
+- `uuid_policy=stationuuid_required`
+- `countrycode_policy=countrycode_required`
+- `server_discovery_policy=future_dns_all_api_radio_browser_info_randomize_retry`
+- `http_user_agent_policy=speaking_agent_required`
+- `raw_stream_urls_exported=false`
+
+The canonicalization commit removed duplicate policy keys from `sweep_manifest.json` and validated app-private and exported JSON with a duplicate-key detector. The exported files verified in Stage 1P-B include:
+
+- `fieldvox-source-audit.jsonl`
+- `source_audit_*.json`
+- `sweep_manifest.json`
+- `source_slots.json`
+- `sweep_schedule.jsonl`
+
+Playback remains unchanged in Stage 1P-B.
 
 ### Clean-room and safety position
 
@@ -169,4 +188,3 @@ The app should be described as:
 
 Avoid describing hit labels as confirmed words or messages. They are user-perceived labels recorded for later blind review.
 <!-- FIELDVOX_CURRENT_FEATURES_END -->
-
