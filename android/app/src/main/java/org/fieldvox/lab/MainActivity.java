@@ -1,6 +1,7 @@
 package org.fieldvox.lab;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.util.Log;
 import android.hardware.SensorManager;
 import android.hardware.SensorEventListener;
@@ -35,6 +36,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.SeekBar;
+import android.widget.EditText;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -68,6 +70,22 @@ public class MainActivity extends Activity {
     private volatile boolean speakerMonitorEnabled = false;
     private Thread liveMonitorThread;
     private Button speakerMonitorButton;
+    private Button markHitButton;
+    private Button exportHitsButton;
+    private final Object hitMarkerLock = new Object();
+    private final ArrayList<String> pendingHitJsonLines = new ArrayList<>();
+    private File currentLiveJsonlFile;
+    private File currentLiveWavFile;
+    private String currentLiveSessionStem = "";
+    private long currentLiveSessionStartMs = 0L;
+    private int hitMarkerCount = 0;
+    private String onlineCarrierLastGateReason = "none";
+    private float onlineCarrierLastGateDelta = 0.0f;
+    private int onlineCarrierLastPacketToken = 0;
+    private int onlineCarrierLastGrainCount = 0;
+    private int onlineCarrierLastPacketMs = 0;
+    private int onlineCarrierLastForcedSilenceMs = 0;
+    private long onlineCarrierLastPacketUnixMs = 0L;
     private double liveNoiseFloor = 300.0;
     private long liveLastTriggerMs = 0L;
     private float liveOutputGain = 3.0f;
@@ -597,6 +615,491 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static String jsonEscape(String s) {
+        if (s == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\') {
+                out.append("\\\\");
+            } else if (c == '"') {
+                out.append("\\\"");
+            } else if (c == '\n') {
+                out.append("\\n");
+            } else if (c == '\r') {
+                out.append("\\r");
+            } else if (c == '\t') {
+                out.append("\\t");
+            } else if (c < 32) {
+                out.append(' ');
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    private File hitMarkerDir() {
+        File dir = new File(getFilesDir(), "fieldvox-hits");
+        if (!dir.isDirectory()) {
+            dir.mkdirs();
+        }
+        return dir;
+    }
+
+    private String appVersionNameSafe() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (info.versionName != null) {
+                return info.versionName;
+            }
+        } catch (Exception ignored) {}
+        return "unknown";
+    }
+
+    private String currentCarrierUrlSafe() {
+        if (ONLINE_CARRIER_URLS.length <= 0) {
+            return "";
+        }
+        int i = Math.max(0, Math.min(onlineCarrierIndex, ONLINE_CARRIER_URLS.length - 1));
+        return ONLINE_CARRIER_URLS[i];
+    }
+
+    private String buildHitJsonLine(String hitId, long now, String label, String sessionStem, long offsetMs) {
+        int nextIndex = ONLINE_CARRIER_URLS.length <= 0 ? 0 : normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
+        int safeNextLabelIndex = ONLINE_CARRIER_LABELS.length <= 0 ? 0 : Math.max(0, Math.min(nextIndex, ONLINE_CARRIER_LABELS.length - 1));
+        String nextLabel = ONLINE_CARRIER_LABELS.length <= 0 ? "" : ONLINE_CARRIER_LABELS[safeNextLabelIndex];
+
+        return "{"
+                + "\"event\":\"hit_marker\","
+                + "\"event_type\":\"hit_marker\","
+                + "\"hit_id\":\"" + jsonEscape(hitId) + "\","
+                + "\"unix_ms\":" + now + ","
+                + "\"session_id\":\"" + jsonEscape(sessionStem) + "\","
+                + "\"session_stem\":\"" + jsonEscape(sessionStem) + "\","
+                + "\"hit_offset_ms\":" + offsetMs + ","
+                + "\"user_label\":\"" + jsonEscape(label) + "\","
+                + "\"perceived_phrase\":\"" + jsonEscape(label) + "\","
+                + "\"source_label\":\"" + jsonEscape(onlineCarrierLabel()) + "\","
+                + "\"source_url\":\"" + jsonEscape(currentCarrierUrlSafe()) + "\","
+                + "\"source_material\":\"real_online_spoken_word_stream\","
+                + "\"gate_reason\":\"" + jsonEscape(onlineCarrierLastGateReason) + "\","
+                + "\"gate_delta\":" + String.format(java.util.Locale.US, "%.4f", onlineCarrierLastGateDelta) + ","
+                + "\"packet_token\":" + onlineCarrierLastPacketToken + ","
+                + "\"grain_count\":" + onlineCarrierLastGrainCount + ","
+                + "\"packet_ms\":" + onlineCarrierLastPacketMs + ","
+                + "\"forced_silence_ms\":" + onlineCarrierLastForcedSilenceMs + ","
+                + "\"packet_unix_ms\":" + onlineCarrierLastPacketUnixMs + ","
+                + "\"stream_index\":" + onlineCarrierIndex + ","
+                + "\"next_stream_index\":" + nextIndex + ","
+                + "\"next_stream_label\":\"" + jsonEscape(nextLabel) + "\","
+                + "\"sensor_snapshot\":{"
+                + "\"mag_baseline\":" + String.format(java.util.Locale.US, "%.4f", onlineCarrierMagBaseline) + ","
+                + "\"gyro_baseline\":" + String.format(java.util.Locale.US, "%.4f", onlineCarrierGyroBaseline) + ","
+                + "\"proximity_last\":" + String.format(java.util.Locale.US, "%.4f", onlineCarrierProximityLast) + ","
+                + "\"proximity_near\":" + onlineCarrierProximityNear
+                + "},"
+                + "\"pre_ms\":10000,"
+                + "\"post_ms\":10000,"
+                + "\"generated_words\":false,"
+                + "\"word_bank\":false,"
+                + "\"tts\":false,"
+                + "\"app_version\":\"" + jsonEscape(appVersionNameSafe()) + "\","
+                + "\"app_commit_short\":\"runtime-local\","
+                + "\"review_rule\":\"Do not tell listeners the expected phrase before blind review.\""
+                + "}";
+    }
+
+    private void appendTextFile(File file, String text) throws IOException {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(file, true)) {
+            out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    private void writeTextFile(File file, String text) throws IOException {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(file, false)) {
+            out.write(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+    }
+
+    private void flushPendingHitMarkers(java.io.FileOutputStream jsonOut) throws IOException {
+        ArrayList<String> copy = new ArrayList<>();
+        synchronized (hitMarkerLock) {
+            if (pendingHitJsonLines.isEmpty()) {
+                return;
+            }
+            copy.addAll(pendingHitJsonLines);
+            pendingHitJsonLines.clear();
+        }
+        for (String line : copy) {
+            writeJsonLine(jsonOut, line);
+        }
+    }
+
+    private void promptAndMarkHit() {
+        EditText input = new EditText(this);
+        input.setSingleLine(false);
+        input.setHint("Optional perceived phrase, e.g. what you think you heard");
+        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(Color.rgb(160, 170, 180));
+        input.setBackgroundColor(Color.rgb(20, 20, 24));
+
+        new AlertDialog.Builder(this)
+                .setTitle("Mark candidate hit")
+                .setMessage("This stores your label as a listener note only. FieldVox does not generate words, use TTS, or use a word bank.")
+                .setView(input)
+                .setPositiveButton("Save Hit", (dialog, which) -> markCandidateHit(input.getText().toString()))
+                .setNegativeButton("Unlabeled Hit", (dialog, which) -> markCandidateHit(""))
+                .setNeutralButton("Cancel", null)
+                .show();
+    }
+
+    private void markCandidateHit(String label) {
+        long now = System.currentTimeMillis();
+        String sessionStem = currentLiveSessionStem == null ? "" : currentLiveSessionStem;
+        if (sessionStem.isEmpty()) {
+            SessionPair latest = findLatestClosedPair();
+            if (latest != null) {
+                String name = latest.jsonl.getName();
+                sessionStem = name.endsWith(".jsonl") ? name.substring(0, name.length() - 6) : name;
+            } else {
+                sessionStem = "session-unknown";
+            }
+        }
+
+        long offsetMs = currentLiveSessionStartMs > 0L ? Math.max(0L, now - currentLiveSessionStartMs) : 0L;
+        int localCount = ++hitMarkerCount;
+        String hitId = "hit_" + sessionStem + "_" + now + "_" + localCount;
+        String cleanedLabel = label == null ? "" : label.trim();
+        String jsonLine = buildHitJsonLine(hitId, now, cleanedLabel, sessionStem, offsetMs);
+
+        File dir = hitMarkerDir();
+        File hitJson = new File(dir, hitId + ".json");
+        File hitJsonl = new File(dir, "fieldvox-hit-events.jsonl");
+
+        try {
+            writeTextFile(hitJson, jsonLine + "\n");
+            appendTextFile(hitJsonl, jsonLine + "\n");
+
+            synchronized (hitMarkerLock) {
+                pendingHitJsonLines.add(jsonLine);
+            }
+
+            String msg = "MARK HIT saved: " + hitId
+                    + "\nSession: " + sessionStem
+                    + "\nOffset: " + offsetMs + " ms"
+                    + "\nSource: " + onlineCarrierLabel()
+                    + "\nNo generated words. No word bank. No TTS.";
+            Log.i("FieldVox", msg.replace("\n", " | "));
+            exportStatus.setText(msg);
+            refreshSessions();
+        } catch (IOException e) {
+            exportStatus.setText("MARK HIT failed: " + e.getMessage());
+        }
+    }
+
+    private String readWholeText(File file) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(file))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private String extractJsonString(String json, String key) {
+        String needle = "\"" + key + "\":\"";
+        int p = json.indexOf(needle);
+        if (p < 0) {
+            return "";
+        }
+        p += needle.length();
+        StringBuilder out = new StringBuilder();
+        boolean esc = false;
+        for (int i = p; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (esc) {
+                out.append(c);
+                esc = false;
+            } else if (c == '\\') {
+                esc = true;
+            } else if (c == '"') {
+                break;
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    private long extractJsonLong(String json, String key, long fallback) {
+        String needle = "\"" + key + "\":";
+        int p = json.indexOf(needle);
+        if (p < 0) {
+            return fallback;
+        }
+        p += needle.length();
+        int e = p;
+        while (e < json.length()) {
+            char c = json.charAt(e);
+            if ((c >= '0' && c <= '9') || c == '-') {
+                e++;
+            } else {
+                break;
+            }
+        }
+        try {
+            return Long.parseLong(json.substring(p, e));
+        } catch (Exception ignored) {
+            return fallback;
+        }
+    }
+
+    private void skipFully(FileInputStream in, long bytes) throws IOException {
+        long left = bytes;
+        while (left > 0) {
+            long skipped = in.skip(left);
+            if (skipped <= 0) {
+                if (in.read() < 0) {
+                    break;
+                }
+                skipped = 1;
+            }
+            left -= skipped;
+        }
+    }
+
+    private long copyWavClip(File src, File dst, long centerOffsetMs, int preMs, int postMs) throws IOException {
+        long srcBytes = src.length();
+        if (srcBytes <= 44L) {
+            throw new IOException("source WAV has no PCM data yet");
+        }
+
+        long pcmBytes = srcBytes - 44L;
+        long bytesPerMs = (long)LIVE_SAMPLE_RATE * 2L / 1000L;
+        long startMs = Math.max(0L, centerOffsetMs - preMs);
+        long endMs = centerOffsetMs + postMs;
+        long startByte = startMs * bytesPerMs;
+        long endByte = Math.min(pcmBytes, endMs * bytesPerMs);
+        startByte -= startByte % 2L;
+        endByte -= endByte % 2L;
+
+        if (endByte <= startByte) {
+            startByte = 0L;
+            endByte = Math.min(pcmBytes, 20L * 1000L * bytesPerMs);
+            endByte -= endByte % 2L;
+        }
+
+        long wanted = Math.max(0L, endByte - startByte);
+        try (FileInputStream in = new FileInputStream(src);
+             java.io.FileOutputStream out = new java.io.FileOutputStream(dst, false)) {
+            skipFully(in, 44L + startByte);
+            out.write(makeWavHeader(wanted));
+            byte[] buf = new byte[64 * 1024];
+            long left = wanted;
+            while (left > 0L) {
+                int n = in.read(buf, 0, (int)Math.min((long)buf.length, left));
+                if (n < 0) {
+                    break;
+                }
+                out.write(buf, 0, n);
+                left -= n;
+            }
+        }
+        return wanted;
+    }
+
+    private String exportHits() {
+        File dir = hitMarkerDir();
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return "No hit marker folder found yet.";
+        }
+
+        java.util.Arrays.sort(files, (a, b) -> a.getName().compareTo(b.getName()));
+
+        String instructions = "FieldVox Lab blind hit review instructions\n\n"
+                + "Do not tell listeners the expected phrase.\n"
+                + "Play each blind review clip once or twice.\n"
+                + "Ask: write exactly what words, if any, you hear.\n"
+                + "Count a candidate hit as stronger only if multiple independent listeners write the same or close phrase.\n"
+                + "FieldVox Lab does not prove paranormal activity or spirit communication.\n"
+                + "No generated words. No word bank. No TTS. Source material is real online spoken-word stream audio plus microphone recording.\n";
+
+        File instructionsFile = new File(dir, "HIT_REVIEW_INSTRUCTIONS.txt");
+        File truthFile = new File(dir, "TRUTH_DO_NOT_SHOW_LISTENERS.tsv");
+        StringBuilder truth = new StringBuilder();
+        truth.append("hit_id\tsession_stem\thit_offset_ms\tuser_label\tsource_label\tgate_reason\tmetadata_file\tcontext_file\tblind_file\n");
+
+        int hits = 0;
+        int exported = 0;
+        int clipFailures = 0;
+        long bytes = 0L;
+
+        try {
+            writeTextFile(instructionsFile, instructions);
+        } catch (IOException e) {
+            return "Hit instructions write failed: " + e.getMessage();
+        }
+
+        for (File hitJson : files) {
+            String name = hitJson.getName();
+            if (!hitJson.isFile() || !name.startsWith("hit_") || !name.endsWith(".json")) {
+                continue;
+            }
+
+            hits += 1;
+            try {
+                String json = readWholeText(hitJson);
+                String hitId = extractJsonString(json, "hit_id");
+                String sessionStem = extractJsonString(json, "session_stem");
+                String label = extractJsonString(json, "user_label");
+                String sourceLabel = extractJsonString(json, "source_label");
+                String reason = extractJsonString(json, "gate_reason");
+                long offsetMs = extractJsonLong(json, "hit_offset_ms", 0L);
+                long unixMs = extractJsonLong(json, "unix_ms", System.currentTimeMillis());
+
+                File sessionWav = new File(new File(getFilesDir(), "fieldvox-sessions"), sessionStem + ".wav");
+                File contextWav = new File(dir, hitId + "_context.wav");
+                File blindWav = new File(dir, "blind_review_clip_" + hits + "_" + unixMs + ".wav");
+
+                String contextName = "";
+                String blindName = "";
+                if (sessionWav.isFile() && sessionWav.length() > 44L && !(liveMonitorRunning && sessionStem.equals(currentLiveSessionStem))) {
+                    copyWavClip(sessionWav, contextWav, offsetMs, 10000, 10000);
+                    copyWavClip(sessionWav, blindWav, offsetMs, 10000, 10000);
+                    contextName = contextWav.getName();
+                    blindName = blindWav.getName();
+                } else {
+                    clipFailures += 1;
+                }
+
+                truth.append(hitId).append('\t')
+                        .append(sessionStem).append('\t')
+                        .append(offsetMs).append('\t')
+                        .append(label.replace('\t', ' ')).append('\t')
+                        .append(sourceLabel.replace('\t', ' ')).append('\t')
+                        .append(reason.replace('\t', ' ')).append('\t')
+                        .append(hitJson.getName()).append('\t')
+                        .append(contextName).append('\t')
+                        .append(blindName).append('\n');
+            } catch (Exception e) {
+                clipFailures += 1;
+            }
+        }
+
+        if (hits == 0) {
+            return "No marked hits yet. Tap MARK HIT during or right after a candidate phrase.";
+        }
+
+        try {
+            writeTextFile(truthFile, truth.toString());
+        } catch (IOException e) {
+            return "Truth manifest write failed: " + e.getMessage();
+        }
+
+        File[] exportFiles = dir.listFiles();
+        if (exportFiles == null) {
+            return "Hit folder disappeared before export.";
+        }
+
+        for (File f : exportFiles) {
+            String n = f.getName();
+            if (!f.isFile()) {
+                continue;
+            }
+            if (!(n.endsWith(".json") || n.endsWith(".jsonl") || n.endsWith(".wav") || n.endsWith(".txt") || n.endsWith(".tsv"))) {
+                continue;
+            }
+            try {
+                String mime = null;
+                if (n.endsWith(".wav")) mime = "audio/wav";
+                else if (n.endsWith(".txt")) mime = "text/plain";
+                else if (n.endsWith(".tsv")) mime = "text/tab-separated-values";
+                else if (n.endsWith(".jsonl")) mime = null;
+                else if (n.endsWith(".json")) mime = "application/json";
+                ExportResult r = exportOneToDownloads(f, mime);
+                bytes += r.bytes;
+                exported += 1;
+            } catch (IOException e) {
+                clipFailures += 1;
+            }
+        }
+
+        String msg = "Exported hit review bundle to Downloads/FieldVoxLab"
+                + "\nHits: " + hits
+                + "\nFiles exported: " + exported
+                + "\nBytes: " + bytes
+                + "\nClip skips/failures: " + clipFailures
+                + "\nBlind clips use neutral filenames. Do not show TRUTH_DO_NOT_SHOW_LISTENERS.tsv to reviewers.";
+
+        if (liveMonitorRunning) {
+            msg += "\nCurrent live session is still running; stop/leave the app and Export Hits again to clip the newest active-session hit.";
+        }
+
+        return msg;
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleAdbHitMarkerIntent(intent);
+    }
+
+    private void handleAdbHitMarkerIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+
+        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
+            return;
+        }
+
+        String action = intent.getAction();
+        Log.i("FieldVox", "ADB intent observed action=" + action
+                + " mark_extra=" + intent.getBooleanExtra("fieldvox_mark_hit", false));
+        boolean exportRequested = "org.fieldvox.lab.EXPORT_HITS".equals(action)
+                || intent.getBooleanExtra("fieldvox_export_hits", false);
+
+        if (exportRequested) {
+            Log.i("FieldVox", "ADB EXPORT HITS requested");
+            handler.postDelayed(() -> {
+                String result = exportHits();
+                Log.i("FieldVox", "ADB EXPORT HITS result: " + result.replace("\n", " | "));
+                if (exportStatus != null) {
+                    exportStatus.setText(result);
+                }
+                refreshSessions();
+            }, 1500L);
+            return;
+        }
+
+        boolean requested = "org.fieldvox.lab.MARK_HIT".equals(action)
+                || intent.getBooleanExtra("fieldvox_mark_hit", false);
+
+        if (!requested) {
+            return;
+        }
+
+        String label = intent.getStringExtra("fieldvox_label");
+        if (label == null) {
+            label = "";
+        }
+
+        final String finalLabel = label;
+
+        Log.i("FieldVox", "ADB MARK HIT requested label_len=" + finalLabel.length());
+
+        handler.postDelayed(() -> {
+            markCandidateHit(finalLabel);
+        }, 1200L);
+    }
+
     private void updateLiveButtons() {
         if (liveButton != null) {
             liveButton.setText(liveMonitorRunning ? "Auto Live: On" : "Auto Live: Arming");
@@ -690,6 +1193,14 @@ public class MainActivity extends Activity {
 
         onlineCarrierGateOpenUntilMs = now + packetMs;
         onlineCarrierNextAllowedGateMs = now + packetMs + forcedSilenceMs;
+
+        onlineCarrierLastGateReason = reason;
+        onlineCarrierLastGateDelta = delta;
+        onlineCarrierLastPacketToken = packetToken;
+        onlineCarrierLastGrainCount = totalGrains;
+        onlineCarrierLastPacketMs = packetMs;
+        onlineCarrierLastForcedSilenceMs = forcedSilenceMs;
+        onlineCarrierLastPacketUnixMs = now;
 
         String openMsg = "PHONETIC VOX packet open: " + onlineCarrierLabel()
                 + " | Reason: " + reason
@@ -1356,6 +1867,14 @@ public class MainActivity extends Activity {
         final File jsonl = new File(dir, stem + ".jsonl");
         final File wav = new File(dir, stem + ".wav");
 
+        currentLiveSessionStem = stem;
+        currentLiveSessionStartMs = startMs;
+        currentLiveJsonlFile = jsonl;
+        currentLiveWavFile = wav;
+        synchronized (hitMarkerLock) {
+            pendingHitJsonLines.clear();
+        }
+
         liveMonitorRunning = true;
         liveNoiseFloor = 300.0;
         liveLastTriggerMs = 0L;
@@ -1450,6 +1969,7 @@ public class MainActivity extends Activity {
                     }
 
                     wavOut.write(pcm, 0, n * 2);
+                    flushPendingHitMarkers(jsonOut);
                     pcmBytes += (long)n * 2L;
 
                     if (speakerMonitorEnabled) {
@@ -1555,6 +2075,7 @@ public class MainActivity extends Activity {
             msg = "Auto Live is already running.\nNo Stop button needed. Leave or close the app to finalize the WAV.";
         } else {
             autoStartEverythingOnLaunch();
+        handleAdbHitMarkerIntent(getIntent());
             msg = "Auto Live is arming.";
         }
         exportStatus.setText(msg);
@@ -1716,7 +2237,23 @@ public class MainActivity extends Activity {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.addView(status);
+        markHitButton = makeWideButton("MARK HIT");
+        markHitButton.setTextSize(18);
+        markHitButton.setContentDescription("MARK HIT");
+        markHitButton.setBackgroundColor(Color.rgb(92, 30, 30));
+        content.addView(markHitButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(this, 62)));
+
+        exportHitsButton = makeWideButton("Export Hits");
+        exportHitsButton.setTextSize(16);
+        exportHitsButton.setContentDescription("Export Hits");
+        content.addView(exportHitsButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(this, 54)));
+
         content.addView(sessions);
+
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
@@ -1758,6 +2295,19 @@ public class MainActivity extends Activity {
             refreshSessions();
             exportStatus.setText("Session list refreshed.");
         });
+
+        if (markHitButton != null) {
+            markHitButton.setOnClickListener(v -> promptAndMarkHit());
+        }
+
+        if (exportHitsButton != null) {
+            exportHitsButton.setOnClickListener(v -> {
+                String result = exportHits();
+                exportStatus.setText(result);
+                refreshSessions();
+                status.setText(nativeStatus());
+            });
+        }
 
         exportButton.setOnClickListener(v -> {
             String result = exportLatestPair();
@@ -1808,6 +2358,8 @@ public class MainActivity extends Activity {
 
     protected void onResume() {
         super.onResume();
+        // ADB_MARK_HIT_EXISTING_ONRESUME_POLL: deterministic test hook because UIAutomator cannot idle during live VOX.
+        handler.postDelayed(() -> handleAdbHitMarkerIntent(getIntent()), 900L);
         handler.postDelayed(() -> autoStartEverythingOnLaunch(), 350);
     }
 
