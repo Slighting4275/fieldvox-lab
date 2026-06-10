@@ -59,6 +59,9 @@ public class MainActivity extends Activity {
     private FieldVoxLiveSource currentLiveSource;
     private boolean liveStreamActive = false;
 
+    // FIELDVOX_STAGE1QE_SHORT_DWELL_HARD_STOP
+    private static final long FIELDVOX_STAGE1QD_DWELL_MS = 5000L;
+
     private static final class FieldVoxLiveSource {
         String stationuuid = "";
         String countrycode = "";
@@ -2502,9 +2505,9 @@ public class MainActivity extends Activity {
         content.addView(liveStreamStatusText);
 
         liveStreamButton = new Button(this);
-        liveStreamButton.setText("Start Live Stream");
+        liveStreamButton.setText("Live Stream Disabled");
         liveStreamButton.setAllCaps(false);
-        liveStreamButton.setOnClickListener(v -> toggleStage1QDLiveStream());
+        liveStreamButton.setOnClickListener(v -> startStage1QDLiveStream());
         content.addView(liveStreamButton);
 
         if (getIntent() != null && getIntent().getBooleanExtra("fieldvox_stage1qd_autostart", false)) {
@@ -2651,6 +2654,7 @@ public class MainActivity extends Activity {
 
 
     protected void onStop() {
+        stopStage1QDLiveStreamIfActive("activity_stopped");
         stopOnlineVoxCarrier();
         liveMonitorRunning = false;
         updateLiveButtons();
@@ -2658,6 +2662,7 @@ public class MainActivity extends Activity {
     }
 
     protected void onDestroy() {
+        stopStage1QDLiveStreamIfActive("activity_destroyed");
         stopOnlineVoxCarrier();
         liveMonitorRunning = false;
         nativeStop();
@@ -2817,78 +2822,16 @@ public class MainActivity extends Activity {
     }
 
     private void startStage1QDLiveStream() {
-        setStage1QDStatus("Experimental Live Stream: selecting cached source\nRaw stream URLs stay app-private.");
-        appendStage1QDLiveEvent("live_stream_source_selected", null, "selecting", null);
-
-        new Thread(() -> {
-            FieldVoxLiveSource src = null;
-            try {
-                src = loadStage1QDLiveSource();
-                FieldVoxLiveSource finalSrc = src;
-                runOnUiThread(() -> {
-                    currentLiveSource = finalSrc;
-                    liveStreamActive = true;
-                    if (liveStreamButton != null) {
-                        liveStreamButton.setText("Stop Live Stream");
-                    }
-                    setStage1QDStatus(formatStage1QDStatus("connecting", finalSrc, null));
-                });
-
-                appendStage1QDLiveEvent("live_stream_source_selected", src, "selected", null);
-                appendStage1QDLiveEvent("live_stream_connecting", src, "connecting", null);
-
-                String playUrl = src.privateUrlResolved != null && src.privateUrlResolved.length() > 0 ? src.privateUrlResolved : src.privateUrl;
-                if (playUrl == null || playUrl.length() == 0) {
-                    throw new IllegalStateException("private stream URL missing");
-                }
-
-                MediaPlayer mp = new MediaPlayer();
-                mp.setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build());
-
-                mp.setOnPreparedListener(player -> {
-                    try {
-                        player.start();
-                    } catch (Exception ignored) {
-                    }
-                    appendStage1QDLiveEvent("live_stream_active", currentLiveSource, "active", null);
-                    runOnUiThread(() -> setStage1QDStatus(formatStage1QDStatus("active", currentLiveSource, null)));
-
-                    new Thread(() -> {
-                        try {
-                            Thread.sleep(45000);
-                        } catch (Exception ignored) {
-                        }
-                        if (liveStreamActive && liveStreamPlayer != null) {
-                            stopStage1QDLiveStream("short_dwell_complete");
-                        }
-                    }, "fieldvox-stage1qd-short-dwell-stop").start();
-                });
-
-                mp.setOnErrorListener((player, what, extra) -> {
-                    appendStage1QDLiveEvent("live_stream_error", currentLiveSource, "error", "MediaPlayer what=" + what + " extra=" + extra);
-                    runOnUiThread(() -> setStage1QDStatus(formatStage1QDStatus("error", currentLiveSource, "MediaPlayer what=" + what + " extra=" + extra)));
-                    stopStage1QDLiveStream("media_error");
-                    return true;
-                });
-
-                mp.setDataSource(playUrl);
-                runOnUiThread(() -> liveStreamPlayer = mp);
-                mp.prepareAsync();
-            } catch (Exception e) {
-                FieldVoxLiveSource finalSrc = src;
-                appendStage1QDLiveEvent("live_stream_error", finalSrc, "error", e.toString());
-                runOnUiThread(() -> {
-                    liveStreamActive = false;
-                    if (liveStreamButton != null) {
-                        liveStreamButton.setText("Start Live Stream");
-                    }
-                    setStage1QDStatus(formatStage1QDStatus("error", finalSrc, e.toString()));
-                });
+        // FIELDVOX_STAGE1QF_DISABLE_LONG_STREAM_PLAYBACK
+        stopStage1QDLiveStreamIfActive("long_stream_disabled_before_start");
+        appendStage1QDLiveEvent("live_stream_disabled", null, "disabled", "Long-form radio playback disabled after Stage 1Q-D/1Q-E test. Next implementation must use short buffered windows only.");
+        runOnUiThread(() -> {
+            if (liveStreamButton != null) {
+                liveStreamButton.setText("Live Stream Disabled");
+                liveStreamButton.setEnabled(false);
             }
-        }, "fieldvox-stage1qd-live-stream").start();
+            setStage1QDStatus("Experimental Live Stream: disabled\nLong-form station playback is disabled.\nNext implementation must use short buffered windows only.\nThis does not prove paranormal communication.");
+        });
     }
 
     private void stopStage1QDLiveStream(String reason) {
@@ -2913,10 +2856,18 @@ public class MainActivity extends Activity {
         appendStage1QDLiveEvent("live_stream_stopped", src, "stopped", reason);
         runOnUiThread(() -> {
             if (liveStreamButton != null) {
-                liveStreamButton.setText("Start Live Stream");
+                liveStreamButton.setText("Live Stream Disabled");
             }
             setStage1QDStatus(formatStage1QDStatus("stopped", src, reason));
         });
+    }
+
+
+    // FIELDVOX_STAGE1QE_SHORT_DWELL_HARD_STOP
+    private void stopStage1QDLiveStreamIfActive(String reason) {
+        if (liveStreamActive || liveStreamPlayer != null) {
+            stopStage1QDLiveStream(reason);
+        }
     }
 
     private FieldVoxLiveSource loadStage1QDLiveSource() throws Exception {
@@ -3112,5 +3063,13 @@ public class MainActivity extends Activity {
         }
     }
 
+
+
+    // FIELDVOX_STAGE1QE_SHORT_DWELL_HARD_STOP
+    @Override
+    protected void onPause() {
+        stopStage1QDLiveStreamIfActive("activity_paused");
+        super.onPause();
+    }
 
 }
