@@ -8,7 +8,7 @@
 #include <sys/stat.h>
 
 float fv_mag3(float x, float y, float z) {
-    return sqrtf((x * x) + (y * y) + (z * z));
+    return hypotf(hypotf(x, y), z);
 }
 
 void fv_trigger_init(FV_TriggerState *st, float baseline_mag, float threshold, uint64_t cooldown_ns) {
@@ -23,8 +23,16 @@ void fv_trigger_init(FV_TriggerState *st, float baseline_mag, float threshold, u
 }
 
 int fv_trigger_update(FV_TriggerState *st, FV_SensorSample sample, float *out_mag, float *out_delta) {
+    if (!st || !isfinite(sample.mx) || !isfinite(sample.my) || !isfinite(sample.mz)
+            || !isfinite(st->baseline_mag) || !isfinite(st->trigger_threshold)) {
+        return 0;
+    }
     const float mag = fv_mag3(sample.mx, sample.my, sample.mz);
     const float delta = fabsf(mag - st->baseline_mag);
+
+    if (!isfinite(mag) || !isfinite(delta)) {
+        return 0;
+    }
 
     st->ema_mag = (st->ema_mag * 0.970f) + (mag * 0.030f);
     st->ema_delta = (st->ema_delta * 0.900f) + (delta * 0.100f);
@@ -100,6 +108,9 @@ static void write_le_float(FILE *fp, float f) {
 
 int fv_wav_begin(FV_WavWriter *w, const char *path, uint32_t sample_rate, uint16_t channels) {
     if (!w || !path || sample_rate == 0 || channels == 0) return -1;
+    const uint64_t block_align = (uint64_t)channels * 2ULL;
+    const uint64_t byte_rate = (uint64_t)sample_rate * block_align;
+    if (block_align > UINT16_MAX || byte_rate > UINT32_MAX) return -1;
     memset(w, 0, sizeof(*w));
     w->fp = fopen(path, "wb");
     if (!w->fp) return -1;
@@ -115,8 +126,8 @@ int fv_wav_begin(FV_WavWriter *w, const char *path, uint32_t sample_rate, uint16
     write_le16(w->fp, 1);
     write_le16(w->fp, channels);
     write_le32(w->fp, sample_rate);
-    write_le32(w->fp, sample_rate * channels * 2u);
-    write_le16(w->fp, (uint16_t)(channels * 2u));
+    write_le32(w->fp, (uint32_t)byte_rate);
+    write_le16(w->fp, (uint16_t)block_align);
     write_le16(w->fp, 16);
     fwrite("data", 1, 4, w->fp);
     write_le32(w->fp, 0);
@@ -172,6 +183,14 @@ void fv_make_blob_audio(
     float distortion,
     FV_Rng *rng
 ) {
+    if (!dst || !rng || frames == 0 || !isfinite(freq_hz)
+            || !isfinite(noise_mix) || !isfinite(echo_mix) || !isfinite(distortion)) {
+        if (dst && frames > 0) {
+            memset(dst, 0, frames * sizeof(*dst));
+        }
+        return;
+    }
+
     const uint32_t delay = (uint32_t)((float)FV_SAMPLE_RATE * 0.120f);
     float *echo = calloc(delay ? delay : 1u, sizeof(float));
     if (!echo) {

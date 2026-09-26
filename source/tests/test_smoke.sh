@@ -55,10 +55,54 @@ if "$project_dir/fv-csvvox" --input-csv "$quoted_input" \
     exit 1
 fi
 
+collision_target="$test_dir/collision.fvblobs"
+collision_link="$test_dir/collision-input.csv"
+cp "$project_dir/tests/fixtures/sample-sensor.csv" "$collision_target" || exit 1
+cp "$collision_target" "$test_dir/collision-before" || exit 1
+ln -s "$collision_target" "$collision_link" || exit 1
+if "$project_dir/fv-csvvox" \
+        --input-csv "$collision_link" \
+        --out-prefix "$test_dir/collision" \
+        --threshold 0.10 \
+        --baseline-samples 8 >/dev/null 2>&1; then
+    echo "aliased input/output path was incorrectly accepted" >&2
+    exit 1
+fi
+cmp "$collision_target" "$test_dir/collision-before" || {
+    echo "input was modified during collision rejection" >&2
+    exit 1
+}
+
+malformed_csv="$test_dir/malformed.csv"
+{
+    echo '0,10,0,0,1'
+    echo '1,1000001,0,0'
+    awk 'BEGIN { printf "2,10,0,0,"; for (i = 0; i < 5000; i++) printf "1"; printf "\n" }'
+    cat "$project_dir/tests/fixtures/sample-sensor.csv"
+} >"$malformed_csv"
+"$project_dir/fv-csvvox" \
+    --input-csv "$malformed_csv" \
+    --out-prefix "$test_dir/csv/malformed" \
+    --threshold 0.10 \
+    --baseline-samples 8 \
+    --seed 1 >/dev/null || exit 1
+jq -e 'select(.type == "csv_session_end") | .rows_skipped == 4' \
+    "$test_dir/csv/malformed.jsonl" >/dev/null || {
+    echo "malformed CSV rows were not rejected as single complete rows" >&2
+    exit 1
+}
+
 cp "$test_dir/first/out/session.fvblobs" "$test_dir/truncated.fvblobs" || exit 1
 truncate -s 100 "$test_dir/truncated.fvblobs" || exit 1
 if "$project_dir/fv-blobdump" --input "$test_dir/truncated.fvblobs" --summary; then
     echo "truncated blob stream was incorrectly accepted" >&2
+    exit 1
+fi
+
+cp "$test_dir/first/out/session.fvblobs" "$test_dir/nonfinite.fvblobs" || exit 1
+printf '\x00\x00\xc0\x7f' | dd of="$test_dir/nonfinite.fvblobs" bs=1 seek=44 conv=notrunc status=none
+if "$project_dir/fv-blobdump" --input "$test_dir/nonfinite.fvblobs" --summary >/dev/null 2>&1; then
+    echo "non-finite blob metadata was incorrectly accepted" >&2
     exit 1
 fi
 

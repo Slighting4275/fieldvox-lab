@@ -134,6 +134,14 @@ static int read_blob_header(FILE *fp, FV_ReadBlobMeta *m) {
         return -2;
     }
 
+    if (!isfinite(m->mag_value) || m->mag_value < 0.0f
+            || !isfinite(m->mag_delta) || m->mag_delta < 0.0f
+            || !isfinite(m->freq_hz) || m->freq_hz <= 0.0f
+            || m->freq_hz > (float)m->sample_rate * 0.5f) {
+        fprintf(stderr, "invalid non-finite or out-of-range blob metadata\n");
+        return -2;
+    }
+
     return 0;
 }
 

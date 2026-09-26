@@ -175,7 +175,7 @@ static char *fvsa_json_escape(const char *s) {
             case '\t': *q++='\\'; *q++='t'; break;
             default:
                 if (*p < 0x20) {
-                    sprintf(q, "\\u%04x", (unsigned int)*p);
+                    snprintf(q, 7, "\\u%04x", (unsigned int)*p);
                     q += 6;
                 } else {
                     *q++ = (char)*p;
@@ -538,7 +538,8 @@ static int fvsa_ensure_dir(const char *path) {
         return 0;
     }
     if (errno == EEXIST) {
-        return 0;
+        struct stat st;
+        return stat(path, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
     }
     return -1;
 }
@@ -614,13 +615,13 @@ Java_org_fieldvox_lab_MainActivity_nativeSourceAuditHit(
 
     char magic_hex[(sizeof(FVSA_MAGIC_BLOB) * 2) + 1];
     for (size_t i = 0; i < sizeof(FVSA_MAGIC_BLOB); i++) {
-        sprintf(magic_hex + (i * 2), "%02x", FVSA_MAGIC_BLOB[i]);
+        snprintf(magic_hex + (i * 2), 3, "%02x", FVSA_MAGIC_BLOB[i]);
     }
     magic_hex[sizeof(FVSA_MAGIC_BLOB) * 2] = 0;
 
     uint64_t hit_hash = fvsa_fnv1a64((const unsigned char *)hit_json, strlen(hit_json));
     char hash_hex[17];
-    sprintf(hash_hex, "%016llx", (unsigned long long)hit_hash);
+    snprintf(hash_hex, sizeof(hash_hex), "%016llx", (unsigned long long)hit_hash);
 
     char *hit_esc = fvsa_json_escape(hit);
     char *hit_file_safe = fvsa_basename_safe(hit);

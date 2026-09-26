@@ -5,6 +5,7 @@
 #include <aaudio/AAudio.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -12,7 +13,6 @@
 #include <sstream>
 #include <string>
 #include <cstdio>
-#include <ctime>
 #include <cerrno>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -72,6 +72,7 @@ static std::atomic<uint64_t> g_session_seq{0};
 static std::string g_wav_path;
 static FILE *g_wav_fp = nullptr;
 static std::atomic<uint64_t> g_wav_data_bytes{0};
+static constexpr uint64_t WAV_MAX_DATA_BYTES = 0xffffffffULL - 36ULL;
 
 static aaudio_data_callback_result_t audio_callback(
     AAudioStream *,
@@ -187,26 +188,29 @@ static void push_tone(float freq_hz, float noise_mix, float echo_mix, float dist
 
 
 
-static void wav_write_u16(FILE *fp, uint16_t v) {
-    std::fputc(static_cast<int>(v & 0xffu), fp);
-    std::fputc(static_cast<int>((v >> 8u) & 0xffu), fp);
+static bool wav_write_u16(FILE *fp, uint16_t v) {
+    return std::fputc(static_cast<int>(v & 0xffu), fp) != EOF
+        && std::fputc(static_cast<int>((v >> 8u) & 0xffu), fp) != EOF;
 }
 
-static void wav_write_u32(FILE *fp, uint32_t v) {
-    std::fputc(static_cast<int>(v & 0xffu), fp);
-    std::fputc(static_cast<int>((v >> 8u) & 0xffu), fp);
-    std::fputc(static_cast<int>((v >> 16u) & 0xffu), fp);
-    std::fputc(static_cast<int>((v >> 24u) & 0xffu), fp);
+static bool wav_write_u32(FILE *fp, uint32_t v) {
+    return std::fputc(static_cast<int>(v & 0xffu), fp) != EOF
+        && std::fputc(static_cast<int>((v >> 8u) & 0xffu), fp) != EOF
+        && std::fputc(static_cast<int>((v >> 16u) & 0xffu), fp) != EOF
+        && std::fputc(static_cast<int>((v >> 24u) & 0xffu), fp) != EOF;
 }
 
 static uint32_t wav_cap_u32(uint64_t v) {
-    if (v > 0xffffffffULL) {
-        return 0xffffffffu;
+    if (v > WAV_MAX_DATA_BYTES) {
+        return static_cast<uint32_t>(WAV_MAX_DATA_BYTES);
     }
     return static_cast<uint32_t>(v);
 }
 
-static void wav_write_header(FILE *fp, uint64_t data_bytes_u64) {
+static bool wav_write_header(FILE *fp, uint64_t data_bytes_u64) {
+    if (fp == nullptr) {
+        return false;
+    }
     const uint32_t data_bytes = wav_cap_u32(data_bytes_u64);
     const uint32_t riff_size = 36u + data_bytes;
     const uint16_t channels = 1u;
@@ -215,30 +219,35 @@ static void wav_write_header(FILE *fp, uint64_t data_bytes_u64) {
     const uint16_t block_align = static_cast<uint16_t>(channels * bits_per_sample / 8u);
     const uint32_t byte_rate = sample_rate * block_align;
 
-    std::fwrite("RIFF", 1, 4, fp);
-    wav_write_u32(fp, riff_size);
-    std::fwrite("WAVE", 1, 4, fp);
-
-    std::fwrite("fmt ", 1, 4, fp);
-    wav_write_u32(fp, 16u);
-    wav_write_u16(fp, 1u);
-    wav_write_u16(fp, channels);
-    wav_write_u32(fp, sample_rate);
-    wav_write_u32(fp, byte_rate);
-    wav_write_u16(fp, block_align);
-    wav_write_u16(fp, bits_per_sample);
-
-    std::fwrite("data", 1, 4, fp);
-    wav_write_u32(fp, data_bytes);
+    return std::fwrite("RIFF", 1, 4, fp) == 4
+        && wav_write_u32(fp, riff_size)
+        && std::fwrite("WAVE", 1, 4, fp) == 4
+        && std::fwrite("fmt ", 1, 4, fp) == 4
+        && wav_write_u32(fp, 16u)
+        && wav_write_u16(fp, 1u)
+        && wav_write_u16(fp, channels)
+        && wav_write_u32(fp, sample_rate)
+        && wav_write_u32(fp, byte_rate)
+        && wav_write_u16(fp, block_align)
+        && wav_write_u16(fp, bits_per_sample)
+        && std::fwrite("data", 1, 4, fp) == 4
+        && wav_write_u32(fp, data_bytes);
 }
 
 static void session_write_pcm(const int16_t *pcm, uint32_t frames) {
     pthread_mutex_lock(&g_session_mutex);
 
     if (g_wav_fp != nullptr && pcm != nullptr && frames > 0) {
-        const size_t written = std::fwrite(pcm, sizeof(int16_t), frames, g_wav_fp);
+        const uint64_t current = g_wav_data_bytes.load(std::memory_order_relaxed);
+        const uint64_t room_frames = current < WAV_MAX_DATA_BYTES
+            ? (WAV_MAX_DATA_BYTES - current) / sizeof(int16_t)
+            : 0;
+        const size_t requested = static_cast<size_t>(std::min<uint64_t>(frames, room_frames));
+        const size_t written = std::fwrite(pcm, sizeof(int16_t), requested, g_wav_fp);
         g_wav_data_bytes.fetch_add(static_cast<uint64_t>(written * sizeof(int16_t)), std::memory_order_relaxed);
-        std::fflush(g_wav_fp);
+        if (written != requested || std::fflush(g_wav_fp) != 0) {
+            FV_LOGE("session WAV write failed: %s", std::strerror(errno));
+        }
     }
 
     pthread_mutex_unlock(&g_session_mutex);
@@ -254,7 +263,11 @@ static bool fv_mkdir_if_missing(const std::string &path) {
         return true;
     }
 
-    return errno == EEXIST;
+    if (errno != EEXIST) {
+        return false;
+    }
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 static void session_open() {
@@ -275,17 +288,30 @@ static void session_open() {
 
     const std::string base = g_files_dir.empty() ? std::string("/data/local/tmp") : g_files_dir;
     const std::string dir = base + "/fieldvox-sessions";
-    fv_mkdir_if_missing(dir);
+    if (!fv_mkdir_if_missing(dir)) {
+        g_session_open.store(0, std::memory_order_relaxed);
+        FV_LOGE("session directory unavailable: %s", dir.c_str());
+        pthread_mutex_unlock(&g_session_mutex);
+        return;
+    }
 
     const uint64_t seq = g_session_seq.fetch_add(1, std::memory_order_relaxed) + 1u;
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
     char name[128];
-    std::snprintf(
+    const int name_length = std::snprintf(
         name,
         sizeof(name),
         "session-%lld-%llu.jsonl",
-        static_cast<long long>(std::time(nullptr)),
+        static_cast<long long>(now_ms),
         static_cast<unsigned long long>(seq)
     );
+    if (name_length < 0 || static_cast<size_t>(name_length) >= sizeof(name)) {
+        g_session_open.store(0, std::memory_order_relaxed);
+        FV_LOGE("session filename generation failed");
+        pthread_mutex_unlock(&g_session_mutex);
+        return;
+    }
 
     g_session_path = dir + "/" + name;
 
@@ -300,28 +326,47 @@ static void session_open() {
 
     g_session_fp = std::fopen(g_session_path.c_str(), "ab");
     g_wav_fp = std::fopen(g_wav_path.c_str(), "wb");
+    bool wav_ready = false;
     if (g_wav_fp != nullptr) {
-        wav_write_header(g_wav_fp, 0);
-        std::fflush(g_wav_fp);
-        FV_LOGI("session wav opened: %s", g_wav_path.c_str());
+        wav_ready = wav_write_header(g_wav_fp, 0) && std::fflush(g_wav_fp) == 0;
+        if (!wav_ready) {
+            FV_LOGE("session WAV header write failed: %s", std::strerror(errno));
+        }
+        if (wav_ready) {
+            FV_LOGI("session wav opened: %s", g_wav_path.c_str());
+        }
     } else {
         FV_LOGE("session wav open failed: %s", g_wav_path.c_str());
     }
 
+    bool session_ready = false;
     if (g_session_fp != nullptr) {
-        std::fprintf(
+        const int result = std::fprintf(
             g_session_fp,
             "{\"type\":\"session_start\",\"package\":\"%s\",\"path\":\"%s\",\"sample_rate\":%u}\n",
             g_package_name.c_str(),
             g_session_path.c_str(),
             FV_SAMPLE_RATE
         );
-        std::fflush(g_session_fp);
+        session_ready = result >= 0 && std::fflush(g_session_fp) == 0;
+    }
+
+    if (session_ready && wav_ready) {
         g_session_open.store(1, std::memory_order_relaxed);
         FV_LOGI("session opened: %s", g_session_path.c_str());
     } else {
         g_session_open.store(0, std::memory_order_relaxed);
-        FV_LOGE("session open failed: %s", g_session_path.c_str());
+        FV_LOGE("session pair open failed: json=%d wav=%d", session_ready ? 1 : 0, wav_ready ? 1 : 0);
+        if (g_session_fp != nullptr) {
+            std::fclose(g_session_fp);
+            g_session_fp = nullptr;
+        }
+        if (g_wav_fp != nullptr) {
+            std::fclose(g_wav_fp);
+            g_wav_fp = nullptr;
+        }
+        std::remove(g_session_path.c_str());
+        std::remove(g_wav_path.c_str());
     }
 
     pthread_mutex_unlock(&g_session_mutex);
@@ -341,7 +386,7 @@ static void session_write_trigger(
         const unsigned long long cooldown_ms =
             static_cast<unsigned long long>(g_cooldown_ns.load(std::memory_order_relaxed) / 1000000ULL);
 
-        std::fprintf(
+        const int result = std::fprintf(
             g_session_fp,
             "{\"type\":\"trigger\",\"trigger\":%llu,\"t_ns\":%llu,\"mag\":%.6f,\"delta\":%.6f,\"freq_hz\":%.6f,\"threshold\":%.6f,\"cooldown_ms\":%llu}\n",
             static_cast<unsigned long long>(trigger_id),
@@ -352,8 +397,11 @@ static void session_write_trigger(
             threshold,
             cooldown_ms
         );
-        std::fflush(g_session_fp);
-        g_session_events.fetch_add(1, std::memory_order_relaxed);
+        if (result >= 0 && std::fflush(g_session_fp) == 0) {
+            g_session_events.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            FV_LOGE("session trigger write failed: %s", std::strerror(errno));
+        }
     }
 
     pthread_mutex_unlock(&g_session_mutex);
@@ -363,13 +411,17 @@ static void session_close() {
     pthread_mutex_lock(&g_session_mutex);
 
     if (g_session_fp != nullptr) {
-        std::fprintf(
+        const int result = std::fprintf(
             g_session_fp,
             "{\"type\":\"session_stop\",\"events\":%llu}\n",
             static_cast<unsigned long long>(g_session_events.load(std::memory_order_relaxed))
         );
-        std::fflush(g_session_fp);
-        fclose(g_session_fp);
+        if (result < 0 || std::fflush(g_session_fp) != 0) {
+            FV_LOGE("session final JSON write failed: %s", std::strerror(errno));
+        }
+        if (std::fclose(g_session_fp) != 0) {
+            FV_LOGE("session JSON close failed: %s", std::strerror(errno));
+        }
         g_session_fp = nullptr;
         FV_LOGI("session closed: %s events=%llu", g_session_path.c_str(),
                 static_cast<unsigned long long>(g_session_events.load(std::memory_order_relaxed)));
@@ -377,10 +429,15 @@ static void session_close() {
 
     if (g_wav_fp != nullptr) {
         const uint64_t data_bytes = g_wav_data_bytes.load(std::memory_order_relaxed);
-        std::fseek(g_wav_fp, 0, SEEK_SET);
-        wav_write_header(g_wav_fp, data_bytes);
-        std::fflush(g_wav_fp);
-        fclose(g_wav_fp);
+        const bool finalized = std::fseek(g_wav_fp, 0, SEEK_SET) == 0
+            && wav_write_header(g_wav_fp, data_bytes)
+            && std::fflush(g_wav_fp) == 0;
+        if (!finalized) {
+            FV_LOGE("session WAV finalization failed: %s", std::strerror(errno));
+        }
+        if (std::fclose(g_wav_fp) != 0) {
+            FV_LOGE("session WAV close failed: %s", std::strerror(errno));
+        }
         g_wav_fp = nullptr;
         FV_LOGI("session wav closed: %s bytes=%llu", g_wav_path.c_str(),
                 static_cast<unsigned long long>(data_bytes));
@@ -457,6 +514,14 @@ static void *sensor_thread_main(void *) {
     g_sensor_available.store(1);
 
     ALooper *looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+    if (looper == nullptr) {
+        FV_LOGE("ALooper_prepare failed");
+        g_running.store(false);
+        stop_audio();
+        session_close();
+        g_thread_live.store(false);
+        return nullptr;
+    }
     ASensorEventQueue *queue = ASensorManager_createEventQueue(
         manager,
         looper,
@@ -474,8 +539,19 @@ static void *sensor_thread_main(void *) {
         return nullptr;
     }
 
-    ASensorEventQueue_enableSensor(queue, mag_sensor);
-    ASensorEventQueue_setEventRate(queue, mag_sensor, 8333);
+    const int enable_result = ASensorEventQueue_enableSensor(queue, mag_sensor);
+    const int rate_result = enable_result >= 0
+        ? ASensorEventQueue_setEventRate(queue, mag_sensor, 8333)
+        : enable_result;
+    if (enable_result < 0 || rate_result < 0) {
+        FV_LOGE("magnetometer configuration failed: enable=%d rate=%d", enable_result, rate_result);
+        ASensorManager_destroyEventQueue(manager, queue);
+        g_running.store(false);
+        stop_audio();
+        session_close();
+        g_thread_live.store(false);
+        return nullptr;
+    }
 
     FV_TriggerState trig{};
 
@@ -564,13 +640,17 @@ static void *sensor_thread_main(void *) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeInit(JNIEnv *env, jobject, jstring package_name, jstring files_dir) {
-    const char *pkg = env->GetStringUTFChars(package_name, nullptr);
+    const char *pkg = package_name == nullptr
+        ? nullptr
+        : env->GetStringUTFChars(package_name, nullptr);
     if (pkg != nullptr) {
         g_package_name = pkg;
         env->ReleaseStringUTFChars(package_name, pkg);
     }
 
-    const char *dir = env->GetStringUTFChars(files_dir, nullptr);
+    const char *dir = files_dir == nullptr
+        ? nullptr
+        : env->GetStringUTFChars(files_dir, nullptr);
     if (dir != nullptr) {
         g_files_dir = dir;
         env->ReleaseStringUTFChars(files_dir, dir);
@@ -633,6 +713,9 @@ Java_org_fieldvox_lab_MainActivity_nativeStop(JNIEnv *, jobject) {
 extern "C" JNIEXPORT void JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeSetThreshold(JNIEnv *, jobject, jfloat threshold) {
     float v = static_cast<float>(threshold);
+    if (!std::isfinite(v)) {
+        v = 1.65f;
+    }
     if (v < 0.10f) {
         v = 0.10f;
     }

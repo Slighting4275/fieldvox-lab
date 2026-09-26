@@ -69,7 +69,8 @@ static uint32_t fv1u_mix32(uint32_t x) {
 }
 
 static uint32_t fv1u_station_index(uint32_t logical_index) {
-    uint32_t seed = fv1u_u32_le(FV1U_STATION_PLAN_BLOB + 16 + ((logical_index & 3u) * 4u));
+    size_t seed_offset = (size_t)(logical_index & 3u) * 4u;
+    uint32_t seed = fv1u_u32_le(FV1U_STATION_PLAN_BLOB + 16u + seed_offset);
     uint32_t mixed = fv1u_mix32(logical_index * 2654435761u ^ seed);
     return mixed % FV1U_BASE_COUNT;
 }
@@ -137,7 +138,7 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UStationAt(JNIEnv *env, jobject t
     char buf[768];
     uint32_t label_hash = fv1u_hash_string(st->label);
     uint32_t url_hash = fv1u_hash_string(st->url);
-    snprintf(buf, sizeof(buf),
+    int written = snprintf(buf, sizeof(buf),
              "{\"stage\":\"1U-A\",\"logical\":%u,\"ring_count\":%u,\"base_slot\":%u,\"weight\":%u,\"label\":\"%s\",\"url\":\"%s\",\"label_hash\":%u,\"url_hash\":%u}",
              idx % FV1U_RING_COUNT,
              FV1U_RING_COUNT,
@@ -147,6 +148,9 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UStationAt(JNIEnv *env, jobject t
              st->url,
              label_hash,
              url_hash);
+    if (written < 0 || (size_t)written >= sizeof(buf)) {
+        return (*env)->NewStringUTF(env, "native_blob_error");
+    }
     return (*env)->NewStringUTF(env, buf);
 }
 
@@ -182,7 +186,7 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UDecoderProbe(JNIEnv *env, jobjec
     }
 
     char buf[512];
-    snprintf(buf, sizeof(buf),
+    int written = snprintf(buf, sizeof(buf),
              "stage=1U-A native_blob_ok=%d ring_count=%u base_count=%u blob_crc32=%u label_roll=%u decode_probe_failures=%d decoder=custom_binary_blob_pcm_probe future=AMediaExtractor_AMediaCodec_AAudio",
              fv1u_blob_ok(),
              FV1U_RING_COUNT,
@@ -190,6 +194,9 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UDecoderProbe(JNIEnv *env, jobjec
              ring_hash,
              label_roll,
              failures);
+    if (written < 0 || (size_t)written >= sizeof(buf)) {
+        return (*env)->NewStringUTF(env, "native_decoder_probe_error");
+    }
     __android_log_print(ANDROID_LOG_INFO, FV1U_TAG, "Stage 1U-A native decoder probe: %s", buf);
     return (*env)->NewStringUTF(env, buf);
 }

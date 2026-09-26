@@ -2,10 +2,15 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+
+#define FV_CSV_LINE_CAP 4096u
+#define FV_SENSOR_ABS_LIMIT 1000000.0f
 
 typedef struct {
     uint64_t rows_seen;
@@ -104,59 +109,89 @@ static int parse_args(
 }
 
 static int parse_csv_sample(const char *line, FV_SensorSample *s) {
-    unsigned long long t_ns = 0;
-    float mx = 0.0f;
-    float my = 0.0f;
-    float mz = 0.0f;
-    float ax = 0.0f;
-    float ay = 0.0f;
-    float az = 0.0f;
-    float gx = 0.0f;
-    float gy = 0.0f;
-    float gz = 0.0f;
-
-    if (line[0] == '\0' || line[0] == '\n' || line[0] == '#') return 0;
+    if (!line || !s) return 0;
     const char *first = line;
-    while (*first == ' ' || *first == '\t') first++;
-    if (*first == '-') return 0;
+    while (*first == ' ' || *first == '\t' || *first == '\r') first++;
+    if (*first == '\0' || *first == '\n' || *first == '#') return 0;
 
-    const int n = sscanf(
-        line,
-        " %llu , %f , %f , %f , %f , %f , %f , %f , %f , %f",
-        &t_ns,
-        &mx,
-        &my,
-        &mz,
-        &ax,
-        &ay,
-        &az,
-        &gx,
-        &gy,
-        &gz
-    );
+    const size_t line_len = strlen(first);
+    if (line_len >= FV_CSV_LINE_CAP) return 0;
 
-    if (n < 4 || !isfinite(mx) || !isfinite(my) || !isfinite(mz)) return 0;
-    if (n >= 7 && (!isfinite(ax) || !isfinite(ay) || !isfinite(az))) return 0;
-    if (n >= 10 && (!isfinite(gx) || !isfinite(gy) || !isfinite(gz))) return 0;
+    char copy[FV_CSV_LINE_CAP];
+    memcpy(copy, first, line_len + 1u);
+
+    char *tokens[10];
+    size_t token_count = 1;
+    tokens[0] = copy;
+    for (char *p = copy; *p; p++) {
+        if (*p == ',') {
+            if (token_count >= 10u) return 0;
+            *p = '\0';
+            tokens[token_count++] = p + 1;
+        }
+    }
+    if (token_count != 4u && token_count != 7u && token_count != 10u) return 0;
+
+    for (size_t i = 0; i < token_count; i++) {
+        char *start = tokens[i];
+        while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') start++;
+        char *end = start + strlen(start);
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t'
+                || end[-1] == '\r' || end[-1] == '\n')) {
+            *--end = '\0';
+        }
+        if (*start == '\0') return 0;
+        tokens[i] = start;
+    }
+
+    uint64_t t_ns = 0;
+    if (parse_u64_arg(tokens[0], 10, UINT64_MAX, &t_ns) != 0) return 0;
+
+    float values[9] = {0};
+    for (size_t i = 1; i < token_count; i++) {
+        if (parse_float_arg(tokens[i], &values[i - 1u]) != 0
+                || fabsf(values[i - 1u]) > FV_SENSOR_ABS_LIMIT) {
+            return 0;
+        }
+    }
+
+    const float mx = values[0];
+    const float my = values[1];
+    const float mz = values[2];
+    if (!isfinite(fv_mag3(mx, my, mz))) return 0;
 
     memset(s, 0, sizeof(*s));
-    s->t_ns = (uint64_t)t_ns;
+    s->t_ns = t_ns;
     s->mx = mx;
     s->my = my;
     s->mz = mz;
 
-    if (n >= 7) {
-        s->ax = ax;
-        s->ay = ay;
-        s->az = az;
+    if (token_count >= 7u) {
+        s->ax = values[3];
+        s->ay = values[4];
+        s->az = values[5];
     }
 
-    if (n >= 10) {
-        s->gx = gx;
-        s->gy = gy;
-        s->gz = gz;
+    if (token_count == 10u) {
+        s->gx = values[6];
+        s->gy = values[7];
+        s->gz = values[8];
     }
 
+    return 1;
+}
+
+static int read_csv_line(FILE *fp, char *line, size_t cap, int *truncated) {
+    if (!fp || !line || cap < 2u || cap > (size_t)INT_MAX || !truncated) return -1;
+    if (!fgets(line, (int)cap, fp)) return ferror(fp) ? -1 : 0;
+    *truncated = 0;
+    if (strchr(line, '\n') == NULL && !feof(fp)) {
+        int c;
+        *truncated = 1;
+        while ((c = fgetc(fp)) != '\n' && c != EOF) {
+        }
+        if (c == EOF && ferror(fp)) return -1;
+    }
     return 1;
 }
 
@@ -172,26 +207,29 @@ static int compute_baseline(
         return -1;
     }
 
-    char line[4096];
+    char line[FV_CSV_LINE_CAP];
 
-    while (fgets(line, sizeof(line), fp)) {
+    while (stats->baseline_samples < baseline_samples) {
+        int truncated = 0;
+        const int read_result = read_csv_line(fp, line, sizeof(line), &truncated);
+        if (read_result < 0) {
+            fprintf(stderr, "failed reading %s: %s\n", path, strerror(errno));
+            fclose(fp);
+            return -1;
+        }
+        if (read_result == 0) break;
         FV_SensorSample s;
 
         stats->rows_seen++;
 
-        if (!parse_csv_sample(line, &s)) {
+        if (truncated || !parse_csv_sample(line, &s)) {
             stats->rows_skipped++;
             continue;
         }
 
         stats->rows_parsed++;
-
-        if (stats->baseline_samples < baseline_samples) {
-            stats->baseline_sum += (double)fv_mag3(s.mx, s.my, s.mz);
-            stats->baseline_samples++;
-        } else {
-            break;
-        }
+        stats->baseline_sum += (double)fv_mag3(s.mx, s.my, s.mz);
+        stats->baseline_samples++;
     }
 
     fclose(fp);
@@ -202,7 +240,18 @@ static int compute_baseline(
     }
 
     *out_baseline = (float)(stats->baseline_sum / (double)stats->baseline_samples);
+    if (!isfinite(*out_baseline)) {
+        fprintf(stderr, "baseline magnitude is not finite\n");
+        return -1;
+    }
     return 0;
+}
+
+static int same_existing_file(const char *a, const char *b) {
+    struct stat sa;
+    struct stat sb;
+    return stat(a, &sa) == 0 && stat(b, &sb) == 0
+        && sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
 }
 
 static int make_out_paths(
@@ -269,14 +318,6 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    FV_CsvStats stats;
-    memset(&stats, 0, sizeof(stats));
-
-    float baseline = 0.0f;
-    if (compute_baseline(input_csv, baseline_samples, &baseline, &stats) != 0) {
-        return 1;
-    }
-
     char blob_path[4096];
     char wav_path[4096];
     char jsonl_path[4096];
@@ -287,8 +328,25 @@ int main(int argc, char **argv) {
     }
     if (strcmp(input_csv, blob_path) == 0
             || strcmp(input_csv, wav_path) == 0
-            || strcmp(input_csv, jsonl_path) == 0) {
+            || strcmp(input_csv, jsonl_path) == 0
+            || same_existing_file(input_csv, blob_path)
+            || same_existing_file(input_csv, wav_path)
+            || same_existing_file(input_csv, jsonl_path)) {
         fprintf(stderr, "input CSV must not be one of the output paths\n");
+        return 1;
+    }
+    if (same_existing_file(blob_path, wav_path)
+            || same_existing_file(blob_path, jsonl_path)
+            || same_existing_file(wav_path, jsonl_path)) {
+        fprintf(stderr, "output paths must refer to different files\n");
+        return 1;
+    }
+
+    FV_CsvStats stats;
+    memset(&stats, 0, sizeof(stats));
+
+    float baseline = 0.0f;
+    if (compute_baseline(input_csv, baseline_samples, &baseline, &stats) != 0) {
         return 1;
     }
 
@@ -342,12 +400,19 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    char line[4096];
-    while (fgets(line, sizeof(line), in)) {
+    char line[FV_CSV_LINE_CAP];
+    for (;;) {
+        int truncated = 0;
+        const int read_result = read_csv_line(in, line, sizeof(line), &truncated);
+        if (read_result < 0) {
+            fprintf(stderr, "CSV read failed: %s\n", strerror(errno));
+            goto cleanup;
+        }
+        if (read_result == 0) break;
         rows_seen++;
 
         FV_SensorSample s;
-        if (!parse_csv_sample(line, &s)) {
+        if (truncated || !parse_csv_sample(line, &s)) {
             rows_skipped++;
             continue;
         }
@@ -402,7 +467,7 @@ int main(int argc, char **argv) {
                 goto cleanup;
             }
 
-            fprintf(
+            if (fprintf(
                 log_fp,
                 "{\"type\":\"trigger\",\"id\":%" PRIu64 ",\"row\":%" PRIu64 ","
                 "\"t_ns\":%" PRIu64 ",\"mx\":%.6f,\"my\":%.6f,\"mz\":%.6f,"
@@ -423,11 +488,14 @@ int main(int argc, char **argv) {
                 dist,
                 meta.source_hash,
                 blob_frames
-            );
+            ) < 0) {
+                fprintf(stderr, "failed to write trigger log\n");
+                goto cleanup;
+            }
         }
     }
 
-    fprintf(
+    if (fprintf(
         log_fp,
         "{\"type\":\"csv_session_end\",\"rows_seen\":%" PRIu64 ",\"rows_parsed\":%" PRIu64 ","
         "\"rows_skipped\":%" PRIu64 ",\"events\":%" PRIu64 "}\n",
@@ -435,7 +503,10 @@ int main(int argc, char **argv) {
         rows_parsed,
         rows_skipped,
         event_count
-    );
+    ) < 0) {
+        fprintf(stderr, "failed to write session log footer\n");
+        goto cleanup;
+    }
 
     result = event_count == 0 ? 3 : 0;
 

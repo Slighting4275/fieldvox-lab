@@ -28,6 +28,7 @@ Verified on Pixel 9 Pro XL / GrapheneOS (Android 17 / API 37):
 - Android package: org.fieldvox.lab
 - Version: 0.1.0-stage1u-n-audio-dwell
 - Target SDK: 37
+- Build toolchain: Android Gradle Plugin 9.4.0, Gradle 9.8.0, Build Tools 37.0.0, NDK r30, CMake 4.1.2
 - Android lint: clean
 - Manifest export verified with private/public byte-for-byte match
 - Public JSONL/WAV exports verified byte-for-byte against app-private session files

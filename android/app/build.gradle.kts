@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "org.fieldvox.lab"
     compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "org.fieldvox.lab"
@@ -25,12 +26,12 @@ android {
         }
     }
 
-    ndkVersion = "28.2.13676358"
+    ndkVersion = "30.0.16248370"
 
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.31.6"
+            version = "4.1.2"
         }
     }
 }

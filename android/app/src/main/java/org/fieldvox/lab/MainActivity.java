@@ -103,6 +103,8 @@ public class MainActivity extends Activity {
     private int stage1UNativeLogicalCursor = 0;
     private int stage1ULastRingCount = 0;
     private String stage1ULastNativeStationJson = "";
+    private String stage1ULastNativeStationLabel = "";
+    private String stage1ULastStreamUrlSha256 = "";
     private android.os.Handler stage1ULFastSweepHandler = null;
     private java.lang.Runnable stage1ULFastSweepRunnable = null;
     private boolean stage1ULFastSweepStarted = false;
@@ -248,6 +250,7 @@ public class MainActivity extends Activity {
 
     private static final int LIVE_SAMPLE_RATE = 48000;
     private static final int LIVE_PERMISSION_REQUEST = 4101;
+    private static final int MAX_HIT_LABEL_LENGTH = 512;
     private static final long WAV_MAX_PCM_BYTES = 0xffffffffL - 36L;
 
 
@@ -450,7 +453,7 @@ public class MainActivity extends Activity {
     }
 
     private String exportLatestPair() {
-        if (running) {
+        if (running || isLiveCaptureActive()) {
             return "Stop the current session before export so the WAV header is finalized.";
         }
 
@@ -487,7 +490,7 @@ public class MainActivity extends Activity {
     }
 
     private String exportSessionManifest() {
-        if (running) {
+        if (running || isLiveCaptureActive()) {
             return "Stop the current session before exporting the manifest so WAV headers are finalized.";
         }
 
@@ -565,7 +568,7 @@ public class MainActivity extends Activity {
     }
 
     private String exportAllPairs() {
-        if (running) {
+        if (running || isLiveCaptureActive()) {
             return "Stop the current session before export so WAV headers are finalized.";
         }
 
@@ -614,7 +617,7 @@ public class MainActivity extends Activity {
     }
 
     private String shareAllPairs() {
-        if (running) {
+        if (running || isLiveCaptureActive()) {
             return "Stop the current session before sharing so WAV headers are finalized.";
         }
 
@@ -677,7 +680,7 @@ public class MainActivity extends Activity {
     }
 
     private String shareLatestPair() {
-        if (running) {
+        if (running || isLiveCaptureActive()) {
             return "Stop the current session before sharing so the WAV header is finalized.";
         }
 
@@ -757,12 +760,25 @@ public class MainActivity extends Activity {
         return "unknown";
     }
 
-    private String currentCarrierUrlSafe() {
-        if (ONLINE_CARRIER_URLS.length <= 0) {
-            return "";
+    private static String sha256Text(String text) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest((text == null ? "" : text)
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(hash.length * 2);
+            for (byte value : hash) {
+                int v = value & 0xff;
+                out.append(Character.forDigit((v >>> 4) & 0x0f, 16));
+                out.append(Character.forDigit(v & 0x0f, 16));
+            }
+            return out.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 unavailable", impossible);
         }
-        int i = Math.max(0, Math.min(onlineCarrierIndex, ONLINE_CARRIER_URLS.length - 1));
-        return ONLINE_CARRIER_URLS[i];
+    }
+
+    private String currentCarrierUrlHashSafe() {
+        return stage1ULastStreamUrlSha256 == null ? "" : stage1ULastStreamUrlSha256;
     }
 
     private String buildHitJsonLine(String hitId, long now, String label, String sessionStem, long offsetMs) {
@@ -781,7 +797,8 @@ public class MainActivity extends Activity {
                 + "\"user_label\":\"" + jsonEscape(label) + "\","
                 + "\"perceived_phrase\":\"" + jsonEscape(label) + "\","
                 + "\"source_label\":\"" + jsonEscape(onlineCarrierLabel()) + "\","
-                + "\"source_url\":\"" + jsonEscape(currentCarrierUrlSafe()) + "\","
+                + "\"source_url_sha256\":\"" + jsonEscape(currentCarrierUrlHashSafe()) + "\","
+                + "\"raw_stream_url_exported\":false,"
                 + "\"source_material\":\"real_online_spoken_word_stream\","
                 + "\"gate_reason\":\"" + jsonEscape(onlineCarrierLastGateReason) + "\","
                 + "\"gate_delta\":" + String.format(java.util.Locale.US, "%.4f", onlineCarrierLastGateDelta) + ","
@@ -883,6 +900,9 @@ public class MainActivity extends Activity {
         int localCount = ++hitMarkerCount;
         String hitId = "hit_" + sessionStem + "_" + now + "_" + localCount;
         String cleanedLabel = label == null ? "" : label.trim();
+        if (cleanedLabel.length() > MAX_HIT_LABEL_LENGTH) {
+            cleanedLabel = cleanedLabel.substring(0, MAX_HIT_LABEL_LENGTH);
+        }
         String jsonLine = buildHitJsonLine(hitId, now, cleanedLabel, sessionStem, offsetMs);
 
             try {
@@ -931,48 +951,16 @@ public class MainActivity extends Activity {
     }
 
     private String extractJsonString(String json, String key) {
-        String needle = "\"" + key + "\":\"";
-        int p = json.indexOf(needle);
-        if (p < 0) {
+        try {
+            return new JSONObject(json).optString(key, "");
+        } catch (Exception ignored) {
             return "";
         }
-        p += needle.length();
-        StringBuilder out = new StringBuilder();
-        boolean esc = false;
-        for (int i = p; i < json.length(); i++) {
-            char c = json.charAt(i);
-            if (esc) {
-                out.append(c);
-                esc = false;
-            } else if (c == '\\') {
-                esc = true;
-            } else if (c == '"') {
-                break;
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
     }
 
     private long extractJsonLong(String json, String key, long fallback) {
-        String needle = "\"" + key + "\":";
-        int p = json.indexOf(needle);
-        if (p < 0) {
-            return fallback;
-        }
-        p += needle.length();
-        int e = p;
-        while (e < json.length()) {
-            char c = json.charAt(e);
-            if ((c >= '0' && c <= '9') || c == '-') {
-                e++;
-            } else {
-                break;
-            }
-        }
         try {
-            return Long.parseLong(json.substring(p, e));
+            return new JSONObject(json).optLong(key, fallback);
         } catch (Exception ignored) {
             return fallback;
         }
@@ -984,7 +972,7 @@ public class MainActivity extends Activity {
             long skipped = in.skip(left);
             if (skipped <= 0) {
                 if (in.read() < 0) {
-                    break;
+                    throw new IOException("unexpected end of WAV while seeking clip start");
                 }
                 skipped = 1;
             }
@@ -1014,6 +1002,7 @@ public class MainActivity extends Activity {
         }
 
         long wanted = Math.max(0L, endByte - startByte);
+        long copied = 0L;
         try (FileInputStream in = new FileInputStream(src);
              java.io.FileOutputStream out = new java.io.FileOutputStream(dst, false)) {
             skipFully(in, 44L + startByte);
@@ -1027,9 +1016,16 @@ public class MainActivity extends Activity {
                 }
                 out.write(buf, 0, n);
                 left -= n;
+                copied += n;
             }
         }
-        return wanted;
+        if (copied != wanted) {
+            if (!dst.delete()) {
+                Log.w("FieldVox", "Could not remove incomplete WAV clip " + dst.getName());
+            }
+            throw new IOException("source WAV ended before the requested clip was complete");
+        }
+        return copied;
     }
 
     private String exportHits() {
@@ -1176,7 +1172,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
+        if (!isDebuggableBuild()) {
             return;
         }
 
@@ -1187,8 +1183,9 @@ public class MainActivity extends Activity {
                 || intent.getBooleanExtra("fieldvox_export_hits", false);
 
         if (exportRequested) {
+            consumeDebugIntent(intent, "org.fieldvox.lab.EXPORT_HITS", "fieldvox_export_hits");
             Log.i("FieldVox", "ADB EXPORT HITS requested");
-        recordNativeTimelineEvent("adb_export_hits_requested", "EXPORT_HITS");
+            recordNativeTimelineEvent("adb_export_hits_requested", "EXPORT_HITS");
             handler.postDelayed(() -> {
                 String result = exportHits();
                 Log.i("FieldVox", "ADB EXPORT HITS result: " + result.replace("\n", " | "));
@@ -1206,6 +1203,8 @@ public class MainActivity extends Activity {
         if (!requested) {
             return;
         }
+
+        consumeDebugIntent(intent, "org.fieldvox.lab.MARK_HIT", "fieldvox_mark_hit");
 
         String label = intent.getStringExtra("fieldvox_label");
         if (label == null) {
@@ -1227,12 +1226,18 @@ public class MainActivity extends Activity {
         if (intent == null) {
             return;
         }
+        if (!isDebuggableBuild()) {
+            return;
+        }
         String action = intent.getAction();
         boolean requested = "org.fieldvox.lab.RADIO_BROWSER_DISCOVER".equals(action)
                 || intent.getBooleanExtra("fieldvox_radio_browser_discover", false);
         if (!requested) {
             return;
         }
+
+        consumeDebugIntent(intent, "org.fieldvox.lab.RADIO_BROWSER_DISCOVER",
+                "fieldvox_radio_browser_discover");
 
         Log.i("FieldVox", "RADIO_BROWSER_DISCOVER requested");
 
@@ -1258,6 +1263,18 @@ public class MainActivity extends Activity {
                 ).show());
             }
         }, "fieldvox-radio-browser-discovery").start();
+    }
+
+    private boolean isDebuggableBuild() {
+        return (getApplicationInfo().flags
+                & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
+
+    private static void consumeDebugIntent(Intent intent, String action, String booleanExtra) {
+        intent.removeExtra(booleanExtra);
+        if (action.equals(intent.getAction())) {
+            intent.setAction(null);
+        }
     }
 
 
@@ -1401,6 +1418,10 @@ public class MainActivity extends Activity {
     }
 
     private String onlineCarrierLabel() {
+        if (stage1ULastNativeStationLabel != null
+                && !stage1ULastNativeStationLabel.isEmpty()) {
+            return stage1ULastNativeStationLabel;
+        }
         int i = Math.max(0, Math.min(onlineCarrierIndex, ONLINE_CARRIER_LABELS.length - 1));
         return ONLINE_CARRIER_LABELS[i];
     }
@@ -2131,29 +2152,39 @@ public class MainActivity extends Activity {
     }
 
     private String stage1UJsonValue(String json, String key) {
-        if (json == null || key == null) return "";
-        String needle = "\"" + key + "\":";
-        int p = json.indexOf(needle);
-        if (p < 0) return "";
-        p += needle.length();
-        while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
-        if (p >= json.length()) return "";
-        if (json.charAt(p) == '"') {
-            int q = json.indexOf('"', p + 1);
-            if (q <= p) return "";
-            return json.substring(p + 1, q);
+        if (json == null || key == null) {
+            return "";
         }
-        int q = p;
-        while (q < json.length() && json.charAt(q) != ',' && json.charAt(q) != '}') q++;
-        return json.substring(p, q).trim();
+        try {
+            Object value = new JSONObject(json).opt(key);
+            return value == null || value == JSONObject.NULL ? "" : String.valueOf(value);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private String stage1URedactedStationJson(String json) {
+        try {
+            JSONObject station = new JSONObject(json == null ? "{}" : json);
+            station.remove("url");
+            station.put("raw_stream_url_exported", false);
+            return station.toString();
+        } catch (Exception ignored) {
+            return "{\"station_metadata\":\"redaction_failed\",\"raw_stream_url_exported\":false}";
+        }
     }
 
     private String stage1UNativeStationUrl(int logicalIndex) {
         try {
             stage1ULastRingCount = nativeStage1UStationRingCount();
-            stage1ULastNativeStationJson = nativeStage1UStationAt(logicalIndex);
-            String url = stage1UJsonValue(stage1ULastNativeStationJson, "url");
-            if (url != null && url.startsWith("http")) return url;
+            String rawStationJson = nativeStage1UStationAt(logicalIndex);
+            String url = stage1UJsonValue(rawStationJson, "url");
+            stage1ULastNativeStationLabel = stage1UJsonValue(rawStationJson, "label");
+            stage1ULastNativeStationJson = stage1URedactedStationJson(rawStationJson);
+            if (url != null && (url.startsWith("https://") || url.startsWith("http://"))) {
+                stage1ULastStreamUrlSha256 = sha256Text(url);
+                return url;
+            }
         } catch (Throwable t) {
             android.util.Log.w("FieldVox", "Stage 1U-E native binary blob ring lookup failed: " + t);
         }
@@ -2187,7 +2218,8 @@ public class MainActivity extends Activity {
             stage1ULStartFastNativeSweep();
             android.util.Log.i("FieldVox", "Stage 1U-E native binary blob ring ready count=" + ringCount + " probe=" + probe);
             for (int i = 0; i < 24; i++) {
-                appendStage1QDLiveEvent("native_station_ring_slot", null, "ready", nativeStage1UStationAt(i));
+                appendStage1QDLiveEvent("native_station_ring_slot", null, "ready",
+                        stage1URedactedStationJson(nativeStage1UStationAt(i)));
             }
         } catch (Throwable t) {
             appendStage1QDLiveEvent("native_station_ring_error", null, "error", String.valueOf(t));
@@ -2283,6 +2315,9 @@ public class MainActivity extends Activity {
         index = normalizeOnlineCarrierIndex(index);
         onlineCarrierIndex = index;
         onlineCarrierPrepared = false;
+        stage1ULastNativeStationLabel = "";
+        stage1ULastNativeStationJson = "";
+        stage1ULastStreamUrlSha256 = "";
 
         final int prepareToken = ++onlineCarrierPrepareToken;
         final int prepareIndex = index;
@@ -2303,7 +2338,16 @@ public class MainActivity extends Activity {
                 appendStage1QDLiveEvent("native_station_ring_gui_selection_suppressed", null, "ready", stage1ULastNativeStationJson);
                 android.util.Log.i("FieldVox", "Stage 1U-E native binary blob selected " + stage1UNativeStationLabel(stage1UNativeLogicalCursor - 1));
             }
-            mp.setDataSource(stage1UNativeUrl != null ? stage1UNativeUrl : (ONLINE_CARRIER_URLS[index]));
+            String selectedUrl = stage1UNativeUrl != null
+                    ? stage1UNativeUrl
+                    : ONLINE_CARRIER_URLS[index];
+            if (stage1ULastNativeStationLabel.isEmpty()) {
+                stage1ULastNativeStationLabel = ONLINE_CARRIER_LABELS[index];
+            }
+            if (stage1ULastStreamUrlSha256.isEmpty()) {
+                stage1ULastStreamUrlSha256 = sha256Text(selectedUrl);
+            }
+            mp.setDataSource(selectedUrl);
             mp.setVolume(0.0f, 0.0f);
 
             mp.setOnPreparedListener(player -> {
@@ -2355,7 +2399,7 @@ public class MainActivity extends Activity {
 
             Log.i("FieldVox", "BOUNDED FIELD CARRIER: "
                     + ONLINE_CARRIER_LABELS[index]
-                    + " url=" + ONLINE_CARRIER_URLS[index]);
+                    + " url_sha256=" + stage1ULastStreamUrlSha256);
             exportStatus.setText(getString(R.string.bounded_field_carrier, ONLINE_CARRIER_LABELS[index]));
 
             mp.prepareAsync();
@@ -2483,6 +2527,23 @@ public class MainActivity extends Activity {
         return (short)v;
     }
 
+    private boolean isLiveCaptureActive() {
+        Thread thread = liveMonitorThread;
+        return liveMonitorRunning || (thread != null && thread.isAlive());
+    }
+
+    private static int writeAllSamples(AudioTrack track, short[] samples, int count) {
+        int offset = 0;
+        while (offset < count) {
+            int written = track.write(samples, offset, count - offset, AudioTrack.WRITE_BLOCKING);
+            if (written <= 0) {
+                return written < 0 ? written : AudioTrack.ERROR;
+            }
+            offset += written;
+        }
+        return offset;
+    }
+
 
     private boolean hasMicPermission() {
         return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
@@ -2531,6 +2592,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean wavHeaderMatches(File wav, long pcmBytes) {
+        if (wav.length() < 44L) {
+            return false;
+        }
+        byte[] header = new byte[44];
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wav, "r")) {
+            raf.readFully(header);
+        } catch (IOException e) {
+            return false;
+        }
+
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(header)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        if (b.getInt(0) != 0x46464952
+                || b.getInt(8) != 0x45564157
+                || b.getInt(12) != 0x20746d66
+                || b.getInt(36) != 0x61746164) {
+            return false;
+        }
+
+        long expectedData = Math.min(pcmBytes, WAV_MAX_PCM_BYTES);
+        long riffSize = Integer.toUnsignedLong(b.getInt(4));
+        long dataSize = Integer.toUnsignedLong(b.getInt(40));
+        return riffSize == 36L + expectedData && dataSize == expectedData;
+    }
+
     private static void recoverInterruptedLiveSessions(File dir) {
         File[] files = dir.listFiles((ignored, name) ->
                 name.startsWith("session-") && name.endsWith("-live.wav"));
@@ -2540,6 +2627,9 @@ public class MainActivity extends Activity {
         for (File wav : files) {
             long pcmBytes = Math.max(0L, wav.length() - 44L);
             pcmBytes -= pcmBytes % 2L;
+            if (wavHeaderMatches(wav, pcmBytes)) {
+                continue;
+            }
             try {
                 rewriteWavHeader(wav, pcmBytes);
             } catch (IOException e) {
@@ -2566,7 +2656,14 @@ public class MainActivity extends Activity {
         recoverInterruptedLiveSessions(dir);
 
         final long startMs = System.currentTimeMillis();
-        final String stem = "session-" + (startMs / 1000L) + "-live";
+        String stemCandidate = "session-" + startMs + "-live";
+        for (int suffix = 1;
+                new File(dir, stemCandidate + ".jsonl").exists()
+                        || new File(dir, stemCandidate + ".wav").exists();
+                suffix++) {
+            stemCandidate = "session-" + startMs + "-" + suffix + "-live";
+        }
+        final String stem = stemCandidate;
         final File jsonl = new File(dir, stem + ".jsonl");
         final File wav = new File(dir, stem + ".wav");
 
@@ -2650,6 +2747,10 @@ public class MainActivity extends Activity {
                         .setTransferMode(AudioTrack.MODE_STREAM)
                         .build();
 
+                if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+                    throw new IOException("AudioTrack failed to initialize.");
+                }
+
                 short[] samples = new short[bufferBytes / 2];
                 short[] monitorSamples = new short[bufferBytes / 2];
                 byte[] pcm = new byte[bufferBytes];
@@ -2698,7 +2799,7 @@ public class MainActivity extends Activity {
                     pcmBytes += (long)n * 2L;
 
                     if (speakerMonitorEnabled) {
-                        int written = track.write(monitorSamples, 0, n);
+                        int written = writeAllSamples(track, monitorSamples, n);
                         if (written < 0) {
                             speakerMonitorEnabled = false;
                             final int audioTrackError = written;
@@ -2740,11 +2841,11 @@ public class MainActivity extends Activity {
                     if (nowMs - lastUiMs > 700L) {
                         lastUiMs = nowMs;
                         final int seconds = (int)((nowMs - startMs) / 1000L);
-                        final String msg = "Realtime EVP monitor: " + seconds + "s\\n"
-                                + "Mic + bounded station grains.\\n"
+                        final String msg = "Realtime EVP monitor: " + seconds + "s\n"
+                                + "Mic + bounded station grains.\n"
                                 + "RMS " + String.format(java.util.Locale.US, "%.0f", rms)
                                 + " / gate " + String.format(java.util.Locale.US, "%.0f", gate)
-                                + " / peak " + peak + "\\n"
+                                + " / peak " + peak + "\n"
                                 + "No word bank. No generated speech.";
                         handler.post(() -> status.setText(msg));
                     }
@@ -2840,8 +2941,8 @@ public class MainActivity extends Activity {
             msg = "Auto Live is already running.\nNo Stop button needed. Leave or close the app to finalize the WAV.";
         } else {
             autoStartEverythingOnLaunch();
-        handleAdbHitMarkerIntent(getIntent());
-        handleRadioBrowserDiscoveryIntent(getIntent());
+            handleAdbHitMarkerIntent(getIntent());
+            handleRadioBrowserDiscoveryIntent(getIntent());
             msg = "Auto Live is arming.";
         }
         exportStatus.setText(msg);
@@ -3046,7 +3147,9 @@ public class MainActivity extends Activity {
         liveStreamButton.setOnClickListener(v -> startStage1QDLiveStream());
         content.addView(liveStreamButton);
 
-        if (getIntent() != null && getIntent().getBooleanExtra("fieldvox_stage1qd_autostart", false)) {
+        if (isDebuggableBuild() && getIntent() != null
+                && getIntent().getBooleanExtra("fieldvox_stage1qd_autostart", false)) {
+            getIntent().removeExtra("fieldvox_stage1qd_autostart");
             liveStreamButton.postDelayed(() -> {
                 if (!liveStreamActive && liveStreamPlayer == null) {
                     startStage1QDLiveStream();
@@ -3176,7 +3279,11 @@ public class MainActivity extends Activity {
             stage1ULStartFastNativeSweep();
         }
         // ADB_MARK_HIT_EXISTING_ONRESUME_POLL: deterministic test hook because UIAutomator cannot idle during live VOX.
-        handler.postDelayed(() -> handleAdbHitMarkerIntent(getIntent()), 900L);
+        handler.postDelayed(() -> {
+            Intent debugIntent = getIntent();
+            handleAdbHitMarkerIntent(debugIntent);
+            handleRadioBrowserDiscoveryIntent(debugIntent);
+        }, 900L);
         handler.postDelayed(() -> autoStartEverythingOnLaunch(), 350);
     }
 

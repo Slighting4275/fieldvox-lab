@@ -17,4 +17,5 @@ Build and run the deterministic smoke tests with:
     make test
 
 The tests validate deterministic simulator output, CSV ingestion, JSONL syntax, WAV readability,
-blob extraction, malformed arguments, escaped paths, and rejection of truncated blob payloads.
+blob extraction, malformed arguments and rows, escaped paths, input/output collision protection,
+and rejection of truncated or non-finite blob payloads.
