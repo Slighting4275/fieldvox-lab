@@ -37,7 +37,7 @@ static int read_exact(FILE *fp, void *dst, size_t n) {
 static int read_le16(FILE *fp, uint16_t *out) {
     unsigned char b[2];
     if (read_exact(fp, b, sizeof(b)) != 0) return -1;
-    *out = (uint16_t)b[0] | ((uint16_t)b[1] << 8u);
+    *out = (uint16_t)((uint32_t)b[0] | ((uint32_t)b[1] << 8u));
     return 0;
 }
 
@@ -81,8 +81,9 @@ static int read_le_i16(FILE *fp, int16_t *out) {
 static int read_blob_header(FILE *fp, FV_ReadBlobMeta *m) {
     char magic[4];
 
-    if (fread(magic, 1, sizeof(magic), fp) != sizeof(magic)) {
-        if (feof(fp)) return 1;
+    const size_t magic_bytes = fread(magic, 1, sizeof(magic), fp);
+    if (magic_bytes != sizeof(magic)) {
+        if (magic_bytes == 0 && feof(fp)) return 1;
         return -1;
     }
 
@@ -137,8 +138,6 @@ static int read_blob_header(FILE *fp, FV_ReadBlobMeta *m) {
 }
 
 static int skip_payload(FILE *fp, uint32_t payload_bytes) {
-    if (fseek(fp, (long)payload_bytes, SEEK_CUR) == 0) return 0;
-
     unsigned char buf[8192];
     uint32_t left = payload_bytes;
 
@@ -154,7 +153,7 @@ static int skip_payload(FILE *fp, uint32_t payload_bytes) {
 static int extract_blob(FILE *fp, const FV_ReadBlobMeta *m, const char *dir) {
     char path[4096];
 
-    snprintf(
+    const int path_len = snprintf(
         path,
         sizeof(path),
         "%s/blob-%04" PRIu64 "-t-%" PRIu64 ".wav",
@@ -162,6 +161,10 @@ static int extract_blob(FILE *fp, const FV_ReadBlobMeta *m, const char *dir) {
         m->trigger_id,
         m->timestamp_ns
     );
+    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+        fprintf(stderr, "extract path too long\n");
+        return -1;
+    }
 
     int16_t *pcm = calloc((size_t)m->frame_count * (size_t)m->channels, sizeof(*pcm));
     if (!pcm) {
@@ -185,6 +188,7 @@ static int extract_blob(FILE *fp, const FV_ReadBlobMeta *m, const char *dir) {
 
     if (fv_wav_write_i16(&wav, pcm, m->frame_count) != 0) {
         fprintf(stderr, "failed to write extract WAV: %s\n", path);
+        fv_wav_finish(&wav);
         free(pcm);
         return -1;
     }

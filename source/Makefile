@@ -1,7 +1,7 @@
 .RECIPEPREFIX := >
 
 CC ?= cc
-CFLAGS ?= -std=c11 -O3 -Wall -Wextra -pedantic
+CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
 LDFLAGS ?= -lm
 
 MAIN_BIN := fieldvox
@@ -13,7 +13,7 @@ DUMP_SRC := src/fv_blobdump.c src/fv_core.c
 CSV_SRC := src/fv_csvvox.c src/fv_core.c
 HDR := src/fv_core.h
 
-.PHONY: all clean run inspect dump extract csvtest audition
+.PHONY: all clean run inspect dump extract csvtest audition test
 
 all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN)
 
@@ -51,6 +51,9 @@ csvtest: all
 
 audition:
 >ffmpeg -hide_banner -y -f concat -safe 0 -i out/audition/list.txt -af "volume=2.5,alimiter=limit=0.95" -ar 48000 -ac 1 -c:a pcm_s16le out/audition-blobs.wav
+
+test: all
+>./tests/test_smoke.sh
 
 clean:
 >rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN)

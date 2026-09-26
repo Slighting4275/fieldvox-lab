@@ -15,6 +15,8 @@ target_compile_features(fieldvox PRIVATE cxx_std_20)
 target_compile_options(fieldvox PRIVATE
     -Wall
     -Wextra
+    -Wpedantic
+    -Wformat=2
     -Wno-unused-parameter
 )
 
@@ -29,7 +31,15 @@ target_link_libraries(
 # FIELDVOX_STAGE1R_NATIVE_AUDIO_WINDOW
 add_library(fieldvox_stage1r_native SHARED
     fv_stage1r_native_audio.c
-        fv_stage1u_native_blob_decoder.c
+    fv_stage1u_native_blob_decoder.c
+)
+
+target_compile_options(fieldvox_stage1r_native PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wformat=2
+    -Wno-unused-parameter
 )
 
 target_link_libraries(fieldvox_stage1r_native

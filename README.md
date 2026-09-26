@@ -6,23 +6,29 @@ FieldVox lets you listen in real time while a session is running, mark interesti
 
 ## Current Android checkpoint
 
-Stage 1J-A adds Export Manifest support.
+Stage 1U-N adds the native 1000-slot station ring, a one-second visible channel sweep,
+and a separate six-second audio-source dwell cadence. The app also records live microphone
+sessions to paired WAV/JSONL files and checkpoints WAV headers so interrupted recordings
+remain recoverable.
 
 The Ctrl panel includes:
 
 - Export All Sessions
 - Share All Sessions
 - Export Manifest
+- Live microphone capture with bounded station grains
+- Native station-ring channel display and audio dwell sweep
 
 Export Manifest creates fieldvox-session-manifest.tsv from matched JSONL/WAV session pairs and exports it to public Downloads/FieldVoxLab.
 
 ## Project status
 
-Verified on Pixel 9 Pro XL / GrapheneOS:
+Verified on Pixel 9 Pro XL / GrapheneOS (Android 17 / API 37):
 
 - Android package: org.fieldvox.lab
-- Version: 0.1.0-stage1j-a-export-session-manifest
-- APK SHA256: cf1c0e87ab05baa28f33bd3952204e894ec7d3a4c83662f7da9124ff0ab98c38
+- Version: 0.1.0-stage1u-n-audio-dwell
+- Target SDK: 37
+- Android lint: clean
 - Manifest export verified with private/public byte-for-byte match
 - Public JSONL/WAV exports verified byte-for-byte against app-private session files
 - No broad Android storage permissions are used
@@ -55,6 +61,7 @@ Linux prototype/tools:
 
     cd source
     make
+    make test
 
 ## License
 
@@ -79,8 +86,7 @@ A simple way to think about it:
 
 FieldVox Lab is **not proof of paranormal communication**. It does not prove that a word, phrase, voice, or message came from any outside source. It is a logging and review tool. Any hit label is a user-perceived label, not a confirmed message.
 
-Current verified Codeberg checkpoint: `e6045f8` / `e6045f876d3d1980709358efd05efe38235ccaa7`
-Latest commit subject: `Document Stage 1P-B canonical source catalog`
+Current documented checkpoint: Stage 1U-N native audio dwell station sweep.
 
 ## What a non-technical person should know
 

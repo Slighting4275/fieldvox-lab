@@ -32,7 +32,8 @@ int fv_trigger_update(FV_TriggerState *st, FV_SensorSample sample, float *out_ma
     if (out_mag) *out_mag = mag;
     if (out_delta) *out_delta = st->ema_delta;
 
-    if (sample.t_ns < st->last_trigger_ns + st->cooldown_ns) {
+    if (sample.t_ns < st->last_trigger_ns
+            || sample.t_ns - st->last_trigger_ns < st->cooldown_ns) {
         return 0;
     }
 
@@ -66,7 +67,10 @@ float fv_rng_float_signed(FV_Rng *rng) {
 
 int fv_mkdir_p(const char *path) {
     if (mkdir(path, 0755) == 0) return 0;
-    if (errno == EEXIST) return 0;
+    if (errno == EEXIST) {
+        struct stat st;
+        return stat(path, &st) == 0 && S_ISDIR(st.st_mode) ? 0 : -1;
+    }
     return -1;
 }
 
@@ -95,6 +99,7 @@ static void write_le_float(FILE *fp, float f) {
 }
 
 int fv_wav_begin(FV_WavWriter *w, const char *path, uint32_t sample_rate, uint16_t channels) {
+    if (!w || !path || sample_rate == 0 || channels == 0) return -1;
     memset(w, 0, sizeof(*w));
     w->fp = fopen(path, "wb");
     if (!w->fp) return -1;
@@ -115,27 +120,45 @@ int fv_wav_begin(FV_WavWriter *w, const char *path, uint32_t sample_rate, uint16
     write_le16(w->fp, 16);
     fwrite("data", 1, 4, w->fp);
     write_le32(w->fp, 0);
+    if (ferror(w->fp)) {
+        fclose(w->fp);
+        w->fp = NULL;
+        return -1;
+    }
     return 0;
 }
 
 int fv_wav_write_i16(FV_WavWriter *w, const int16_t *samples, uint32_t frames) {
-    if (!w->fp) return -1;
+    if (!w || !w->fp || (!samples && frames > 0)) return -1;
+    const uint64_t new_frames = w->frames_written + (uint64_t)frames;
+    if (new_frames < w->frames_written
+            || new_frames * (uint64_t)w->channels * 2ULL > UINT32_MAX - 36ULL) {
+        return -1;
+    }
     for (uint32_t i = 0; i < frames * w->channels; i++) {
         write_le16(w->fp, (uint16_t)samples[i]);
     }
-    w->frames_written += frames;
+    w->frames_written = new_frames;
     return ferror(w->fp) ? -1 : 0;
 }
 
 int fv_wav_finish(FV_WavWriter *w) {
-    if (!w->fp) return -1;
-    const uint32_t data_bytes = w->frames_written * w->channels * 2u;
+    if (!w || !w->fp) return -1;
+    const uint32_t data_bytes = (uint32_t)(w->frames_written * w->channels * 2ULL);
     const uint32_t riff_bytes = 36u + data_bytes;
-    if (fseek(w->fp, 4, SEEK_SET) != 0) return -1;
-    write_le32(w->fp, riff_bytes);
-    if (fseek(w->fp, 40, SEEK_SET) != 0) return -1;
-    write_le32(w->fp, data_bytes);
-    const int rc = fclose(w->fp);
+    int rc = 0;
+    if (fseek(w->fp, 4, SEEK_SET) != 0) {
+        rc = -1;
+    } else {
+        write_le32(w->fp, riff_bytes);
+    }
+    if (rc == 0 && fseek(w->fp, 40, SEEK_SET) != 0) {
+        rc = -1;
+    } else if (rc == 0) {
+        write_le32(w->fp, data_bytes);
+    }
+    if (ferror(w->fp)) rc = -1;
+    if (fclose(w->fp) != 0) rc = -1;
     w->fp = NULL;
     return rc;
 }
@@ -186,6 +209,12 @@ void fv_make_blob_audio(
 }
 
 int fv_blob_write(FILE *fp, const FV_BlobMeta *meta, const int16_t *pcm) {
+    if (!fp || !meta || !pcm || meta->channels == 0) return -1;
+    const uint64_t sample_count = (uint64_t)meta->frame_count * meta->channels;
+    if (sample_count > UINT32_MAX / 2u
+            || meta->payload_bytes != sample_count * 2u) {
+        return -1;
+    }
     fwrite("FVBL", 1, 4, fp);
     write_le16(fp, FV_BLOB_VERSION);
     write_le16(fp, meta->channels);
@@ -199,7 +228,7 @@ int fv_blob_write(FILE *fp, const FV_BlobMeta *meta, const int16_t *pcm) {
     write_le_float(fp, meta->mag_delta);
     write_le_float(fp, meta->freq_hz);
 
-    for (uint32_t i = 0; i < meta->frame_count * meta->channels; i++) {
+    for (uint64_t i = 0; i < sample_count; i++) {
         write_le16(fp, (uint16_t)pcm[i]);
     }
 

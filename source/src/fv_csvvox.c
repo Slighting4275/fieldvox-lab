@@ -13,7 +13,6 @@ typedef struct {
     uint64_t rows_skipped;
     uint64_t baseline_samples;
     double baseline_sum;
-    uint64_t triggers;
 } FV_CsvStats;
 
 static void usage(const char *argv0) {
@@ -31,6 +30,26 @@ static void usage(const char *argv0) {
     );
 }
 
+static int parse_u64_arg(const char *text, int base, uint64_t max_value, uint64_t *out) {
+    char *end = NULL;
+    if (!text || text[0] == '\0' || text[0] == '-') return -1;
+    errno = 0;
+    const unsigned long long value = strtoull(text, &end, base);
+    if (errno == ERANGE || end == text || *end != '\0' || value > max_value) return -1;
+    *out = (uint64_t)value;
+    return 0;
+}
+
+static int parse_float_arg(const char *text, float *out) {
+    char *end = NULL;
+    if (!text || text[0] == '\0') return -1;
+    errno = 0;
+    const float value = strtof(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || !isfinite(value)) return -1;
+    *out = value;
+    return 0;
+}
+
 static int parse_args(
     int argc,
     char **argv,
@@ -46,11 +65,20 @@ static int parse_args(
         } else if (strcmp(argv[i], "--out-prefix") == 0 && i + 1 < argc) {
             *out_prefix = argv[++i];
         } else if (strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) {
-            *threshold = strtof(argv[++i], NULL);
+            if (parse_float_arg(argv[++i], threshold) != 0) {
+                fprintf(stderr, "invalid threshold value\n");
+                return -1;
+            }
         } else if (strcmp(argv[i], "--baseline-samples") == 0 && i + 1 < argc) {
-            *baseline_samples = strtoull(argv[++i], NULL, 10);
+            if (parse_u64_arg(argv[++i], 10, UINT64_MAX, baseline_samples) != 0) {
+                fprintf(stderr, "invalid baseline-samples value\n");
+                return -1;
+            }
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
-            *seed = strtoull(argv[++i], NULL, 0);
+            if (parse_u64_arg(argv[++i], 0, UINT64_MAX, seed) != 0) {
+                fprintf(stderr, "invalid seed value\n");
+                return -1;
+            }
         } else {
             usage(argv[0]);
             return -1;
@@ -88,6 +116,9 @@ static int parse_csv_sample(const char *line, FV_SensorSample *s) {
     float gz = 0.0f;
 
     if (line[0] == '\0' || line[0] == '\n' || line[0] == '#') return 0;
+    const char *first = line;
+    while (*first == ' ' || *first == '\t') first++;
+    if (*first == '-') return 0;
 
     const int n = sscanf(
         line,
@@ -104,7 +135,9 @@ static int parse_csv_sample(const char *line, FV_SensorSample *s) {
         &gz
     );
 
-    if (n < 4) return 0;
+    if (n < 4 || !isfinite(mx) || !isfinite(my) || !isfinite(mz)) return 0;
+    if (n >= 7 && (!isfinite(ax) || !isfinite(ay) || !isfinite(az))) return 0;
+    if (n >= 10 && (!isfinite(gx) || !isfinite(gy) || !isfinite(gz))) return 0;
 
     memset(s, 0, sizeof(*s));
     s->t_ns = (uint64_t)t_ns;
@@ -181,10 +214,35 @@ static int make_out_paths(
     char *jsonl_path,
     size_t jsonl_path_n
 ) {
-    if (snprintf(blob_path, blob_path_n, "%s.fvblobs", prefix) >= (int)blob_path_n) return -1;
-    if (snprintf(wav_path, wav_path_n, "%s.wav", prefix) >= (int)wav_path_n) return -1;
-    if (snprintf(jsonl_path, jsonl_path_n, "%s.jsonl", prefix) >= (int)jsonl_path_n) return -1;
+    int n = snprintf(blob_path, blob_path_n, "%s.fvblobs", prefix);
+    if (n < 0 || (size_t)n >= blob_path_n) return -1;
+    n = snprintf(wav_path, wav_path_n, "%s.wav", prefix);
+    if (n < 0 || (size_t)n >= wav_path_n) return -1;
+    n = snprintf(jsonl_path, jsonl_path_n, "%s.jsonl", prefix);
+    if (n < 0 || (size_t)n >= jsonl_path_n) return -1;
     return 0;
+}
+
+static int write_json_string(FILE *fp, const char *text) {
+    if (fputc('"', fp) == EOF) return -1;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        switch (*p) {
+            case '"': if (fputs("\\\"", fp) == EOF) return -1; break;
+            case '\\': if (fputs("\\\\", fp) == EOF) return -1; break;
+            case '\b': if (fputs("\\b", fp) == EOF) return -1; break;
+            case '\f': if (fputs("\\f", fp) == EOF) return -1; break;
+            case '\n': if (fputs("\\n", fp) == EOF) return -1; break;
+            case '\r': if (fputs("\\r", fp) == EOF) return -1; break;
+            case '\t': if (fputs("\\t", fp) == EOF) return -1; break;
+            default:
+                if (*p < 0x20u) {
+                    if (fprintf(fp, "\\u%04x", (unsigned)*p) < 0) return -1;
+                } else if (fputc(*p, fp) == EOF) {
+                    return -1;
+                }
+        }
+    }
+    return fputc('"', fp) == EOF ? -1 : 0;
 }
 
 int main(int argc, char **argv) {
@@ -193,6 +251,19 @@ int main(int argc, char **argv) {
     float threshold = 1.65f;
     uint64_t baseline_samples = 160;
     uint64_t seed = 0xC5C5C5C5ULL;
+    FILE *in = NULL;
+    FILE *blob_fp = NULL;
+    FILE *log_fp = NULL;
+    FV_WavWriter wav;
+    int16_t *pcm = NULL;
+    uint64_t rows_seen = 0;
+    uint64_t rows_parsed = 0;
+    uint64_t rows_skipped = 0;
+    uint64_t event_count = 0;
+    int wav_open = 0;
+    int result = 1;
+
+    memset(&wav, 0, sizeof(wav));
 
     if (parse_args(argc, argv, &input_csv, &out_prefix, &threshold, &baseline_samples, &seed) != 0) {
         return 2;
@@ -214,21 +285,27 @@ int main(int argc, char **argv) {
         fprintf(stderr, "output prefix paths too long\n");
         return 1;
     }
+    if (strcmp(input_csv, blob_path) == 0
+            || strcmp(input_csv, wav_path) == 0
+            || strcmp(input_csv, jsonl_path) == 0) {
+        fprintf(stderr, "input CSV must not be one of the output paths\n");
+        return 1;
+    }
 
-    FILE *in = fopen(input_csv, "rb");
-    FILE *blob_fp = fopen(blob_path, "wb");
-    FILE *log_fp = fopen(jsonl_path, "wb");
+    in = fopen(input_csv, "rb");
+    blob_fp = fopen(blob_path, "wb");
+    log_fp = fopen(jsonl_path, "wb");
 
     if (!in || !blob_fp || !log_fp) {
         fprintf(stderr, "failed to open input or output files\n");
-        return 1;
+        goto cleanup;
     }
 
-    FV_WavWriter wav;
     if (fv_wav_begin(&wav, wav_path, FV_SAMPLE_RATE, FV_CHANNELS) != 0) {
         fprintf(stderr, "failed to open output WAV: %s\n", wav_path);
-        return 1;
+        goto cleanup;
     }
+    wav_open = 1;
 
     FV_Rng rng;
     fv_rng_seed(&rng, seed);
@@ -237,36 +314,35 @@ int main(int argc, char **argv) {
     fv_trigger_init(&trig, baseline, threshold, 450000000ULL);
 
     const uint32_t blob_frames = FV_SAMPLE_RATE / 4u;
-    int16_t *pcm = calloc(blob_frames, sizeof(*pcm));
+    pcm = calloc(blob_frames, sizeof(*pcm));
 
     int16_t silence[FV_SAMPLE_RATE / 20u];
     memset(silence, 0, sizeof(silence));
 
     if (!pcm) {
         fprintf(stderr, "allocation failure\n");
-        return 1;
+        goto cleanup;
     }
 
-    fprintf(
+    if (fprintf(
         log_fp,
-        "{\"type\":\"csv_session_start\",\"engine\":\"fieldvox-csvvox\","
-        "\"input_csv\":\"%s\",\"sample_rate\":%u,\"threshold\":%.6f,"
+        "{\"type\":\"csv_session_start\",\"engine\":\"fieldvox-csvvox\",\"input_csv\":"
+    ) < 0 || write_json_string(log_fp, input_csv) != 0 || fprintf(
+        log_fp,
+        ",\"sample_rate\":%u,\"threshold\":%.6f,"
         "\"baseline_samples\":%" PRIu64 ",\"baseline_mag\":%.6f,"
         "\"seed\":\"0x%016" PRIx64 "\"}\n",
-        input_csv,
         FV_SAMPLE_RATE,
         threshold,
         stats.baseline_samples,
         baseline,
         seed
-    );
+    ) < 0) {
+        fprintf(stderr, "failed to write session log header\n");
+        goto cleanup;
+    }
 
     char line[4096];
-    uint64_t rows_seen = 0;
-    uint64_t rows_parsed = 0;
-    uint64_t rows_skipped = 0;
-    uint64_t event_count = 0;
-
     while (fgets(line, sizeof(line), in)) {
         rows_seen++;
 
@@ -313,15 +389,18 @@ int main(int argc, char **argv) {
 
             if (fv_blob_write(blob_fp, &meta, pcm) != 0) {
                 fprintf(stderr, "blob write failed\n");
-                return 1;
+                goto cleanup;
             }
 
             if (fv_wav_write_i16(&wav, pcm, blob_frames) != 0) {
                 fprintf(stderr, "wav write failed\n");
-                return 1;
+                goto cleanup;
             }
 
-            fv_wav_write_i16(&wav, silence, (uint32_t)(sizeof(silence) / sizeof(silence[0])));
+            if (fv_wav_write_i16(&wav, silence, (uint32_t)(sizeof(silence) / sizeof(silence[0]))) != 0) {
+                fprintf(stderr, "wav silence write failed\n");
+                goto cleanup;
+            }
 
             fprintf(
                 log_fp,
@@ -358,15 +437,19 @@ int main(int argc, char **argv) {
         event_count
     );
 
-    free(pcm);
-    fclose(in);
-    fclose(blob_fp);
-    fclose(log_fp);
+    result = event_count == 0 ? 3 : 0;
 
-    if (fv_wav_finish(&wav) != 0) {
+cleanup:
+    free(pcm);
+    if (in && fclose(in) != 0) result = 1;
+    if (blob_fp && fclose(blob_fp) != 0) result = 1;
+    if (log_fp && fclose(log_fp) != 0) result = 1;
+    if (wav_open && fv_wav_finish(&wav) != 0) {
         fprintf(stderr, "wav finalize failed\n");
-        return 1;
+        result = 1;
     }
+
+    if (result != 0 && result != 3) return result;
 
     printf("FieldVox CSV mode complete.\n");
     printf("input_csv=%s\n", input_csv);
@@ -380,5 +463,5 @@ int main(int argc, char **argv) {
     printf("  %s\n", wav_path);
     printf("  %s\n", jsonl_path);
 
-    return event_count == 0 ? 3 : 0;
+    return result;
 }

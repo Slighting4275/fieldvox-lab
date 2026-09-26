@@ -14,6 +14,9 @@ import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -31,7 +34,7 @@ public final class RadioBrowserDiscoveryCache {
     private RadioBrowserDiscoveryCache() {
     }
 
-    public static JSONObject refresh(Context context, int requestedSlots) throws Exception {
+    public static synchronized JSONObject refresh(Context context, int requestedSlots) throws Exception {
         int catalogTarget = Math.max(64, Math.min(TARGET_CATALOG_COUNT, requestedSlots));
         if (requestedSlots >= TARGET_CATALOG_COUNT) {
             catalogTarget = TARGET_CATALOG_COUNT;
@@ -371,22 +374,25 @@ public final class RadioBrowserDiscoveryCache {
 
     private static String httpGet(String httpsUrl) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(httpsUrl).openConnection();
-        conn.setConnectTimeout(12000);
-        conn.setReadTimeout(24000);
-        conn.setRequestMethod("GET");
-        conn.setRequestProperty("User-Agent", USER_AGENT);
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Cache-Control", "no-cache");
+        try {
+            conn.setConnectTimeout(12000);
+            conn.setReadTimeout(24000);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("User-Agent", USER_AGENT);
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Cache-Control", "no-cache");
 
-        int rc = conn.getResponseCode();
-        InputStream in = (rc >= 200 && rc < 300) ? conn.getInputStream() : conn.getErrorStream();
-        String body = readAll(in);
-        conn.disconnect();
+            int rc = conn.getResponseCode();
+            InputStream in = (rc >= 200 && rc < 300) ? conn.getInputStream() : conn.getErrorStream();
+            String body = readAll(in);
 
-        if (rc < 200 || rc >= 300) {
-            throw new IllegalStateException("HTTP " + rc + " from " + httpsUrl + ": " + body);
+            if (rc < 200 || rc >= 300) {
+                throw new IllegalStateException("HTTP " + rc + " from " + httpsUrl + ": " + body);
+            }
+            return body;
+        } finally {
+            conn.disconnect();
         }
-        return body;
     }
 
     private static String readAll(InputStream in) throws Exception {
@@ -394,16 +400,16 @@ public final class RadioBrowserDiscoveryCache {
             return "";
         }
         StringBuilder b = new StringBuilder();
-        BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        char[] buf = new char[8192];
-        int n;
-        while ((n = r.read(buf)) >= 0) {
-            b.append(buf, 0, n);
-            if (b.length() > MAX_RESPONSE_CHARS) {
-                throw new IllegalStateException("Radio Browser response too large");
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            char[] buf = new char[8192];
+            int n;
+            while ((n = r.read(buf)) >= 0) {
+                b.append(buf, 0, n);
+                if (b.length() > MAX_RESPONSE_CHARS) {
+                    throw new IllegalStateException("Radio Browser response too large");
+                }
             }
         }
-        r.close();
         return b.toString();
     }
 
@@ -458,15 +464,15 @@ public final class RadioBrowserDiscoveryCache {
 
     private static void writeText(File file, String text) throws Exception {
         File tmp = new File(file.getParentFile(), file.getName() + ".tmp");
-        FileOutputStream out = new FileOutputStream(tmp, false);
-        out.write(text.getBytes(StandardCharsets.UTF_8));
-        out.flush();
-        out.close();
-        if (file.exists() && !file.delete()) {
-            throw new IllegalStateException("Could not replace " + file.getName());
+        try (FileOutputStream out = new FileOutputStream(tmp, false)) {
+            out.write(text.getBytes(StandardCharsets.UTF_8));
+            out.flush();
         }
-        if (!tmp.renameTo(file)) {
-            throw new IllegalStateException("Could not rename " + tmp.getName() + " to " + file.getName());
+        try {
+            Files.move(tmp.toPath(), file.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
         }
     }
 

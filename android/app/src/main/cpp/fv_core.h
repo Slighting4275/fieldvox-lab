@@ -39,7 +39,7 @@ typedef struct {
     uint32_t sample_rate;
     uint16_t channels;
     FILE *fp;
-    uint32_t frames_written;
+    uint64_t frames_written;
 } FV_WavWriter;
 
 typedef struct {

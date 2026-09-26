@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FieldVox Lab</string>
+    <string name="mark_hit_failed">MARK HIT failed: %1$s</string>
+    <string name="sensor_manager_unavailable">Multi-sensor gate unavailable: no SensorManager.</string>
+    <string name="no_stream_sources">Buffered-proximity carrier failed: no stream sources configured.</string>
+    <string name="bounded_field_carrier">BOUNDED FIELD CARRIER: %1$s</string>
+    <string name="native_ring_active">Native blob station ring active.\n%1$s\n%2$s</string>
+    <string name="two_line_status">%1$s\n%2$s</string>
+    <string name="live_monitor_started">Realtime EVP monitor started\nUse headphones to avoid feedback.\nNo word bank. No generated speech.</string>
+    <string name="live_monitor_error">Realtime EVP monitor error: %1$s</string>
+    <string name="live_session_saved">Auto live session saved:\n%1$s\n%2$s</string>
+    <string name="live_session_failed">Auto live session stopped with an error: %1$s</string>
+    <string name="live_stream_disabled">Live Stream Disabled</string>
+    <string name="session_list_refreshed">Session list refreshed.</string>
+</resources>

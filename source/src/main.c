@@ -11,14 +11,45 @@ static void usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--seconds N] [--threshold FLOAT] [--seed HEX_OR_INT]\n", argv0);
 }
 
+static int parse_u64_arg(const char *text, int base, uint64_t max_value, uint64_t *out) {
+    char *end = NULL;
+    if (!text || text[0] == '\0' || text[0] == '-') return -1;
+    errno = 0;
+    const unsigned long long value = strtoull(text, &end, base);
+    if (errno == ERANGE || end == text || *end != '\0' || value > max_value) return -1;
+    *out = (uint64_t)value;
+    return 0;
+}
+
+static int parse_float_arg(const char *text, float *out) {
+    char *end = NULL;
+    if (!text || text[0] == '\0') return -1;
+    errno = 0;
+    const float value = strtof(text, &end);
+    if (errno == ERANGE || end == text || *end != '\0' || !isfinite(value)) return -1;
+    *out = value;
+    return 0;
+}
+
 static int parse_args(int argc, char **argv, uint32_t *seconds, float *threshold, uint64_t *seed) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--seconds") == 0 && i + 1 < argc) {
-            *seconds = (uint32_t)strtoul(argv[++i], NULL, 10);
+            uint64_t value = 0;
+            if (parse_u64_arg(argv[++i], 10, UINT32_MAX, &value) != 0) {
+                fprintf(stderr, "invalid seconds value\n");
+                return -1;
+            }
+            *seconds = (uint32_t)value;
         } else if (strcmp(argv[i], "--threshold") == 0 && i + 1 < argc) {
-            *threshold = strtof(argv[++i], NULL);
+            if (parse_float_arg(argv[++i], threshold) != 0) {
+                fprintf(stderr, "invalid threshold value\n");
+                return -1;
+            }
         } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
-            *seed = strtoull(argv[++i], NULL, 0);
+            if (parse_u64_arg(argv[++i], 0, UINT64_MAX, seed) != 0) {
+                fprintf(stderr, "invalid seed value\n");
+                return -1;
+            }
         } else {
             usage(argv[0]);
             return -1;
@@ -76,6 +107,15 @@ int main(int argc, char **argv) {
     uint32_t seconds = 24;
     float threshold = 1.80f;
     uint64_t seed = 0xBEEFBEEFULL;
+    FILE *blob_fp = NULL;
+    FILE *log_fp = NULL;
+    FV_WavWriter wav;
+    int16_t *pcm = NULL;
+    uint32_t event_count = 0;
+    int wav_open = 0;
+    int result = 1;
+
+    memset(&wav, 0, sizeof(wav));
 
     if (parse_args(argc, argv, &seconds, &threshold, &seed) != 0) return 2;
 
@@ -84,19 +124,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    FILE *blob_fp = fopen("out/session.fvblobs", "wb");
-    FILE *log_fp = fopen("out/session.jsonl", "wb");
+    blob_fp = fopen("out/session.fvblobs", "wb");
+    log_fp = fopen("out/session.jsonl", "wb");
 
     if (!blob_fp || !log_fp) {
         fprintf(stderr, "failed to open output files\n");
-        return 1;
+        goto cleanup;
     }
 
-    FV_WavWriter wav;
     if (fv_wav_begin(&wav, "out/session.wav", FV_SAMPLE_RATE, FV_CHANNELS) != 0) {
         fprintf(stderr, "failed to open wav output\n");
-        return 1;
+        goto cleanup;
     }
+    wav_open = 1;
 
     FV_Rng rng;
     fv_rng_seed(&rng, seed);
@@ -111,14 +151,14 @@ int main(int argc, char **argv) {
     const uint64_t ticks = (uint64_t)seconds * sensor_hz;
 
     const uint32_t blob_frames = FV_SAMPLE_RATE / 4u;
-    int16_t *pcm = calloc(blob_frames, sizeof(*pcm));
+    pcm = calloc(blob_frames, sizeof(*pcm));
 
     int16_t silence[FV_SAMPLE_RATE / 20u];
     memset(silence, 0, sizeof(silence));
 
     if (!pcm) {
         fprintf(stderr, "allocation failure\n");
-        return 1;
+        goto cleanup;
     }
 
     fprintf(
@@ -131,8 +171,6 @@ int main(int argc, char **argv) {
         threshold,
         seed
     );
-
-    uint32_t event_count = 0;
 
     for (uint64_t tick = 0; tick < ticks; tick++) {
         const uint64_t t_ns = tick * step_ns;
@@ -169,15 +207,18 @@ int main(int argc, char **argv) {
 
             if (fv_blob_write(blob_fp, &meta, pcm) != 0) {
                 fprintf(stderr, "blob write failed\n");
-                return 1;
+                goto cleanup;
             }
 
             if (fv_wav_write_i16(&wav, pcm, blob_frames) != 0) {
                 fprintf(stderr, "wav write failed\n");
-                return 1;
+                goto cleanup;
             }
 
-            fv_wav_write_i16(&wav, silence, (uint32_t)(sizeof(silence) / sizeof(silence[0])));
+            if (fv_wav_write_i16(&wav, silence, (uint32_t)(sizeof(silence) / sizeof(silence[0]))) != 0) {
+                fprintf(stderr, "wav silence write failed\n");
+                goto cleanup;
+            }
 
             fprintf(
                 log_fp,
@@ -201,14 +242,18 @@ int main(int argc, char **argv) {
 
     fprintf(log_fp, "{\"type\":\"session_end\",\"events\":%u}\n", event_count);
 
-    free(pcm);
-    fclose(blob_fp);
-    fclose(log_fp);
+    result = event_count == 0 ? 3 : 0;
 
-    if (fv_wav_finish(&wav) != 0) {
+cleanup:
+    free(pcm);
+    if (blob_fp && fclose(blob_fp) != 0) result = 1;
+    if (log_fp && fclose(log_fp) != 0) result = 1;
+    if (wav_open && fv_wav_finish(&wav) != 0) {
         fprintf(stderr, "wav finalize failed\n");
-        return 1;
+        result = 1;
     }
+
+    if (result != 0 && result != 3) return result;
 
     printf("FieldVox Lab C simulator complete.\n");
     printf("events=%u\n", event_count);
@@ -217,5 +262,5 @@ int main(int argc, char **argv) {
     printf("  out/session.wav      rendered triggered audio\n");
     printf("  out/session.jsonl    audit log\n");
 
-    return event_count == 0 ? 3 : 0;
+    return result;
 }

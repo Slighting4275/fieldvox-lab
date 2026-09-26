@@ -33,6 +33,8 @@ static constexpr uint32_t RING_MASK = RING_FRAMES - 1u;
 static std::atomic<bool> g_running{false};
 static std::atomic<bool> g_thread_live{false};
 static pthread_t g_thread{};
+static pthread_mutex_t g_thread_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_thread_joinable = false;
 
 static std::atomic<uint64_t> g_sensor_events{0};
 static std::atomic<uint64_t> g_baseline_events{0};
@@ -103,13 +105,12 @@ static void ring_clear() {
 
 static void ring_push(const int16_t *pcm, uint32_t frames) {
     uint32_t write_i = g_ring_write.load(std::memory_order_relaxed);
-    uint32_t read_i = g_ring_read.load(std::memory_order_acquire);
 
     for (uint32_t i = 0; i < frames; i++) {
+        const uint32_t read_i = g_ring_read.load(std::memory_order_acquire);
         if ((write_i - read_i) >= (RING_FRAMES - 1u)) {
             g_ring_drops.fetch_add(1, std::memory_order_relaxed);
-            read_i++;
-            g_ring_read.store(read_i, std::memory_order_release);
+            continue;
         }
 
         g_ring[write_i & RING_MASK] = pcm[i];
@@ -476,8 +477,7 @@ static void *sensor_thread_main(void *) {
     ASensorEventQueue_enableSensor(queue, mag_sensor);
     ASensorEventQueue_setEventRate(queue, mag_sensor, 8333);
 
-    FV_TriggerState trig;
-    std::memset(&trig, 0, sizeof(trig));
+    FV_TriggerState trig{};
 
     uint64_t baseline_count = 0;
     double baseline_sum = 0.0;
@@ -496,8 +496,7 @@ static void *sensor_thread_main(void *) {
                 continue;
             }
 
-            FV_SensorSample sample;
-            std::memset(&sample, 0, sizeof(sample));
+            FV_SensorSample sample{};
 
             sample.t_ns = static_cast<uint64_t>(event.timestamp);
             sample.mx = event.magnetic.x;
@@ -580,8 +579,15 @@ Java_org_fieldvox_lab_MainActivity_nativeInit(JNIEnv *env, jobject, jstring pack
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeStart(JNIEnv *, jobject) {
+    pthread_mutex_lock(&g_thread_mutex);
     if (g_running.load(std::memory_order_acquire)) {
+        pthread_mutex_unlock(&g_thread_mutex);
         return JNI_TRUE;
+    }
+
+    if (g_thread_joinable) {
+        pthread_join(g_thread, nullptr);
+        g_thread_joinable = false;
     }
 
     ring_clear();
@@ -604,19 +610,24 @@ Java_org_fieldvox_lab_MainActivity_nativeStart(JNIEnv *, jobject) {
     if (rc != 0) {
         g_running.store(false);
         FV_LOGE("pthread_create failed: %d", rc);
+        pthread_mutex_unlock(&g_thread_mutex);
         return JNI_FALSE;
     }
 
+    g_thread_joinable = true;
+    pthread_mutex_unlock(&g_thread_mutex);
     return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeStop(JNIEnv *, jobject) {
-    if (!g_running.exchange(false)) {
-        return;
+    pthread_mutex_lock(&g_thread_mutex);
+    g_running.store(false, std::memory_order_release);
+    if (g_thread_joinable) {
+        pthread_join(g_thread, nullptr);
+        g_thread_joinable = false;
     }
-
-    pthread_join(g_thread, nullptr);
+    pthread_mutex_unlock(&g_thread_mutex);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -706,10 +717,7 @@ static std::string build_session_list() {
             continue;
         }
 
-        Item item;
-        item.name = name;
-        item.size = static_cast<uint64_t>(st.st_size);
-        item.mtime = st.st_mtime;
+        Item item{name, static_cast<uint64_t>(st.st_size), st.st_mtime};
         items.push_back(item);
     }
 

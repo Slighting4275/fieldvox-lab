@@ -12,7 +12,6 @@ import android.media.AudioAttributes;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
-import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
@@ -49,6 +48,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+import java.util.Locale;
 
 public class MainActivity extends Activity {
 
@@ -159,7 +159,7 @@ public class MainActivity extends Activity {
     private Button liveButton;
     private volatile boolean liveMonitorRunning = false;
     private volatile boolean speakerMonitorEnabled = false;
-    private Thread liveMonitorThread;
+    private volatile Thread liveMonitorThread;
     private Button speakerMonitorButton;
     private Button markHitButton;
     private Button exportHitsButton;
@@ -248,6 +248,7 @@ public class MainActivity extends Activity {
 
     private static final int LIVE_SAMPLE_RATE = 48000;
     private static final int LIVE_PERMISSION_REQUEST = 4101;
+    private static final long WAV_MAX_PCM_BYTES = 0xffffffffL - 36L;
 
 
     private native String nativeTimelineRecord(String eventKind, String detail);
@@ -321,8 +322,8 @@ public class MainActivity extends Activity {
     }
 
     private void updateLabels() {
-        thresholdLabel.setText(String.format("Sensitivity: %.2f uT delta", threshold));
-        cooldownLabel.setText(String.format("Cooldown: %d ms", cooldownMs));
+        thresholdLabel.setText(String.format(Locale.getDefault(), "Sensitivity: %.2f uT delta", threshold));
+        cooldownLabel.setText(String.format(Locale.getDefault(), "Cooldown: %d ms", cooldownMs));
     }
 
     private void refreshSessions() {
@@ -914,7 +915,7 @@ public class MainActivity extends Activity {
             exportStatus.setText(msg);
             refreshSessions();
         } catch (IOException e) {
-            exportStatus.setText("MARK HIT failed: " + e.getMessage());
+            exportStatus.setText(getString(R.string.mark_hit_failed, e.getMessage()));
         }
     }
 
@@ -1671,7 +1672,7 @@ public class MainActivity extends Activity {
 
         onlineCarrierSensorManager = (SensorManager)getSystemService(SENSOR_SERVICE);
         if (onlineCarrierSensorManager == null) {
-            exportStatus.setText("Multi-sensor gate unavailable: no SensorManager.");
+            exportStatus.setText(R.string.sensor_manager_unavailable);
             return;
         }
 
@@ -2115,6 +2116,20 @@ public class MainActivity extends Activity {
         };
         stage1UNAudioDwellHandler.postDelayed(stage1UNAudioDwellRunnable, 650);
     }
+
+    private void stopStage1USweeps() {
+        if (stage1ULFastSweepHandler != null && stage1ULFastSweepRunnable != null) {
+            stage1ULFastSweepHandler.removeCallbacks(stage1ULFastSweepRunnable);
+        }
+        if (stage1UNAudioDwellHandler != null && stage1UNAudioDwellRunnable != null) {
+            stage1UNAudioDwellHandler.removeCallbacks(stage1UNAudioDwellRunnable);
+        }
+        stage1ULFastSweepRunnable = null;
+        stage1UNAudioDwellRunnable = null;
+        stage1ULFastSweepStarted = false;
+        stage1UNAudioDwellStarted = false;
+    }
+
     private String stage1UJsonValue(String json, String key) {
         if (json == null || key == null) return "";
         String needle = "\"" + key + "\":";
@@ -2159,11 +2174,14 @@ public class MainActivity extends Activity {
 
     private void stage1ULogNativeRingProbeOnce() {
         if (stage1UProbeLogged) return;
-        stage1UProbeLogged = true;
         try {
             String probe = nativeStage1UDecoderProbe();
             appendStage1QDLiveEvent("native_blob_decoder_probe", null, "complete", probe);
             int ringCount = nativeStage1UStationRingCount();
+            if (ringCount <= 0) {
+                throw new IllegalStateException("native station ring is empty");
+            }
+            stage1UProbeLogged = true;
             appendStage1QDLiveEvent("native_station_ring_ready", null, "ready", "ring_count=" + ringCount);
             stage1KShowChannelNumberOnly(0);
             stage1ULStartFastNativeSweep();
@@ -2258,7 +2276,7 @@ public class MainActivity extends Activity {
 
         if (ONLINE_CARRIER_URLS.length <= 0) {
             onlineCarrierActive = false;
-            exportStatus.setText("Buffered-proximity carrier failed: no stream sources configured.");
+            exportStatus.setText(R.string.no_stream_sources);
             return;
         }
 
@@ -2338,7 +2356,7 @@ public class MainActivity extends Activity {
             Log.i("FieldVox", "BOUNDED FIELD CARRIER: "
                     + ONLINE_CARRIER_LABELS[index]
                     + " url=" + ONLINE_CARRIER_URLS[index]);
-            exportStatus.setText("BOUNDED FIELD CARRIER: " + ONLINE_CARRIER_LABELS[index]);
+            exportStatus.setText(getString(R.string.bounded_field_carrier, ONLINE_CARRIER_LABELS[index]));
 
             mp.prepareAsync();
 
@@ -2434,8 +2452,8 @@ public class MainActivity extends Activity {
 
         String result = startLiveMonitor();
         String carrier = startOnlineVoxCarrier();
-        exportStatus.setText("Native blob station ring active.\n" + result + "\n" + carrier);
-        status.setText(result + "\n" + carrier);
+        exportStatus.setText(getString(R.string.native_ring_active, result, carrier));
+        status.setText(getString(R.string.two_line_status, result, carrier));
         updateLiveButtons();
     }
 
@@ -2480,8 +2498,9 @@ public class MainActivity extends Activity {
 
         int byteRate = LIVE_SAMPLE_RATE * 2;
         int blockAlign = 2;
-        int riffSize = (int)Math.min(36L + pcmBytes, 0x7fffffffL);
-        int dataSize = (int)Math.min(pcmBytes, 0x7fffffffL);
+        long cappedPcmBytes = Math.max(0L, Math.min(pcmBytes, WAV_MAX_PCM_BYTES));
+        int riffSize = (int)(36L + cappedPcmBytes);
+        int dataSize = (int)cappedPcmBytes;
 
         b.put(new byte[]{'R','I','F','F'});
         b.putInt(riffSize);
@@ -2512,8 +2531,26 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static void recoverInterruptedLiveSessions(File dir) {
+        File[] files = dir.listFiles((ignored, name) ->
+                name.startsWith("session-") && name.endsWith("-live.wav"));
+        if (files == null) {
+            return;
+        }
+        for (File wav : files) {
+            long pcmBytes = Math.max(0L, wav.length() - 44L);
+            pcmBytes -= pcmBytes % 2L;
+            try {
+                rewriteWavHeader(wav, pcmBytes);
+            } catch (IOException e) {
+                Log.w("FieldVox", "Could not recover WAV header for " + wav.getName(), e);
+            }
+        }
+    }
+
     private String startLiveMonitor() {
-        if (liveMonitorRunning) {
+        Thread existingThread = liveMonitorThread;
+        if (liveMonitorRunning || (existingThread != null && existingThread.isAlive())) {
             return "Realtime EVP monitor already running.";
         }
 
@@ -2526,6 +2563,7 @@ public class MainActivity extends Activity {
         if (!dir.isDirectory() && !dir.mkdirs()) {
             return "Could not create session folder.";
         }
+        recoverInterruptedLiveSessions(dir);
 
         final long startMs = System.currentTimeMillis();
         final String stem = "session-" + (startMs / 1000L) + "-live";
@@ -2553,6 +2591,8 @@ public class MainActivity extends Activity {
             AudioTrack track = null;
             long pcmBytes = 0L;
             long lastUiMs = 0L;
+            long lastHeaderCheckpointMs = 0L;
+            String failureMessage = null;
 
             try (java.io.FileOutputStream jsonOut = new java.io.FileOutputStream(jsonl, false);
                  java.io.FileOutputStream wavOut = new java.io.FileOutputStream(wav, false)) {
@@ -2580,6 +2620,11 @@ public class MainActivity extends Activity {
                     bufferBytes = 4096;
                 }
 
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    throw new SecurityException("Microphone permission was revoked before capture started.");
+                }
+
                 record = new AudioRecord(
                         MediaRecorder.AudioSource.MIC,
                         LIVE_SAMPLE_RATE,
@@ -2591,31 +2636,46 @@ public class MainActivity extends Activity {
                     throw new IOException("AudioRecord failed to initialize.");
                 }
 
-                track = new AudioTrack(
-                        AudioManager.STREAM_MUSIC,
-                        LIVE_SAMPLE_RATE,
-                        AudioFormat.CHANNEL_OUT_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT,
-                        bufferBytes,
-                        AudioTrack.MODE_STREAM);
+                track = new AudioTrack.Builder()
+                        .setAudioAttributes(new AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_MEDIA)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build())
+                        .setAudioFormat(new AudioFormat.Builder()
+                                .setSampleRate(LIVE_SAMPLE_RATE)
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build())
+                        .setBufferSizeInBytes(bufferBytes)
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .build();
 
                 short[] samples = new short[bufferBytes / 2];
                 short[] monitorSamples = new short[bufferBytes / 2];
                 byte[] pcm = new byte[bufferBytes];
 
                 record.startRecording();
+                if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                    throw new IOException("AudioRecord did not enter recording state.");
+                }
                 track.setVolume(1.0f);
                 track.play();
 
                 handler.post(() -> {
-                    status.setText("Realtime EVP monitor started\\nUse headphones to avoid feedback.\\nNo word bank. No generated speech.");
+                    status.setText(R.string.live_monitor_started);
                     refreshSessions();
                 });
 
                 while (liveMonitorRunning) {
                     int n = record.read(samples, 0, samples.length);
-                    if (n <= 0) {
+                    if (n < 0) {
+                        throw new IOException("AudioRecord read failed with code " + n + ".");
+                    }
+                    if (n == 0) {
                         continue;
+                    }
+                    if (pcmBytes + (long)n * 2L > WAV_MAX_PCM_BYTES) {
+                        throw new IOException("WAV reached the 4 GiB RIFF size limit.");
                     }
 
                     long sumSquares = 0L;
@@ -2638,7 +2698,15 @@ public class MainActivity extends Activity {
                     pcmBytes += (long)n * 2L;
 
                     if (speakerMonitorEnabled) {
-                        track.write(monitorSamples, 0, n);
+                        int written = track.write(monitorSamples, 0, n);
+                        if (written < 0) {
+                            speakerMonitorEnabled = false;
+                            final int audioTrackError = written;
+                            handler.post(() -> {
+                                updateSpeakerMonitorButton();
+                                Log.w("FieldVox", "AudioTrack write failed with code " + audioTrackError);
+                            });
+                        }
                     }
 
                     double rms = Math.sqrt((double)sumSquares / (double)n);
@@ -2650,6 +2718,11 @@ public class MainActivity extends Activity {
 
                     double gate = Math.max(900.0, liveNoiseFloor * 3.0);
                     long nowMs = System.currentTimeMillis();
+                    if (nowMs - lastHeaderCheckpointMs >= 1000L) {
+                        wavOut.flush();
+                        rewriteWavHeader(wav, pcmBytes);
+                        lastHeaderCheckpointMs = nowMs;
+                    }
 
                     if (rms >= gate && nowMs - liveLastTriggerMs >= Math.max(250, cooldownMs)) {
                         liveLastTriggerMs = nowMs;
@@ -2685,7 +2758,8 @@ public class MainActivity extends Activity {
 
             } catch (Exception e) {
                 final String err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                handler.post(() -> status.setText("Realtime EVP monitor error: " + err));
+                failureMessage = err;
+                handler.post(() -> status.setText(getString(R.string.live_monitor_error, err)));
             } finally {
                 try {
                     if (record != null) {
@@ -2703,16 +2777,29 @@ public class MainActivity extends Activity {
 
                 try {
                     rewriteWavHeader(wav, pcmBytes);
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    if (failureMessage == null) {
+                        failureMessage = "WAV finalization failed: " + e.getMessage();
+                    }
+                }
 
-                liveMonitorRunning = false;
+                if (liveMonitorThread == Thread.currentThread()) {
+                    liveMonitorRunning = false;
+                    liveMonitorThread = null;
+                }
+                final String completionError = failureMessage;
                 handler.post(() -> {
                     if (liveButton != null) {
                         updateLiveButtons();
                     }
                     updateLiveButtons();
                     refreshSessions();
-                    exportStatus.setText("Auto live session saved:\\n" + jsonl.getName() + "\\n" + wav.getName());
+                    if (completionError == null) {
+                        exportStatus.setText(getString(
+                                R.string.live_session_saved, jsonl.getName(), wav.getName()));
+                    } else {
+                        exportStatus.setText(getString(R.string.live_session_failed, completionError));
+                    }
                 });
             }
         }, "FieldVox-Realtime-EVP-Monitor");
@@ -2731,6 +2818,19 @@ public class MainActivity extends Activity {
         liveMonitorRunning = false;
         updateLiveButtons();
         return "Auto live session finalizing WAV header...";
+    }
+
+    private void stopLiveMonitorAndWait() {
+        liveMonitorRunning = false;
+        Thread thread = liveMonitorThread;
+        if (thread == null || thread == Thread.currentThread()) {
+            return;
+        }
+        try {
+            thread.join(1500L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
 
@@ -2772,8 +2872,6 @@ public class MainActivity extends Activity {
 
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        stage1ULogNativeRingProbeOnce();
 
         nativeInit(getPackageName(), getFilesDir().getAbsolutePath());
         nativeSetThreshold(threshold);
@@ -2943,7 +3041,7 @@ public class MainActivity extends Activity {
         content.addView(liveStreamStatusText);
 
         liveStreamButton = new Button(this);
-        liveStreamButton.setText("Live Stream Disabled");
+        liveStreamButton.setText(R.string.live_stream_disabled);
         liveStreamButton.setAllCaps(false);
         liveStreamButton.setOnClickListener(v -> startStage1QDLiveStream());
         content.addView(liveStreamButton);
@@ -2974,6 +3072,8 @@ public class MainActivity extends Activity {
 
         setContentView(root);
 
+        stage1ULogNativeRingProbeOnce();
+
         thresholdBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 threshold = 0.50f + ((float) progress / 100.0f);
@@ -3002,7 +3102,7 @@ public class MainActivity extends Activity {
 
         sessionsButton.setOnClickListener(v -> {
             refreshSessions();
-            exportStatus.setText("Session list refreshed.");
+            exportStatus.setText(R.string.session_list_refreshed);
         });
 
         if (markHitButton != null) {
@@ -3069,6 +3169,12 @@ public class MainActivity extends Activity {
         // FIELDVOX_STAGE1Q_C_ONRESUME_REFRESH
         refreshLiveSourcesStatus();
         super.onResume();
+        handler.removeCallbacks(tick);
+        handler.post(tick);
+        stage1ULogNativeRingProbeOnce();
+        if (stage1UProbeLogged) {
+            stage1ULStartFastNativeSweep();
+        }
         // ADB_MARK_HIT_EXISTING_ONRESUME_POLL: deterministic test hook because UIAutomator cannot idle during live VOX.
         handler.postDelayed(() -> handleAdbHitMarkerIntent(getIntent()), 900L);
         handler.postDelayed(() -> autoStartEverythingOnLaunch(), 350);
@@ -3092,28 +3198,34 @@ public class MainActivity extends Activity {
 
 
     protected void onStop() {
+        handler.removeCallbacks(tick);
+        stopStage1USweeps();
         stopStage1QDLiveStreamIfActive("activity_stopped");
         stopOnlineVoxCarrier();
-        liveMonitorRunning = false;
+        stopLiveMonitorAndWait();
         updateLiveButtons();
         super.onStop();
     }
 
     protected void onDestroy() {
+        stopStage1USweeps();
         stopStage1QDLiveStreamIfActive("activity_destroyed");
         stopOnlineVoxCarrier();
-        liveMonitorRunning = false;
+        stopLiveMonitorAndWait();
         nativeStop();
-        handler.removeCallbacks(tick);
+        handler.removeCallbacksAndMessages(null);
         super.onDestroy();
     }
 
     public static final class LogoGlyphView extends View {
+        private static final float[] WAVE_AMPLITUDES = {
+                0.10f, -0.34f, 0.22f, -0.52f, 0.50f, -0.20f, 0.35f, -0.12f, 0.08f
+        };
         private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint soft = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-        public LogoGlyphView(Activity ctx) {
+        public LogoGlyphView(android.content.Context ctx) {
             super(ctx);
 
             stroke.setColor(Color.WHITE);
@@ -3166,15 +3278,11 @@ public class MainActivity extends Activity {
             float baseY = cy;
             float left = cx - r * 0.68f;
             float step = (r * 1.36f) / 8.0f;
-            float[] amps = new float[] {
-                    0.10f, -0.34f, 0.22f, -0.52f, 0.50f, -0.20f, 0.35f, -0.12f, 0.08f
-            };
-
             float lastX = left;
-            float lastY = baseY + amps[0] * r;
-            for (int i = 1; i < amps.length; i++) {
+            float lastY = baseY + WAVE_AMPLITUDES[0] * r;
+            for (int i = 1; i < WAVE_AMPLITUDES.length; i++) {
                 float x = left + step * i;
-                float y = baseY + amps[i] * r;
+                float y = baseY + WAVE_AMPLITUDES[i] * r;
                 c.drawLine(lastX, lastY, x, y, stroke);
                 lastX = x;
                 lastY = y;
@@ -3195,10 +3303,11 @@ public class MainActivity extends Activity {
         private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF box = new RectF();
         private boolean running = false;
         private int phase = 0;
 
-        public WavePanelView(Activity ctx) {
+        public WavePanelView(android.content.Context ctx) {
             super(ctx);
             bg.setColor(Color.rgb(18, 18, 20));
             bg.setStyle(Paint.Style.FILL);
@@ -3223,7 +3332,7 @@ public class MainActivity extends Activity {
 
             float w = getWidth();
             float h = getHeight();
-            RectF box = new RectF(0, 0, w, h);
+            box.set(0, 0, w, h);
             c.drawRoundRect(box, 18.0f, 18.0f, bg);
 
             float mid = h * 0.52f;
@@ -3302,7 +3411,7 @@ public class MainActivity extends Activity {
         }, "fieldvox-stage1r-native-audio-window").start();
         runOnUiThread(() -> {
             if (liveStreamButton != null) {
-                liveStreamButton.setText("Live Stream Disabled");
+                liveStreamButton.setText(R.string.live_stream_disabled);
                 liveStreamButton.setEnabled(false);
             }
             setStage1QDStatus("Experimental Live Stream: disabled\nLong-form station playback is disabled.\nNext implementation must use short buffered windows only.\nThis does not prove paranormal communication.");
@@ -3331,7 +3440,7 @@ public class MainActivity extends Activity {
         appendStage1QDLiveEvent("live_stream_stopped", src, "stopped", reason);
         runOnUiThread(() -> {
             if (liveStreamButton != null) {
-                liveStreamButton.setText("Live Stream Disabled");
+                liveStreamButton.setText(R.string.live_stream_disabled);
             }
             setStage1QDStatus(formatStage1QDStatus("stopped", src, reason));
         });

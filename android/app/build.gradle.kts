@@ -4,14 +4,14 @@ plugins {
 
 android {
     namespace = "org.fieldvox.lab"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "org.fieldvox.lab"
         minSdk = 30
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
-        versionName = "0.1.0-stage1n-a-hit-marker-blind-review"
+        versionName = "0.1.0-stage1u-n-audio-dwell"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

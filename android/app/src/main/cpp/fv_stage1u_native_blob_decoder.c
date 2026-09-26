@@ -108,7 +108,8 @@ static int fv1u_native_decoder_probe(uint32_t logical_index, int16_t *pcm_out, u
         return -1;
     }
     const Fv1UStationBase *st = &FV1U_BASE[fv1u_station_index(logical_index)];
-    uint32_t h = fv1u_hash_string(st->label) ^ fv1u_hash_string(st->url) ^ logical_index;
+    uint32_t h = fv1u_hash_string(st->label) ^ fv1u_hash_string(st->url)
+            ^ st->weight ^ logical_index;
     for (uint32_t i = 0; i < frames; i++) {
         uint32_t v = fv1u_mix32(h + i * 1103515245u);
         int32_t sample = (int32_t)((v >> 17) & 0x3ff) - 512;
@@ -137,10 +138,11 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UStationAt(JNIEnv *env, jobject t
     uint32_t label_hash = fv1u_hash_string(st->label);
     uint32_t url_hash = fv1u_hash_string(st->url);
     snprintf(buf, sizeof(buf),
-             "{\"stage\":\"1U-A\",\"logical\":%u,\"ring_count\":%u,\"base_slot\":%u,\"label\":\"%s\",\"url\":\"%s\",\"label_hash\":%u,\"url_hash\":%u}",
+             "{\"stage\":\"1U-A\",\"logical\":%u,\"ring_count\":%u,\"base_slot\":%u,\"weight\":%u,\"label\":\"%s\",\"url\":\"%s\",\"label_hash\":%u,\"url_hash\":%u}",
              idx % FV1U_RING_COUNT,
              FV1U_RING_COUNT,
              fv1u_station_index(idx),
+             st->weight,
              st->label,
              st->url,
              label_hash,
