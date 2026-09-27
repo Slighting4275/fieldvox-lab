@@ -771,15 +771,15 @@ static std::string build_session_list() {
 
     struct Item {
         std::string name;
-        uint64_t size;
-        time_t mtime;
+        uint64_t size = 0;
+        time_t mtime = 0;
     };
 
     std::vector<Item> items;
 
     while (true) {
         errno = 0;
-        struct dirent *ent = readdir(dp);
+        const struct dirent *ent = readdir(dp);
         if (ent == nullptr) {
             break;
         }

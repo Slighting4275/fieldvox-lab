@@ -58,6 +58,7 @@ void fv_rng_seed(FV_Rng *rng, uint64_t seed) {
     rng->state = seed ? seed : 0x9e3779b97f4a7c15ULL;
 }
 
+// cppcheck-suppress staticFunction
 uint32_t fv_rng_u32(FV_Rng *rng) {
     uint64_t x = rng->state;
     x ^= x >> 12;
@@ -67,6 +68,7 @@ uint32_t fv_rng_u32(FV_Rng *rng) {
     return (uint32_t)((x * 0x2545F4914F6CDD1DULL) >> 32);
 }
 
+// cppcheck-suppress staticFunction
 float fv_rng_float_signed(FV_Rng *rng) {
     const uint32_t v = fv_rng_u32(rng);
     const float f = (float)v / 4294967295.0f;

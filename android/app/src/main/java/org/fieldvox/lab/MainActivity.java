@@ -21,8 +21,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.database.Cursor;
 import android.net.Uri;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -160,6 +162,8 @@ public class MainActivity extends Activity {
     private boolean controlsVisible = false;
     private Button liveButton;
     private volatile boolean liveMonitorRunning = false;
+    private volatile AudioRecord liveAudioRecord;
+    private boolean micPermissionRequestPending = false;
     private volatile boolean speakerMonitorEnabled = false;
     private volatile Thread liveMonitorThread;
     private Button speakerMonitorButton;
@@ -192,6 +196,7 @@ public class MainActivity extends Activity {
     private volatile boolean onlineCarrierPrepared = false;
     private int onlineCarrierIndex = 0;
     private long onlineCarrierLastGateMs = 0L;
+    private long onlineCarrierLastWaitingLogMs = 0L;
     private long onlineCarrierGateOpenUntilMs = 0L;
     private long onlineCarrierNextAllowedGateMs = 0L;
     private boolean onlineCarrierGateOpen = false;
@@ -270,7 +275,7 @@ public class MainActivity extends Activity {
     private final Runnable tick = new Runnable() {
         public void run() {
             if (liveMonitorRunning) {
-                status.setText("native safety native audio safety mode running\nSeattle-local news/talk streams are first in the bank. No word bank. No TTS.");
+                status.setText("native audio safety mode running\nBounded station-ring audio is active. No word bank. No TTS.");
             } else {
                 status.setText(nativeStatus());
             }
@@ -404,8 +409,62 @@ public class MainActivity extends Activity {
         }
     }
 
+    private static boolean isLegacyPrivateHitExportName(String name) {
+        if (name == null) {
+            return false;
+        }
+        return name.equals("radio_browser_station_cache_private.jsonl")
+                || name.equals("live_stream_events_stage1q_d.jsonl")
+                || name.equals("radio_browser_catalog.json")
+                || name.equals("radio_browser_discovery_manifest.json")
+                || name.equals("source_slots.json")
+                || name.equals("RADIO_BROWSER_CACHE_README.txt")
+                || name.equals("fieldvox-source-audit.jsonl")
+                || name.equals("SOURCE_AUDIT_README.txt")
+                || name.equals("sweep_manifest.json")
+                || name.equals("sweep_schedule.jsonl")
+                || (name.startsWith("source_audit_") && name.endsWith(".json"));
+    }
+
+    private void deleteLegacyPrivateHitExports() {
+        ContentResolver resolver = getContentResolver();
+        String rel = Environment.DIRECTORY_DOWNLOADS + "/FieldVoxLab";
+        String selection = MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?";
+        String[] args = new String[] { rel + "%" };
+        String[] projection = new String[] {
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME
+        };
+
+        try (Cursor rows = resolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                args,
+                null)) {
+            if (rows == null) {
+                return;
+            }
+            int idColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
+            int nameColumn = rows.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
+            while (rows.moveToNext()) {
+                String name = rows.getString(nameColumn);
+                if (!isLegacyPrivateHitExportName(name)) {
+                    continue;
+                }
+                Uri row = ContentUris.withAppendedId(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        rows.getLong(idColumn));
+                resolver.delete(row, null, null);
+            }
+        } catch (Exception e) {
+            Log.w("FieldVox", "Could not remove legacy private hit exports", e);
+        }
+    }
+
     private ExportResult exportOneToDownloads(File src, String mimeType) throws IOException {
         ContentResolver resolver = getContentResolver();
+        long expectedBytes = src.length();
 
         deleteExistingDownloadByName(src.getName());
 
@@ -445,9 +504,18 @@ public class MainActivity extends Activity {
             throw e;
         }
 
+        if (copied != expectedBytes) {
+            resolver.delete(uri, null, null);
+            throw new IOException("Source changed during export for " + src.getName()
+                    + " (expected " + expectedBytes + " bytes, copied " + copied + ").");
+        }
+
         ContentValues done = new ContentValues();
         done.put(MediaStore.MediaColumns.IS_PENDING, 0);
-        resolver.update(uri, done, null, null);
+        if (resolver.update(uri, done, null, null) != 1) {
+            resolver.delete(uri, null, null);
+            throw new IOException("Could not finalize MediaStore export for " + src.getName());
+        }
 
         return new ExportResult(uri, copied);
     }
@@ -476,7 +544,10 @@ public class MainActivity extends Activity {
 
     private int countTriggerEvents(File jsonl) {
         int count = 0;
-        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(jsonl))) {
+        try (java.io.BufferedReader br = new java.io.BufferedReader(
+                new java.io.InputStreamReader(
+                        new java.io.FileInputStream(jsonl),
+                        java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
                 if (line.contains("\"event\":\"trigger\"")) {
@@ -840,16 +911,12 @@ public class MainActivity extends Activity {
     }
 
     private void flushPendingHitMarkers(java.io.FileOutputStream jsonOut) throws IOException {
-        ArrayList<String> copy = new ArrayList<>();
         synchronized (hitMarkerLock) {
-            if (pendingHitJsonLines.isEmpty()) {
-                return;
+            Iterator<String> pending = pendingHitJsonLines.iterator();
+            while (pending.hasNext()) {
+                writeJsonLine(jsonOut, pending.next());
+                pending.remove();
             }
-            copy.addAll(pendingHitJsonLines);
-            pendingHitJsonLines.clear();
-        }
-        for (String line : copy) {
-            writeJsonLine(jsonOut, line);
         }
     }
 
@@ -922,8 +989,10 @@ public class MainActivity extends Activity {
             writeTextFile(hitJson, jsonLine + "\n");
             appendTextFile(hitJsonl, jsonLine + "\n");
 
-            synchronized (hitMarkerLock) {
-                pendingHitJsonLines.add(jsonLine);
+            if (liveMonitorRunning && sessionStem.equals(currentLiveSessionStem)) {
+                synchronized (hitMarkerLock) {
+                    pendingHitJsonLines.add(jsonLine);
+                }
             }
 
             String msg = "MARK HIT saved: " + hitId
@@ -941,7 +1010,10 @@ public class MainActivity extends Activity {
 
     private String readWholeText(File file) throws IOException {
         StringBuilder sb = new StringBuilder();
-        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(file))) {
+        try (java.io.BufferedReader br = new java.io.BufferedReader(
+                new java.io.InputStreamReader(
+                        new java.io.FileInputStream(file),
+                        java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
                 sb.append(line).append('\n');
@@ -1028,6 +1100,57 @@ public class MainActivity extends Activity {
         return copied;
     }
 
+    private static boolean isSafeArtifactComponent(String value, int maxLength) {
+        if (value == null || value.isEmpty() || value.length() > maxLength || value.contains("..")) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!((c >= 'a' && c <= 'z')
+                    || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_' || c == '.')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isSafeSessionStem(String value) {
+        return isSafeArtifactComponent(value, 160)
+                && value.startsWith("session-")
+                && value.endsWith("-live");
+    }
+
+    private static String tsvCell(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder clean = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            clean.append(c == '\t' || c == '\r' || c == '\n' || Character.isISOControl(c) ? ' ' : c);
+        }
+        return clean.toString();
+    }
+
+    private static JSONObject sanitizedHitObject(String json) throws Exception {
+        JSONObject hit = new JSONObject(json);
+        String rawUrl = hit.optString("source_url", "");
+        String[] rawUrlKeys = new String[] {
+                "source_url", "stream_url", "stream_url_resolved",
+                "private_url", "private_url_resolved", "url", "url_resolved"
+        };
+        for (String key : rawUrlKeys) {
+            hit.remove(key);
+        }
+        if (hit.optString("source_url_sha256", "").isEmpty() && !rawUrl.isEmpty()) {
+            hit.put("source_url_sha256", sha256Text(rawUrl));
+        }
+        hit.put("raw_stream_url_exported", false);
+        return hit;
+    }
+
     private String exportHits() {
         File dir = hitMarkerDir();
         File[] files = dir.listFiles();
@@ -1051,12 +1174,16 @@ public class MainActivity extends Activity {
         truth.append("hit_id\tsession_stem\thit_offset_ms\tuser_label\tsource_label\tgate_reason\tmetadata_file\tcontext_file\tblind_file\n");
 
         int hits = 0;
+        int rejectedHits = 0;
         int exported = 0;
         int clipFailures = 0;
         long bytes = 0L;
+        java.util.LinkedHashSet<File> approvedFiles = new java.util.LinkedHashSet<>();
+        StringBuilder sanitizedEvents = new StringBuilder();
 
         try {
             writeTextFile(instructionsFile, instructions);
+            approvedFiles.add(instructionsFile);
         } catch (IOException e) {
             return "Hit instructions write failed: " + e.getMessage();
         }
@@ -1067,16 +1194,33 @@ public class MainActivity extends Activity {
                 continue;
             }
 
-            hits += 1;
             try {
                 String json = readWholeText(hitJson);
-                String hitId = extractJsonString(json, "hit_id");
-                String sessionStem = extractJsonString(json, "session_stem");
-                String label = extractJsonString(json, "user_label");
-                String sourceLabel = extractJsonString(json, "source_label");
-                String reason = extractJsonString(json, "gate_reason");
-                long offsetMs = extractJsonLong(json, "hit_offset_ms", 0L);
-                long unixMs = extractJsonLong(json, "unix_ms", System.currentTimeMillis());
+                JSONObject hit = sanitizedHitObject(json);
+                String fileHitId = name.substring(0, name.length() - ".json".length());
+                String hitId = hit.optString("hit_id", "");
+                String sessionStem = hit.optString("session_stem", "");
+                if (!hitId.equals(fileHitId)
+                        || !isSafeArtifactComponent(hitId, 220)
+                        || !isSafeSessionStem(sessionStem)) {
+                    rejectedHits += 1;
+                    continue;
+                }
+
+                String label = hit.optString("user_label", "");
+                String sourceLabel = hit.optString("source_label", "");
+                String reason = hit.optString("gate_reason", "");
+                long offsetMs = Math.max(0L, hit.optLong("hit_offset_ms", 0L));
+                long unixMs = hit.optLong("unix_ms", System.currentTimeMillis());
+                if (unixMs < 0L) {
+                    unixMs = 0L;
+                }
+
+                String sanitizedJson = hit.toString();
+                writeTextFile(hitJson, sanitizedJson + "\n");
+                sanitizedEvents.append(sanitizedJson).append('\n');
+                approvedFiles.add(hitJson);
+                hits += 1;
 
                 File sessionWav = new File(new File(getFilesDir(), "fieldvox-sessions"), sessionStem + ".wav");
                 File contextWav = new File(dir, hitId + "_context.wav");
@@ -1089,21 +1233,25 @@ public class MainActivity extends Activity {
                     copyWavClip(sessionWav, blindWav, offsetMs, 10000, 10000);
                     contextName = contextWav.getName();
                     blindName = blindWav.getName();
+                    approvedFiles.add(contextWav);
+                    approvedFiles.add(blindWav);
                 } else {
                     clipFailures += 1;
                 }
 
-                truth.append(hitId).append('\t')
-                        .append(sessionStem).append('\t')
+                truth.append(tsvCell(hitId)).append('\t')
+                        .append(tsvCell(sessionStem)).append('\t')
                         .append(offsetMs).append('\t')
-                        .append(label.replace('\t', ' ')).append('\t')
-                        .append(sourceLabel.replace('\t', ' ')).append('\t')
-                        .append(reason.replace('\t', ' ')).append('\t')
-                        .append(hitJson.getName()).append('\t')
-                        .append(contextName).append('\t')
-                        .append(blindName).append('\n');
+                        .append(tsvCell(label)).append('\t')
+                        .append(tsvCell(sourceLabel)).append('\t')
+                        .append(tsvCell(reason)).append('\t')
+                        .append(tsvCell(hitJson.getName())).append('\t')
+                        .append(tsvCell(contextName)).append('\t')
+                        .append(tsvCell(blindName)).append('\n');
             } catch (Exception e) {
+                rejectedHits += 1;
                 clipFailures += 1;
+                Log.w("FieldVox", "Rejected hit metadata " + name, e);
             }
         }
 
@@ -1113,21 +1261,20 @@ public class MainActivity extends Activity {
 
         try {
             writeTextFile(truthFile, truth.toString());
+            approvedFiles.add(truthFile);
+
+            File eventsFile = new File(dir, "fieldvox-hit-events.jsonl");
+            writeTextFile(eventsFile, sanitizedEvents.toString());
+            approvedFiles.add(eventsFile);
         } catch (IOException e) {
-            return "Truth manifest write failed: " + e.getMessage();
+            return "Hit bundle manifest write failed: " + e.getMessage();
         }
 
-        File[] exportFiles = dir.listFiles();
-        if (exportFiles == null) {
-            return "Hit folder disappeared before export.";
-        }
+        deleteLegacyPrivateHitExports();
 
-        for (File f : exportFiles) {
+        for (File f : approvedFiles) {
             String n = f.getName();
             if (!f.isFile()) {
-                continue;
-            }
-            if (!(n.endsWith(".json") || n.endsWith(".jsonl") || n.endsWith(".wav") || n.endsWith(".txt") || n.endsWith(".tsv"))) {
                 continue;
             }
             try {
@@ -1150,6 +1297,7 @@ public class MainActivity extends Activity {
                 + "\nFiles exported: " + exported
                 + "\nBytes: " + bytes
                 + "\nClip skips/failures: " + clipFailures
+                + "\nRejected metadata: " + rejectedHits
                 + "\nBlind clips use neutral filenames. Do not show TRUTH_DO_NOT_SHOW_LISTENERS.tsv to reviewers.";
 
         if (liveMonitorRunning) {
@@ -1432,13 +1580,16 @@ public class MainActivity extends Activity {
             return;
         }
 
+        long now = System.currentTimeMillis();
         if (!onlineCarrierPrepared || onlineCarrierPlayer == null) {
-            android.util.Log.i("FieldVox", "BOUNDED FIELD WAITING FOR CARRIER reason=" + reason
-                    + " prepared=" + onlineCarrierPrepared);
+            onlineCarrierNextAllowedGateMs = Math.max(onlineCarrierNextAllowedGateMs, now + 500L);
+            if (now - onlineCarrierLastWaitingLogMs >= 1500L) {
+                onlineCarrierLastWaitingLogMs = now;
+                android.util.Log.i("FieldVox", "BOUNDED FIELD WAITING FOR CARRIER reason=" + reason
+                        + " prepared=" + onlineCarrierPrepared);
+            }
             return;
         }
-
-        long now = System.currentTimeMillis();
 
         if (onlineCarrierGateOpen || now < onlineCarrierNextAllowedGateMs) {
             long waitMs = Math.max(0L, onlineCarrierNextAllowedGateMs - now);
@@ -1720,7 +1871,10 @@ public class MainActivity extends Activity {
                     float x = event.values[0];
                     float y = event.values[1];
                     float z = event.values[2];
-                    float mag = (float)Math.sqrt(x * x + y * y + z * z);
+                    float mag = (float)Math.hypot(Math.hypot((double)x, (double)y), (double)z);
+                    if (!Float.isFinite(mag)) {
+                        return;
+                    }
 
                     if (onlineCarrierMagBaseline < 0.0f) {
                         onlineCarrierMagBaseline = mag;
@@ -1742,7 +1896,10 @@ public class MainActivity extends Activity {
                     float x = event.values[0];
                     float y = event.values[1];
                     float z = event.values[2];
-                    float rot = (float)Math.sqrt(x * x + y * y + z * z);
+                    float rot = (float)Math.hypot(Math.hypot((double)x, (double)y), (double)z);
+                    if (!Float.isFinite(rot)) {
+                        return;
+                    }
 
                     if (onlineCarrierGyroBaseline < 0.0f) {
                         onlineCarrierGyroBaseline = rot;
@@ -1764,6 +1921,9 @@ public class MainActivity extends Activity {
                 if (type == Sensor.TYPE_PROXIMITY && event.values.length >= 1) {
                     float v = event.values[0];
                     float maxRange = event.sensor.getMaximumRange();
+                    if (!Float.isFinite(v) || !Float.isFinite(maxRange) || maxRange <= 0.0f) {
+                        return;
+                    }
                     boolean nearNow = (v <= 0.0f) || (v < maxRange);
 
                     if (onlineCarrierProximityLast < 0.0f) {
@@ -1808,34 +1968,37 @@ public class MainActivity extends Activity {
         Sensor gyro = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
         Sensor proximity = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
 
-        if (magnetic != null) {
+        boolean magneticRegistered = magnetic != null &&
             onlineCarrierSensorManager.registerListener(
                     onlineCarrierSensorListener,
                     magnetic,
                     SensorManager.SENSOR_DELAY_UI);
+        if (magneticRegistered) {
             onlineCarrierRegisteredSensorCount++;
         }
 
-        if (gyro != null) {
+        boolean gyroRegistered = gyro != null &&
             onlineCarrierSensorManager.registerListener(
                     onlineCarrierSensorListener,
                     gyro,
                     SensorManager.SENSOR_DELAY_UI);
+        if (gyroRegistered) {
             onlineCarrierRegisteredSensorCount++;
         }
 
-        if (proximity != null) {
+        boolean proximityRegistered = proximity != null &&
             onlineCarrierSensorManager.registerListener(
                     onlineCarrierSensorListener,
                     proximity,
                     SensorManager.SENSOR_DELAY_UI);
+        if (proximityRegistered) {
             onlineCarrierRegisteredSensorCount++;
         }
 
         String msg = "Multi-sensor VOX gates armed: "
-                + "magnetometer=" + (magnetic != null)
-                + " gyroscope=" + (gyro != null)
-                + " proximity=" + (proximity != null)
+                + "magnetometer=" + magneticRegistered
+                + " gyroscope=" + gyroRegistered
+                + " proximity=" + proximityRegistered
                 + " microphone_recording=true";
         android.util.Log.i("FieldVox", msg);
         exportStatus.setText(msg);
@@ -2550,7 +2713,16 @@ public class MainActivity extends Activity {
     }
 
     private void requestMicPermissionForLiveMonitor() {
-        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, LIVE_PERMISSION_REQUEST);
+        if (micPermissionRequestPending || hasMicPermission()) {
+            return;
+        }
+        micPermissionRequestPending = true;
+        try {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, LIVE_PERMISSION_REQUEST);
+        } catch (RuntimeException e) {
+            micPermissionRequestPending = false;
+            throw e;
+        }
     }
 
     private static byte[] makeWavHeader(long pcmBytes) {
@@ -2696,7 +2868,7 @@ public class MainActivity extends Activity {
 
                 writeJsonLine(jsonOut,
                         "{\"event\":\"live_monitor_start\",\"mode\":\"realtime_evp_monitor\",\"sample_rate\":48000,"
-                        + "\"source\":\"microphone\",\"online_carrier\":true,\"carrier\":\"kiro_komo_local_news_talk_phonetic_sweep\",\"generated_words\":false,\"word_bank\":false,"
+                        + "\"source\":\"microphone\",\"online_carrier\":true,\"carrier\":\"native_station_ring_bounded_grains\",\"generated_words\":false,\"word_bank\":false,"
                         + "\"note\":\"actual microphone audio only; no app-generated speech\",\"unix_ms\":"
                         + startMs + "}");
 
@@ -2732,6 +2904,7 @@ public class MainActivity extends Activity {
                 if (record.getState() != AudioRecord.STATE_INITIALIZED) {
                     throw new IOException("AudioRecord failed to initialize.");
                 }
+                liveAudioRecord = record;
 
                 track = new AudioTrack.Builder()
                         .setAudioAttributes(new AudioAttributes.Builder()
@@ -2770,6 +2943,9 @@ public class MainActivity extends Activity {
                 while (liveMonitorRunning) {
                     int n = record.read(samples, 0, samples.length);
                     if (n < 0) {
+                        if (!liveMonitorRunning) {
+                            break;
+                        }
                         throw new IOException("AudioRecord read failed with code " + n + ".");
                     }
                     if (n == 0) {
@@ -2851,6 +3027,7 @@ public class MainActivity extends Activity {
                     }
                 }
 
+                flushPendingHitMarkers(jsonOut);
                 long stopMs = System.currentTimeMillis();
                 writeJsonLine(jsonOut,
                         "{\"event\":\"live_monitor_stop\",\"mode\":\"realtime_evp_monitor\",\"pcm_bytes\":"
@@ -2868,6 +3045,9 @@ public class MainActivity extends Activity {
                         record.release();
                     }
                 } catch (Exception ignored) {}
+                if (liveAudioRecord == record) {
+                    liveAudioRecord = null;
+                }
 
                 try {
                     if (track != null) {
@@ -2923,6 +3103,14 @@ public class MainActivity extends Activity {
 
     private void stopLiveMonitorAndWait() {
         liveMonitorRunning = false;
+        AudioRecord record = liveAudioRecord;
+        if (record != null) {
+            try {
+                record.stop();
+            } catch (IllegalStateException ignored) {
+                // The capture thread may already have stopped or be releasing it.
+            }
+        }
         Thread thread = liveMonitorThread;
         if (thread == null || thread == Thread.currentThread()) {
             return;
@@ -2931,6 +3119,9 @@ public class MainActivity extends Activity {
             thread.join(1500L);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+        if (thread.isAlive()) {
+            Log.w("FieldVox", "Live monitor thread did not stop within 1500 ms.");
         }
     }
 
@@ -3292,6 +3483,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 
         if (requestCode == LIVE_PERMISSION_REQUEST) {
+            micPermissionRequestPending = false;
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 handler.postDelayed(() -> autoStartEverythingOnLaunch(), 250);
             } else {

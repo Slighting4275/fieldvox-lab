@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -25,7 +26,7 @@ import java.util.Locale;
 
 public final class RadioBrowserDiscoveryCache {
     public static final String STAGE = "1Q-B";
-    public static final String USER_AGENT = "FieldVoxLab/0.1.0-stage1q-b (+https://codeberg.org/Exalted6165/fieldvox-lab)";
+    public static final String USER_AGENT = "FieldVoxLab/0.1.0 (+https://codeberg.org/Exalted6165/fieldvox-lab)";
     private static final String DNS_DISCOVERY_HOST = "all.api.radio-browser.info";
     private static final int TARGET_CATALOG_COUNT = 1000;
     private static final int TARGET_SESSION_POOL_COUNT = 64;
@@ -86,8 +87,8 @@ public final class RadioBrowserDiscoveryCache {
             String stationuuid = safeString(station, "stationuuid");
             String countrycode = safeString(station, "countrycode").toUpperCase(Locale.US);
             String name = cleanPublicText(safeString(station, "name"));
-            String url = safeString(station, "url");
-            String urlResolved = safeString(station, "url_resolved");
+            String url = safeHttpUrl(safeString(station, "url"));
+            String urlResolved = safeHttpUrl(safeString(station, "url_resolved"));
             String codec = cleanPublicText(safeString(station, "codec").toUpperCase(Locale.US));
             int lastcheckok = station.optInt("lastcheckok", 0);
             int hls = station.optInt("hls", 0);
@@ -131,9 +132,10 @@ public final class RadioBrowserDiscoveryCache {
             publicStation.put("lastcheckoktime_iso8601", cleanPublicText(safeString(station, "lastcheckoktime_iso8601")));
             publicStation.put("clickcount", station.optInt("clickcount", 0));
             publicStation.put("votes", station.optInt("votes", 0));
-            publicStation.put("homepage_host_hash", sha256Hex(hostOnly(safeString(station, "homepage"))));
-            publicStation.put("stream_url_sha256", sha256Hex(url));
-            publicStation.put("stream_url_resolved_sha256", sha256Hex(urlResolved));
+            String homepage = safeHttpUrl(safeString(station, "homepage"));
+            publicStation.put("homepage_host_hash", sha256Hex(hostOnly(homepage)));
+            publicStation.put("stream_url_sha256", url.isEmpty() ? "" : sha256Hex(url));
+            publicStation.put("stream_url_resolved_sha256", urlResolved.isEmpty() ? "" : sha256Hex(urlResolved));
             publicStation.put("raw_stream_url_exported", false);
             publicStation.put("private_cache_file", "radio_browser_station_cache_private.jsonl");
             publicCatalog.put(publicStation);
@@ -147,7 +149,7 @@ public final class RadioBrowserDiscoveryCache {
             privateStation.put("countrycode", countrycode);
             privateStation.put("url", url);
             privateStation.put("url_resolved", urlResolved);
-            privateStation.put("homepage", safeString(station, "homepage"));
+            privateStation.put("homepage", homepage);
             privateStation.put("codec", codec);
             privateStation.put("bitrate", station.optInt("bitrate", 0));
             privateStation.put("lastcheckok", lastcheckok);
@@ -239,7 +241,7 @@ public final class RadioBrowserDiscoveryCache {
         manifest.put("private_cache_file", "radio_browser_station_cache_private.jsonl");
 
         File dir = new File(context.getFilesDir(), "fieldvox-hits");
-        if (!dir.exists() && !dir.mkdirs()) {
+        if ((!dir.exists() && !dir.mkdirs()) || !dir.isDirectory()) {
             throw new IllegalStateException("Cannot create fieldvox-hits directory");
         }
 
@@ -430,6 +432,30 @@ public final class RadioBrowserDiscoveryCache {
         return t;
     }
 
+    private static String safeHttpUrl(String value) {
+        if (value == null) {
+            return "";
+        }
+        String candidate = value.trim();
+        if (candidate.isEmpty() || candidate.length() > 4096) {
+            return "";
+        }
+        try {
+            URI uri = new URI(candidate);
+            String scheme = uri.getScheme();
+            if (scheme == null
+                    || (!(scheme.equalsIgnoreCase("http")) && !(scheme.equalsIgnoreCase("https")))
+                    || uri.getHost() == null
+                    || uri.getHost().isEmpty()
+                    || uri.getUserInfo() != null) {
+                return "";
+            }
+            return candidate;
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private static String hostOnly(String url) {
         try {
             if (url == null || url.trim().isEmpty()) {
@@ -464,15 +490,22 @@ public final class RadioBrowserDiscoveryCache {
 
     private static void writeText(File file, String text) throws Exception {
         File tmp = new File(file.getParentFile(), file.getName() + ".tmp");
-        try (FileOutputStream out = new FileOutputStream(tmp, false)) {
-            out.write(text.getBytes(StandardCharsets.UTF_8));
-            out.flush();
-        }
         try {
-            Files.move(tmp.toPath(), file.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (AtomicMoveNotSupportedException e) {
-            Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            try (FileOutputStream out = new FileOutputStream(tmp, false)) {
+                out.write(text.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                out.getFD().sync();
+            }
+            try {
+                Files.move(tmp.toPath(), file.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            if (tmp.exists() && !tmp.delete()) {
+                tmp.deleteOnExit();
+            }
         }
     }
 
