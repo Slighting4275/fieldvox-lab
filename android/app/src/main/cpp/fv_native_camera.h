@@ -33,5 +33,10 @@ void fv_camera_luma_to_argb_rotated(const uint8_t *luma, int src_w, int src_h,
 int fv_camera_get_sensor_orientation(void);
 int fv_android_get_display_rotation_degrees(ANativeActivity *activity);
 int fv_camera_get_display_compensation_degrees(ANativeActivity *activity);
+bool fv_camera_set_torch(bool enable);
+bool fv_camera_is_torch_on(void);
+void fv_android_vibrate(ANativeActivity *activity, int ms);
+void fv_android_vibrate_double(ANativeActivity *activity);
+void fv_android_open_file(ANativeActivity *activity, const char *path, const char *mime_type);
 
 #endif

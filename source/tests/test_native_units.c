@@ -109,6 +109,11 @@ typedef enum {
     TEST_W_COOL_DOWN, TEST_W_COOL_UP,
     TEST_W_MARK_HIT, TEST_W_CAM_PREVIEW,
     TEST_W_VIDEO_REC, TEST_W_CAM_TINT, TEST_W_CLOSE_DRAWER,
+    TEST_W_TORCH, TEST_W_HELP, TEST_W_MUTE,
+    TEST_W_SENS_LOW, TEST_W_SENS_MED, TEST_W_SENS_HIGH, TEST_W_COOL_CYCLE,
+    TEST_W_EVIDENCE_OPEN_0, TEST_W_EVIDENCE_OPEN_1,
+    TEST_W_EVIDENCE_OPEN_2, TEST_W_EVIDENCE_OPEN_3,
+    TEST_W_CLOSE_EVIDENCE, TEST_W_CLOSE_HELP,
     TEST_W_COUNT
 } TestWidgetId;
 
@@ -500,7 +505,7 @@ int main(void) {
     /* 11. Verify GUI widget layout invariants, bounding boxes, dock isolation, and tap hit resolution */
     {
         assert(TEST_W_CAL == 0);
-        assert(TEST_W_COUNT == 28);
+        assert(TEST_W_COUNT == 41);
 
         /* Test across various display configurations:
          * 1) Standard portrait: 1080x2400, density 2.625
@@ -630,16 +635,14 @@ int main(void) {
 
             /* Row 4: Sensitivity & Cooldown */
             float r4_y = cur_y + (pill_h + d_gap) * 3.0f;
-            const float step_w = 44.0f * d;
-            const float val_w = (ui_w - step_w * 4.0f - d_gap * 5.0f - 16.0f * d) * 0.5f;
             float px4 = ui_x0 + 8.0f * d;
-            widgets[TEST_W_SENS_DOWN] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
-            px4 += step_w + d_gap + val_w + d_gap;
-            widgets[TEST_W_SENS_UP] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
-            px4 += step_w + d_gap;
-            widgets[TEST_W_COOL_DOWN] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
-            px4 += step_w + d_gap + val_w + d_gap;
-            widgets[TEST_W_COOL_UP] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
+            widgets[TEST_W_SENS_LOW] = (TestWidgetRect){px4, r4_y, p4_w, pill_h, true};
+            px4 += p4_w + d_gap;
+            widgets[TEST_W_SENS_MED] = (TestWidgetRect){px4, r4_y, p4_w, pill_h, true};
+            px4 += p4_w + d_gap;
+            widgets[TEST_W_SENS_HIGH] = (TestWidgetRect){px4, r4_y, p4_w, pill_h, true};
+            px4 += p4_w + d_gap;
+            widgets[TEST_W_COOL_CYCLE] = (TestWidgetRect){px4, r4_y, p4_w, pill_h, true};
 
             /* Row 5: Audio Session & Recording Tools */
             float r5_y = cur_y + (pill_h + d_gap) * 4.0f;
@@ -656,10 +659,10 @@ int main(void) {
             assert(!widgets[TEST_W_CAM_PREVIEW].visible);
 
             /* Tap tests on drawer buttons must resolve to the drawer buttons, not W_CAM_PREVIEW */
-            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_DOWN].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_DOWN);
-            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_UP].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_UP);
-            assert(test_resolve_tap(widgets, widgets[TEST_W_COOL_DOWN].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_COOL_DOWN);
-            assert(test_resolve_tap(widgets, widgets[TEST_W_COOL_UP].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_COOL_UP);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_LOW].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_LOW);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_MED].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_MED);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_HIGH].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_HIGH);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_COOL_CYCLE].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_COOL_CYCLE);
             assert(test_resolve_tap(widgets, widgets[TEST_W_MIC].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_MIC);
             assert(test_resolve_tap(widgets, widgets[TEST_W_REC].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_REC);
             assert(test_resolve_tap(widgets, widgets[TEST_W_VIDEO_REC].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_VIDEO_REC);

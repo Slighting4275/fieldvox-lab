@@ -34,6 +34,9 @@ The user interface follows a GhostTube VOX-inspired camera workstation layout wi
 | `MARK HIT` | Bottom Left | Instantly flushes preceding 3 seconds from the 48 kHz ring buffer to a timestamped WAV hit file. |
 | `LENS` (`PHOSPHOR` / `THERMAL` / etc.) | Bottom Right | Cycles spectral camera filters (Night Vision Green, Heat Map Thermal, Twilight Cyan, Stealth OLED, Off). |
 | `SETTINGS` | Bottom Right | Slides open the DSP & investigation parameter drawer. |
+| `MUTE` / `MUTED` | Top HUD | Silences speaker monitoring immediately while the live sweep keeps buffering and WAV/MP4 capture continues. |
+| `TORCH` | Top HUD | Toggles the rear-camera flashlight without interrupting the viewfinder or an active recording. |
+| `?` | Top HUD | Opens the in-app field guide for the primary controls, sensor badges, recording, and safe-use guidance. |
 | **EMF Meter Badge** | **Top HUD Left** | Tapping the EMF meter badge directly zero-calibrates the magnetometer baseline. |
 | **Environment Badge** | **Top HUD Right** | Tapping the environment telemetry badge toggles REM-POD mode. |
 | `CAL ZERO` | Drawer | Re-zeros magnetometer and barometric baseline references. |
@@ -48,8 +51,13 @@ The user interface follows a GhostTube VOX-inspired camera workstation layout wi
 | `REMPOD` | Drawer | Toggles proximity/EMF audio alert synth. |
 | `3D PAN` | Drawer | Toggles compass-based stereo panning. |
 | `ESTES` | Drawer | Enters blind listener mode with tap-to-mark hit logging. |
+| `SENS LOW` / `MED` / `HIGH` | Drawer | Selects named EMF trigger presets for noisy rooms (3.00 µT), general indoor use (1.65 µT), or quiet environments (0.75 µT). |
+| `COOL` | Drawer | Cycles the sensor trigger cooldown through 250, 450, and 900 ms. |
 | `SESS WAV` | Drawer | Toggles continuous background WAV logging. |
 | `VID MP4` | Drawer | Toggles H.264 + AAC MP4 video recording directly from drawer. |
+| `EVIDENCE` | Drawer | Opens the four most recent WAV/MP4 captures with timestamp and file size; `OPEN` publishes the item once to `Music/FieldVox` or `Movies/FieldVox` through Android MediaStore, then hands its readable `content://` URI to an installed viewer. |
+
+Every control provides a short haptic confirmation. `MARK HIT` provides a distinct double pulse and a temporary `HIT SAVED` counter in the viewfinder; sensor alerts are rate-limited so they remain useful without constant vibration.
 
 ## Media Specifications
 
