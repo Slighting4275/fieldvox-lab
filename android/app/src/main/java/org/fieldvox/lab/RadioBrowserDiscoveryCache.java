@@ -158,7 +158,8 @@ public final class RadioBrowserDiscoveryCache {
             privateCatalog.put(privateStation);
         }
 
-        if (publicCatalog.length() < 500) {
+        int minAcceptable = minimumAcceptableCatalogCount(catalogTarget);
+        if (publicCatalog.length() < minAcceptable) {
             throw new IllegalStateException("Radio Browser vetted catalog count too low: " + publicCatalog.length());
         }
 
@@ -252,6 +253,10 @@ public final class RadioBrowserDiscoveryCache {
         writeText(new File(dir, "RADIO_BROWSER_CACHE_README.txt"), readmeText());
 
         return sourceSlots;
+    }
+
+    static int minimumAcceptableCatalogCount(int catalogTarget) {
+        return Math.min(500, Math.max(1, catalogTarget / 2));
     }
 
     private static JSONArray buildSessionPool(JSONArray publicCatalog, int sessionPoolTarget) throws Exception {

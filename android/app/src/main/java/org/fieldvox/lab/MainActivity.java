@@ -141,7 +141,10 @@ public class MainActivity extends Activity {
 
 
     static {
-        System.loadLibrary("fieldvox");
+        try {
+            System.loadLibrary("fieldvox");
+        } catch (UnsatisfiedLinkError ignored) {
+        }
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -542,7 +545,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private int countTriggerEvents(File jsonl) {
+    static int countTriggerEvents(File jsonl) {
         int count = 0;
         try (java.io.BufferedReader br = new java.io.BufferedReader(
                 new java.io.InputStreamReader(
@@ -550,7 +553,7 @@ public class MainActivity extends Activity {
                         java.nio.charset.StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                if (line.contains("\"event\":\"trigger\"")) {
+                if (line.contains("\"event\":\"trigger\"") || line.contains("\"type\":\"trigger\"")) {
                     count += 1;
                 }
             }
@@ -1116,10 +1119,9 @@ public class MainActivity extends Activity {
         return true;
     }
 
-    private static boolean isSafeSessionStem(String value) {
+    static boolean isSafeSessionStem(String value) {
         return isSafeArtifactComponent(value, 160)
-                && value.startsWith("session-")
-                && value.endsWith("-live");
+                && value.startsWith("session-");
     }
 
     private static String tsvCell(String value) {
@@ -2180,23 +2182,6 @@ public class MainActivity extends Activity {
                         stage1KBeautifyTree(root);
                         stage1KHideOldStatusText(root);
                         stage1KMakeExportStatusTinyNumberBox(number);
-                        if (root != null) {
-                            for (int delay = 120; delay <= 3600; delay += 240) {
-                                final int d = delay;
-                                root.postDelayed(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        try {
-                                            android.view.View r = getWindow() != null ? getWindow().getDecorView() : null;
-                                            stage1KBeautifyTree(r);
-                                            stage1KHideOldStatusText(r);
-                                            stage1KMakeExportStatusTinyNumberBox(number);
-                                        } catch (Throwable ignored) {
-                                        }
-                                    }
-                                }, d);
-                            }
-                        }
                     } catch (Throwable t) {
                         android.util.Log.w("FieldVox", "Stage 1U-K tiny channel GUI failed: " + t);
                     }
