@@ -198,13 +198,19 @@ Ghost boxes sweep across radio channels at rapid speeds. FieldVox Lab gives you 
 
 The sweep bar includes real-time audio processing buttons that illuminate neon-green when active:
 - **ECHO**: Adds a circular delay feedback (~150ms) to create an atmospheric reverb chamber.
+- **REVERB**: Native Schroeder Reverb combining 4 parallel feedback comb filters (1399, 1777, 1973, 2087 samples) and 2 series all-pass diffusion filters.
+- **PITCH**: Real-time granular pitch shifter cycling between -2 semitones (dark/sub-harmonic), +2 semitones (formant lift), and neutral bypass.
 - **NOISE**: Blends in calibrated white noise. In traditional ITC research, sensory noise floors are believed to assist auditory focus or sensory deprivation.
 - **REV**: Reverses audio buffers in real time. Playing radio snippets backward helps prevent "audio pareidolia" — your brain mistakenly hearing English words from ordinary forward speech.
+- **CAL ZERO**: One-tap sensor baseline auto-nulling. Compensates for room wiring and ambient electromagnetic interference so deviations reflect local changes.
+- **VIBE GEOPHONE**: High-pass filtered 3-axis accelerometer detecting mechanical table raps, floor footsteps, and seismic vibrations ($\ge 0.45\text{ m/s}^2$).
+- **2D FFT WATERFALL SPECTROGRAM**: Real-time 256-point radix-2 FFT waterfall frequency heatmap ($0\text{ Hz} - 8000\text{ Hz}$) with log-magnitude compression and bilinear filtering, displaying speech formants as glowing spectral signatures.
+- **3-SECOND PRE-ROLL AUDIO BUFFER**: 5-second circular PCM ring buffer in native memory. When MARK HIT is tapped, the 3 seconds prior to the tap are exported into an exact 16-bit 48kHz mono RIFF WAVE file (`-preroll.wav`) capturing the phrase before human reaction delay.
 
 ### What the expanded station pool means
 
 Earlier builds only cycled through 4 seed stations. Stage 1U-P expands the radio pool to **64 to 128 active stations**:
-- A curated seed list of 64 diverse public, talk, and news feeds in native C.
+- A curated seed list of 64 diverse public, talk, and news feeds in native C and packed binary Zig blob.
 - Background integration with the public RadioBrowser catalog (`all.api.radio-browser.info`), assembling an active session pool of up to 128 verified spoken-word stations.
 
 ## For technical people: what the app does

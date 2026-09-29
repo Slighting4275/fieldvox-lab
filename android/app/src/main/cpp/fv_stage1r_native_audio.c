@@ -595,12 +595,97 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1SCNoteLegacyCarrierBlocked(JNIEnv
     }
 }
 
-// NATIVE AUDIO DSP ENGINE (C)
-// Replaces Java loops for sample boost, byte packing, echo, reverse, white noise, and peak/RMS tracking
+// NATIVE AUDIO DSP & SPECTROGRAM ENGINE (C)
+// Full Suite: 256-point FFT waterfall, Schroeder Reverb, Granular Pitch Shift, Pre-roll Ring Buffer
 #define FV_DSP_ECHO_DELAY_SAMPLES (48000 * 150 / 1000) // 7200 samples (150ms @ 48kHz)
 static int16_t s_native_echo_buffer[FV_DSP_ECHO_DELAY_SAMPLES];
 static uint32_t s_native_echo_index = 0;
 static uint64_t s_native_noise_prng = 0x854351239ULL;
+
+/* 5-second Pre-roll Ring Buffer for instant, zero-latency hit marking */
+#define FV_PREROLL_SECONDS 5
+#define FV_PREROLL_SAMPLES (48000 * FV_PREROLL_SECONDS)
+static int16_t s_preroll_ring[FV_PREROLL_SAMPLES];
+static uint32_t s_preroll_write = 0;
+
+/* Schroeder Reverb (4 parallel comb filters + 2 series allpass filters) */
+#define FV_REV_C1 1399
+#define FV_REV_C2 1777
+#define FV_REV_C3 1973
+#define FV_REV_C4 2087
+#define FV_REV_A1 241
+#define FV_REV_A2 83
+static int16_t s_rev_c1[FV_REV_C1];
+static int16_t s_rev_c2[FV_REV_C2];
+static int16_t s_rev_c3[FV_REV_C3];
+static int16_t s_rev_c4[FV_REV_C4];
+static int16_t s_rev_a1[FV_REV_A1];
+static int16_t s_rev_a2[FV_REV_A2];
+static uint32_t s_rev_ic1 = 0, s_rev_ic2 = 0, s_rev_ic3 = 0, s_rev_ic4 = 0;
+static uint32_t s_rev_ia1 = 0, s_rev_ia2 = 0;
+
+/* Granular Pitch Shifter (+/- 3 semitones) */
+#define FV_PITCH_BUF_SIZE 4096
+static int16_t s_pitch_buf[FV_PITCH_BUF_SIZE];
+static uint32_t s_pitch_write = 0;
+static float s_pitch_read = 0.0f;
+
+/* Real-Time Radix-2 FFT (256 points) for 2D Waterfall Spectrogram */
+#define FV_FFT_SIZE 256
+#define FV_SPEC_BINS 64
+static float s_fft_re[FV_FFT_SIZE];
+static float s_fft_im[FV_FFT_SIZE];
+static int16_t s_fft_acc[FV_FFT_SIZE];
+static int s_fft_acc_count = 0;
+static float s_latest_spec_bins[FV_SPEC_BINS];
+static float s_hanning[FV_FFT_SIZE];
+static int s_hanning_inited = 0;
+
+static void fv_init_hanning(void) {
+    if (s_hanning_inited) return;
+    for (int i = 0; i < FV_FFT_SIZE; i++) {
+        s_hanning[i] = 0.5f * (1.0f - cosf((float)(2.0 * M_PI * i / (FV_FFT_SIZE - 1))));
+    }
+    s_hanning_inited = 1;
+}
+
+static void fv_radix2_fft(float *re, float *im, int n) {
+    int j = 0;
+    for (int i = 0; i < n - 1; i++) {
+        if (i < j) {
+            float tr = re[i]; re[i] = re[j]; re[j] = tr;
+            float ti = im[i]; im[i] = im[j]; im[j] = ti;
+        }
+        int k = n >> 1;
+        while (k <= j) {
+            j -= k;
+            k >>= 1;
+        }
+        j += k;
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        float angle = -2.0f * (float)M_PI / (float)len;
+        float wlen_r = cosf(angle);
+        float wlen_i = sinf(angle);
+        for (int i = 0; i < n; i += len) {
+            float w_r = 1.0f;
+            float w_i = 0.0f;
+            for (int k = 0; k < len / 2; k++) {
+                float u_r = re[i + k];
+                float u_i = im[i + k];
+                float v_r = re[i + k + len / 2] * w_r - im[i + k + len / 2] * w_i;
+                float v_i = re[i + k + len / 2] * w_i + im[i + k + len / 2] * w_r;
+                re[i + k] = u_r + v_r;
+                im[i + k] = u_i + v_i;
+                re[i + k + len / 2] = u_r - v_r;
+                im[i + k + len / 2] = u_i - v_i;
+                float next_w_r = w_r * wlen_r - w_i * wlen_i;
+                w_i = w_r * wlen_i + w_i * wlen_r;
+                w_r = next_w_r;
+            }
+        }
+    }
+}
 
 JNIEXPORT void JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeResetAudioDsp(JNIEnv *env, jobject thiz) {
@@ -609,6 +694,86 @@ Java_org_fieldvox_lab_MainActivity_nativeResetAudioDsp(JNIEnv *env, jobject thiz
     memset(s_native_echo_buffer, 0, sizeof(s_native_echo_buffer));
     s_native_echo_index = 0;
     s_native_noise_prng = 0x854351239ULL;
+    memset(s_preroll_ring, 0, sizeof(s_preroll_ring));
+    s_preroll_write = 0;
+    memset(s_rev_c1, 0, sizeof(s_rev_c1));
+    memset(s_rev_c2, 0, sizeof(s_rev_c2));
+    memset(s_rev_c3, 0, sizeof(s_rev_c3));
+    memset(s_rev_c4, 0, sizeof(s_rev_c4));
+    memset(s_rev_a1, 0, sizeof(s_rev_a1));
+    memset(s_rev_a2, 0, sizeof(s_rev_a2));
+    memset(s_pitch_buf, 0, sizeof(s_pitch_buf));
+    s_pitch_write = 0;
+    s_pitch_read = 0.0f;
+    s_fft_acc_count = 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeGetSpectrogramColumn(JNIEnv *env, jobject thiz, jfloatArray j_out) {
+    (void)thiz;
+    if (!j_out) return JNI_FALSE;
+    (*env)->SetFloatArrayRegion(env, j_out, 0, FV_SPEC_BINS, s_latest_spec_bins);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeExportPreRollWav(JNIEnv *env, jobject thiz, jstring j_path, jint pre_seconds) {
+    (void)thiz;
+    if (!j_path) return JNI_FALSE;
+    const char *path = (*env)->GetStringUTFChars(env, j_path, NULL);
+    if (!path) return JNI_FALSE;
+
+    int seconds = pre_seconds <= 0 ? 3 : (pre_seconds > FV_PREROLL_SECONDS ? FV_PREROLL_SECONDS : pre_seconds);
+    uint32_t sample_count = (uint32_t)(seconds * 48000);
+    uint32_t pcm_bytes = sample_count * 2;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        (*env)->ReleaseStringUTFChars(env, j_path, path);
+        return JNI_FALSE;
+    }
+
+    uint8_t header[44];
+    uint32_t riff_size = pcm_bytes + 36;
+    uint32_t sample_rate = 48000;
+    uint16_t channels = 1;
+    uint16_t bits = 16;
+    uint32_t byte_rate = sample_rate * channels * (bits / 8);
+    uint16_t block_align = channels * (bits / 8);
+
+    memcpy(&header[0], "RIFF", 4);
+    header[4] = (uint8_t)(riff_size & 0xff); header[5] = (uint8_t)((riff_size >> 8) & 0xff);
+    header[6] = (uint8_t)((riff_size >> 16) & 0xff); header[7] = (uint8_t)((riff_size >> 24) & 0xff);
+    memcpy(&header[8], "WAVE", 4);
+    memcpy(&header[12], "fmt ", 4);
+    header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0;
+    header[20] = 1; header[21] = 0;
+    header[22] = (uint8_t)(channels & 0xff); header[23] = 0;
+    header[24] = (uint8_t)(sample_rate & 0xff); header[25] = (uint8_t)((sample_rate >> 8) & 0xff);
+    header[26] = (uint8_t)((sample_rate >> 16) & 0xff); header[27] = (uint8_t)((sample_rate >> 24) & 0xff);
+    header[28] = (uint8_t)(byte_rate & 0xff); header[29] = (uint8_t)((byte_rate >> 8) & 0xff);
+    header[30] = (uint8_t)((byte_rate >> 16) & 0xff); header[31] = (uint8_t)((byte_rate >> 24) & 0xff);
+    header[32] = (uint8_t)(block_align & 0xff); header[33] = 0;
+    header[34] = (uint8_t)(bits & 0xff); header[35] = 0;
+    memcpy(&header[36], "data", 4);
+    header[40] = (uint8_t)(pcm_bytes & 0xff); header[41] = (uint8_t)((pcm_bytes >> 8) & 0xff);
+    header[42] = (uint8_t)((pcm_bytes >> 16) & 0xff); header[43] = (uint8_t)((pcm_bytes >> 24) & 0xff);
+
+    fwrite(header, 1, 44, f);
+
+    // Read circular buffer backwards
+    uint32_t start_idx = (s_preroll_write + FV_PREROLL_SAMPLES - sample_count) % FV_PREROLL_SAMPLES;
+    for (uint32_t i = 0; i < sample_count; i++) {
+        int16_t s = s_preroll_ring[(start_idx + i) % FV_PREROLL_SAMPLES];
+        uint8_t b[2];
+        b[0] = (uint8_t)(s & 0xff);
+        b[1] = (uint8_t)((s >> 8) & 0xff);
+        fwrite(b, 1, 2, f);
+    }
+    fclose(f);
+
+    (*env)->ReleaseStringUTFChars(env, j_path, path);
+    return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL
@@ -622,6 +787,8 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
         jboolean reverse_enabled,
         jboolean echo_enabled,
         jboolean noise_enabled,
+        jboolean reverb_enabled,
+        jint pitch_shift,
         jfloat boost_factor,
         jfloatArray j_metrics) {
     (void)thiz;
@@ -633,6 +800,8 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
     jbyte *pcm = j_pcm ? (*env)->GetByteArrayElements(env, j_pcm, NULL) : NULL;
     jshort *monitor = j_monitor ? (*env)->GetShortArrayElements(env, j_monitor, NULL) : NULL;
 
+    fv_init_hanning();
+
     int32_t peak = 0;
     uint64_t sum_squares = 0;
 
@@ -641,6 +810,32 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
         int32_t av = raw < 0 ? -raw : raw;
         if (av > peak) peak = av;
         sum_squares += (uint64_t)((int64_t)raw * (int64_t)raw);
+
+        // Pre-roll ring buffer recording
+        s_preroll_ring[s_preroll_write] = raw;
+        s_preroll_write = (s_preroll_write + 1) % FV_PREROLL_SAMPLES;
+
+        // FFT accumulator
+        s_fft_acc[s_fft_acc_count++] = raw;
+        if (s_fft_acc_count >= FV_FFT_SIZE) {
+            for (int k = 0; k < FV_FFT_SIZE; k++) {
+                s_fft_re[k] = (float)s_fft_acc[k] * s_hanning[k];
+                s_fft_im[k] = 0.0f;
+            }
+            fv_radix2_fft(s_fft_re, s_fft_im, FV_FFT_SIZE);
+
+            // Compute 64 spectral bins (0 Hz to ~8000 Hz)
+            for (int b = 0; b < FV_SPEC_BINS; b++) {
+                float r = s_fft_re[b];
+                float im = s_fft_im[b];
+                float mag = sqrtf(r * r + im * im) / 32768.0f;
+                // Log compression for visual clarity
+                float log_mag = log1pf(mag * 12.0f) / 2.5f;
+                if (log_mag > 1.0f) log_mag = 1.0f;
+                s_latest_spec_bins[b] = s_latest_spec_bins[b] * 0.4f + log_mag * 0.6f;
+            }
+            s_fft_acc_count = 0;
+        }
 
         if (pcm) {
             pcm[i * 2] = (jbyte)(raw & 0xff);
@@ -664,6 +859,20 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
             }
         }
 
+        // Granular Pitch Shift
+        if (pitch_shift != 0) {
+            float step = pitch_shift > 0 ? 1.1892f : 0.8409f;
+            for (jint i = 0; i < count; i++) {
+                s_pitch_buf[s_pitch_write] = monitor[i];
+                s_pitch_write = (s_pitch_write + 1) % FV_PITCH_BUF_SIZE;
+
+                s_pitch_read += step;
+                if (s_pitch_read >= FV_PITCH_BUF_SIZE) s_pitch_read -= FV_PITCH_BUF_SIZE;
+                int r_idx = (int)s_pitch_read;
+                monitor[i] = s_pitch_buf[r_idx];
+            }
+        }
+
         if (echo_enabled) {
             for (jint i = 0; i < count; i++) {
                 int16_t delayed = s_native_echo_buffer[s_native_echo_index];
@@ -681,10 +890,51 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
             }
         }
 
+        // Schroeder Reverb (4 parallel comb filters + 2 series allpass filters)
+        if (reverb_enabled) {
+            for (jint i = 0; i < count; i++) {
+                int32_t in_val = monitor[i];
+
+                // 4 Comb filters
+                int32_t c1_out = s_rev_c1[s_rev_ic1];
+                s_rev_c1[s_rev_ic1] = (int16_t)(in_val + (c1_out * 78 / 100));
+                s_rev_ic1 = (s_rev_ic1 + 1) % FV_REV_C1;
+
+                int32_t c2_out = s_rev_c2[s_rev_ic2];
+                s_rev_c2[s_rev_ic2] = (int16_t)(in_val + (c2_out * 78 / 100));
+                s_rev_ic2 = (s_rev_ic2 + 1) % FV_REV_C2;
+
+                int32_t c3_out = s_rev_c3[s_rev_ic3];
+                s_rev_c3[s_rev_ic3] = (int16_t)(in_val + (c3_out * 78 / 100));
+                s_rev_ic3 = (s_rev_ic3 + 1) % FV_REV_C3;
+
+                int32_t c4_out = s_rev_c4[s_rev_ic4];
+                s_rev_c4[s_rev_ic4] = (int16_t)(in_val + (c4_out * 78 / 100));
+                s_rev_ic4 = (s_rev_ic4 + 1) % FV_REV_C4;
+
+                int32_t comb_sum = (c1_out + c2_out + c3_out + c4_out) / 4;
+
+                // 2 Allpass filters
+                int32_t a1_delayed = s_rev_a1[s_rev_ia1];
+                int32_t a1_out = -comb_sum * 65 / 100 + a1_delayed;
+                s_rev_a1[s_rev_ia1] = (int16_t)(comb_sum + (a1_out * 65 / 100));
+                s_rev_ia1 = (s_rev_ia1 + 1) % FV_REV_A1;
+
+                int32_t a2_delayed = s_rev_a2[s_rev_ia2];
+                int32_t a2_out = -a1_out * 65 / 100 + a2_delayed;
+                s_rev_a2[s_rev_ia2] = (int16_t)(a1_out + (a2_out * 65 / 100));
+                s_rev_ia2 = (s_rev_ia2 + 1) % FV_REV_A2;
+
+                int32_t wet = in_val * 60 / 100 + a2_out * 40 / 100;
+                if (wet > 32767) wet = 32767;
+                if (wet < -32768) wet = -32768;
+                monitor[i] = (int16_t)wet;
+            }
+        }
+
         if (noise_enabled) {
             for (jint i = 0; i < count; i++) {
                 s_native_noise_prng = s_native_noise_prng * 6364136223846793005ULL + 1442695040888963407ULL;
-                // noise in range [-700, 700]
                 int32_t noise = (int32_t)(((int64_t)(s_native_noise_prng >> 33) * 1400LL) / 2147483648LL) - 700;
                 int32_t mixed = (int32_t)monitor[i] + noise;
                 if (mixed > 32767) mixed = 32767;

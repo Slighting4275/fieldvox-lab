@@ -904,11 +904,24 @@ Java_org_fieldvox_lab_MainActivity_nativeStatus(JNIEnv *env, jobject) {
 
 static std::atomic<float> g_telemetry_mag_baseline{-1.0f};
 static std::atomic<float> g_telemetry_gyro_baseline{-1.0f};
+static std::atomic<float> g_telemetry_mag_cal_offset{0.0f};
+static float s_accel_gx = 0.0f;
+static float s_accel_gy = 0.0f;
+static float s_accel_gz = 9.8f;
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeResetSensorTelemetry(JNIEnv *, jobject) {
     g_telemetry_mag_baseline.store(-1.0f, std::memory_order_relaxed);
     g_telemetry_gyro_baseline.store(-1.0f, std::memory_order_relaxed);
+    g_telemetry_mag_cal_offset.store(0.0f, std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeCalibrateSensors(JNIEnv *, jobject) {
+    float cur_baseline = g_telemetry_mag_baseline.load(std::memory_order_relaxed);
+    if (cur_baseline > 0.0f) {
+        g_telemetry_mag_cal_offset.store(cur_baseline, std::memory_order_relaxed);
+    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -936,16 +949,32 @@ Java_org_fieldvox_lab_MainActivity_nativeUpdateSensorTelemetry(
     int active_segs = 1;
     int status_level = 0; // 0=BASELINE, 1=FLUCTUATING, 2=ELEVATED, 3=SPIKE DETECTED
 
-    if (sensor_type == 2) { // TYPE_MAGNETIC_FIELD
+    if (sensor_type == 1) { // TYPE_ACCELEROMETER (Geophone / Seismograph Vibration)
+        s_accel_gx = s_accel_gx * 0.92f + x * 0.08f;
+        s_accel_gy = s_accel_gy * 0.92f + y * 0.08f;
+        s_accel_gz = s_accel_gz * 0.92f + z * 0.08f;
+        float vx = x - s_accel_gx;
+        float vy = y - s_accel_gy;
+        float vz = z - s_accel_gz;
+        float vibe = std::sqrt(vx * vx + vy * vy + vz * vz);
+        delta = vibe;
+        baseline = 0.0f;
+        is_spike = vibe >= 0.45f; // Table knock / seismic vibration threshold
+        active_segs = std::min(10, std::max(1, static_cast<int>(vibe * 12.0f)));
+        status_level = is_spike ? 3 : (vibe > 0.25f ? 2 : (vibe > 0.10f ? 1 : 0));
+    } else if (sensor_type == 2) { // TYPE_MAGNETIC_FIELD
+        float cal = g_telemetry_mag_cal_offset.load(std::memory_order_relaxed);
+        float net_mag = std::max(0.0f, mag - cal);
+
         float prev_baseline = g_telemetry_mag_baseline.load(std::memory_order_relaxed);
         if (prev_baseline < 0.0f) {
-            g_telemetry_mag_baseline.store(mag, std::memory_order_relaxed);
-            baseline = mag;
+            g_telemetry_mag_baseline.store(net_mag, std::memory_order_relaxed);
+            baseline = net_mag;
             delta = 0.0f;
         } else {
-            baseline = prev_baseline * 0.985f + mag * 0.015f;
+            baseline = prev_baseline * 0.985f + net_mag * 0.015f;
             g_telemetry_mag_baseline.store(baseline, std::memory_order_relaxed);
-            delta = std::fabs(mag - baseline);
+            delta = std::fabs(net_mag - baseline);
         }
 
         const float spike_threshold = std::max(2.10f, threshold_val * 0.90f);
@@ -978,14 +1007,16 @@ Java_org_fieldvox_lab_MainActivity_nativeUpdateSensorTelemetry(
     }
 
     if (j_out != nullptr) {
-        jfloat out_buf[6];
+        jsize len = env->GetArrayLength(j_out);
+        jfloat out_buf[7];
         out_buf[0] = mag;
         out_buf[1] = delta;
         out_buf[2] = baseline;
         out_buf[3] = is_spike ? 1.0f : 0.0f;
         out_buf[4] = static_cast<float>(active_segs);
         out_buf[5] = static_cast<float>(status_level);
-        env->SetFloatArrayRegion(j_out, 0, 6, out_buf);
+        out_buf[6] = g_telemetry_mag_cal_offset.load(std::memory_order_relaxed);
+        env->SetFloatArrayRegion(j_out, 0, std::min((jsize)7, len), out_buf);
     }
 
     return is_spike ? JNI_TRUE : JNI_FALSE;

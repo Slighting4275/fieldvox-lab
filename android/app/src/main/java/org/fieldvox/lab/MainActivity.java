@@ -29,7 +29,9 @@ import android.net.Uri;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Bitmap;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -118,8 +120,14 @@ public class MainActivity extends Activity {
             boolean reverseEnabled,
             boolean echoEnabled,
             boolean noiseEnabled,
+            boolean reverbEnabled,
+            int pitchShiftSemitones,
             float boostFactor,
             float[] metrics);
+
+    private native boolean nativeGetSpectrogramColumn(float[] outBins);
+    private native boolean nativeExportPreRollWav(String path, int preSeconds);
+    private native void nativeCalibrateSensors();
 
     private native void nativeResetSensorTelemetry();
     private native boolean nativeUpdateSensorTelemetry(
@@ -221,12 +229,18 @@ public class MainActivity extends Activity {
     private volatile boolean userEchoFxEnabled = false;
     private volatile boolean userWhiteNoiseEnabled = false;
     private volatile boolean userReverseAudioEnabled = false;
+    private volatile boolean userReverbEnabled = false;
+    private volatile int userPitchShiftSemitones = 0; // -1, 0, 1
 
     private Button sweepCadenceButton;
     private Button sweepDirectionButton;
     private Button audioFxEchoButton;
     private Button audioNoiseButton;
     private Button audioRevButton;
+    private Button audioReverbButton;
+    private Button audioPitchButton;
+    private Button calZeroButton;
+    private final float[] liveSpectrogramColumn = new float[64];
 
     // FIELDVOX_STAGE1Q_C_VISIBLE_SOURCE_CATALOG
     private android.widget.Button liveSourcesButton;
@@ -436,6 +450,57 @@ public class MainActivity extends Activity {
     private void toggleAudioRev() {
         userReverseAudioEnabled = !userReverseAudioEnabled;
         updateFxButtonState(audioRevButton, userReverseAudioEnabled, "REV");
+    }
+
+    private void toggleAudioReverb() {
+        userReverbEnabled = !userReverbEnabled;
+        updateFxButtonState(audioReverbButton, userReverbEnabled, "REVERB");
+    }
+
+    private void cycleAudioPitch() {
+        if (userPitchShiftSemitones == 0) {
+            userPitchShiftSemitones = -2;
+            if (audioPitchButton != null) {
+                audioPitchButton.setText("-2st");
+                audioPitchButton.setTextColor(0xFF6FE7FF);
+                audioPitchButton.setBackground(stage1KRoundRect(0xFF0C1F2D, 0xFF6FE7FF, 8.0f, 1));
+            }
+        } else if (userPitchShiftSemitones == -2) {
+            userPitchShiftSemitones = 2;
+            if (audioPitchButton != null) {
+                audioPitchButton.setText("+2st");
+                audioPitchButton.setTextColor(0xFFFF80AB);
+                audioPitchButton.setBackground(stage1KRoundRect(0xFF2E0D1B, 0xFFFF80AB, 8.0f, 1));
+            }
+        } else {
+            userPitchShiftSemitones = 0;
+            if (audioPitchButton != null) {
+                audioPitchButton.setText("PITCH");
+                audioPitchButton.setTextColor(0xFFE8F7FF);
+                audioPitchButton.setBackground(stage1KRoundRect(0xFF101622, 0xFF384E6C, 8.0f, 1));
+            }
+        }
+    }
+
+    private void triggerSensorCalibration() {
+        try {
+            nativeCalibrateSensors();
+            if (emfMeterView != null) {
+                emfMeterView.showCalibrationFlash();
+            }
+            if (calZeroButton != null) {
+                calZeroButton.setText("CAL: OK");
+                calZeroButton.setTextColor(0xFF00E676);
+                handler.postDelayed(() -> {
+                    if (calZeroButton != null) {
+                        calZeroButton.setText("CAL ZERO");
+                        calZeroButton.setTextColor(0xFFE8F7FF);
+                    }
+                }, 1200L);
+            }
+        } catch (Throwable t) {
+            Log.w("FieldVox", "Sensor calibration failed: " + t);
+        }
     }
 
     private void autoDiscoverSourcesIfNeeded() {
@@ -1092,6 +1157,13 @@ public class MainActivity extends Activity {
         File dir = hitMarkerDir();
         File hitJson = new File(dir, hitId + ".json");
         File hitJsonl = new File(dir, "fieldvox-hit-events.jsonl");
+        File hitPreRollWav = new File(dir, hitId + "-preroll.wav");
+
+        try {
+            nativeExportPreRollWav(hitPreRollWav.getAbsolutePath(), 3);
+        } catch (Throwable preRollThrowable) {
+            Log.w("FieldVox", "Native pre-roll WAV export failed: " + preRollThrowable);
+        }
 
         try {
             writeTextFile(hitJson, jsonLine + "\n");
@@ -1989,8 +2061,30 @@ public class MainActivity extends Activity {
                 long now = System.currentTimeMillis();
                 int type = event.sensor.getType();
 
+                if (type == Sensor.TYPE_ACCELEROMETER && event.values.length >= 3) {
+                    float[] telemetry = new float[7];
+                    boolean isSpike = nativeUpdateSensorTelemetry(
+                            type,
+                            event.values[0],
+                            event.values[1],
+                            event.values[2],
+                            threshold,
+                            telemetry
+                    );
+                    float vibe = telemetry[1];
+                    if (emfMeterView != null) {
+                        emfMeterView.updateVibe(vibe, isSpike);
+                    }
+                    if (onlineCarrierActive && isSpike
+                            && now >= onlineCarrierNextAllowedGateMs
+                            && now - onlineCarrierLastGateMs >= Math.max(1600, cooldownMs + 1000)) {
+                        openOnlineCarrierGate("vibe_geophone", vibe);
+                    }
+                    return;
+                }
+
                 if (type == Sensor.TYPE_MAGNETIC_FIELD && event.values.length >= 3) {
-                    float[] telemetry = new float[6];
+                    float[] telemetry = new float[7];
                     boolean isSpike = nativeUpdateSensorTelemetry(
                             type,
                             event.values[0],
@@ -2024,7 +2118,7 @@ public class MainActivity extends Activity {
                 }
 
                 if (type == Sensor.TYPE_GYROSCOPE && event.values.length >= 3) {
-                    float[] telemetry = new float[6];
+                    float[] telemetry = new float[7];
                     boolean isSpike = nativeUpdateSensorTelemetry(
                             type,
                             event.values[0],
@@ -2094,6 +2188,7 @@ public class MainActivity extends Activity {
         Sensor magnetic = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
         Sensor gyro = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
         Sensor proximity = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
+        Sensor accel = onlineCarrierSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
 
         boolean magneticRegistered = magnetic != null &&
             onlineCarrierSensorManager.registerListener(
@@ -2122,10 +2217,20 @@ public class MainActivity extends Activity {
             onlineCarrierRegisteredSensorCount++;
         }
 
+        boolean accelRegistered = accel != null &&
+            onlineCarrierSensorManager.registerListener(
+                    onlineCarrierSensorListener,
+                    accel,
+                    SensorManager.SENSOR_DELAY_UI);
+        if (accelRegistered) {
+            onlineCarrierRegisteredSensorCount++;
+        }
+
         String msg = "Multi-sensor VOX gates armed: "
                 + "magnetometer=" + magneticRegistered
                 + " gyroscope=" + gyroRegistered
                 + " proximity=" + proximityRegistered
+                + " vibe_geophone=" + accelRegistered
                 + " microphone_recording=true";
         android.util.Log.i("FieldVox", msg);
         exportStatus.setText(msg);
@@ -2248,7 +2353,8 @@ public class MainActivity extends Activity {
         if (root == null) return;
         try {
             if (root == sweepCadenceButton || root == sweepDirectionButton
-                    || root == audioFxEchoButton || root == audioNoiseButton || root == audioRevButton
+                    || root == audioFxEchoButton || root == audioReverbButton || root == audioPitchButton
+                    || root == audioNoiseButton || root == audioRevButton || root == calZeroButton
                     || root == sessionsButton || root == exportButton || root == startButton
                     || root == shareButton || root == controlsButton || root == markHitButton) {
                 return;
@@ -3095,11 +3201,19 @@ public class MainActivity extends Activity {
                             userReverseAudioEnabled,
                             userEchoFxEnabled,
                             userWhiteNoiseEnabled,
+                            userReverbEnabled,
+                            userPitchShiftSemitones,
                             boostFactor,
                             dspMetrics
                     );
                     int peak = (int)dspMetrics[0];
                     double rms = dspMetrics[1];
+
+                    if (nativeGetSpectrogramColumn(liveSpectrogramColumn)) {
+                        if (wavePanel != null) {
+                            wavePanel.pushSpectrogramColumn(liveSpectrogramColumn);
+                        }
+                    }
 
                     wavOut.write(pcm, 0, n * 2);
                     flushPendingHitMarkers(jsonOut);
@@ -3332,16 +3446,16 @@ public class MainActivity extends Activity {
         title.setShadowLayer(10.0f, 0.0f, 0.0f, 0xFF6FE7FF);
         root.addView(title);
 
-        TextView stage = makeLabel("GhostTube ITC Mode • 64–128 Channels • Live EMF", 0xFF6FE7FF, isLandscape ? 10 : 11);
+        TextView stage = makeLabel("ITC Lab Suite • 64–128 Channels • 2D FFT Waterfall • Geophone • DSP", 0xFF6FE7FF, isLandscape ? 10 : 11);
         stage.setPadding(0, dp(this, 1), 0, dp(this, isLandscape ? 2 : 4));
         root.addView(stage);
 
         LogoGlyphView glyph = new LogoGlyphView(this);
-        int glyphSize = isLandscape ? dp(this, 44) : dp(this, 84);
+        int glyphSize = isLandscape ? dp(this, 40) : dp(this, 72);
         root.addView(glyph, new LinearLayout.LayoutParams(glyphSize, glyphSize));
 
         wavePanel = new WavePanelView(this);
-        int waveHeight = isLandscape ? dp(this, 54) : dp(this, 88);
+        int waveHeight = isLandscape ? dp(this, 72) : dp(this, 114);
         LinearLayout.LayoutParams waveParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 waveHeight
@@ -3367,13 +3481,16 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        channelLp.setMargins(0, 0, 0, dp(this, 6));
+        channelLp.setMargins(0, 0, 0, dp(this, 5));
         root.addView(channelBadgeView, channelLp);
 
         LinearLayout sweepBar = new LinearLayout(this);
         sweepBar.setOrientation(LinearLayout.HORIZONTAL);
         sweepBar.setGravity(Gravity.CENTER);
-        sweepBar.setPadding(0, 0, 0, dp(this, 6));
+        sweepBar.setPadding(0, 0, 0, dp(this, 4));
+
+        calZeroButton = makePillButton("CAL ZERO");
+        calZeroButton.setOnClickListener(v -> triggerSensorCalibration());
 
         sweepCadenceButton = makePillButton("250ms");
         sweepCadenceButton.setOnClickListener(v -> cycleSweepCadence());
@@ -3381,8 +3498,30 @@ public class MainActivity extends Activity {
         sweepDirectionButton = makePillButton("▶ FWD");
         sweepDirectionButton.setOnClickListener(v -> cycleSweepDirection());
 
+        audioPitchButton = makePillButton("PITCH");
+        audioPitchButton.setOnClickListener(v -> cycleAudioPitch());
+
+        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(0, dp(this, 34), 1.0f);
+        int pGap = dp(this, 2);
+        pillLp.setMargins(pGap, 0, pGap, 0);
+
+        sweepBar.addView(calZeroButton, pillLp);
+        sweepBar.addView(sweepCadenceButton, pillLp);
+        sweepBar.addView(sweepDirectionButton, pillLp);
+        sweepBar.addView(audioPitchButton, pillLp);
+
+        root.addView(sweepBar);
+
+        LinearLayout fxBar = new LinearLayout(this);
+        fxBar.setOrientation(LinearLayout.HORIZONTAL);
+        fxBar.setGravity(Gravity.CENTER);
+        fxBar.setPadding(0, 0, 0, dp(this, 6));
+
         audioFxEchoButton = makePillButton("ECHO");
         audioFxEchoButton.setOnClickListener(v -> toggleAudioFxEcho());
+
+        audioReverbButton = makePillButton("REVERB");
+        audioReverbButton.setOnClickListener(v -> toggleAudioReverb());
 
         audioNoiseButton = makePillButton("NOISE");
         audioNoiseButton.setOnClickListener(v -> toggleAudioNoise());
@@ -3390,17 +3529,12 @@ public class MainActivity extends Activity {
         audioRevButton = makePillButton("REV");
         audioRevButton.setOnClickListener(v -> toggleAudioRev());
 
-        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(0, dp(this, 36), 1.0f);
-        int pGap = dp(this, 2);
-        pillLp.setMargins(pGap, 0, pGap, 0);
+        fxBar.addView(audioFxEchoButton, pillLp);
+        fxBar.addView(audioReverbButton, pillLp);
+        fxBar.addView(audioNoiseButton, pillLp);
+        fxBar.addView(audioRevButton, pillLp);
 
-        sweepBar.addView(sweepCadenceButton, pillLp);
-        sweepBar.addView(sweepDirectionButton, pillLp);
-        sweepBar.addView(audioFxEchoButton, pillLp);
-        sweepBar.addView(audioNoiseButton, pillLp);
-        sweepBar.addView(audioRevButton, pillLp);
-
-        root.addView(sweepBar);
+        root.addView(fxBar);
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.HORIZONTAL);
@@ -3799,26 +3933,48 @@ public class MainActivity extends Activity {
     }
 
     public static final class WavePanelView extends View {
+        private static final int WF_WIDTH = 120;
+        private static final int WF_HEIGHT = 64;
+
         private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint waveGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint bitmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
         private final RectF box = new RectF();
+        private final RectF waterfallDst = new RectF();
+        private final Rect waterfallSrc = new Rect(0, 0, WF_WIDTH, WF_HEIGHT);
+
+        private final int[] waterfallPixels = new int[WF_WIDTH * WF_HEIGHT];
+        private Bitmap waterfallBitmap;
+        private final float[] currentBins = new float[WF_HEIGHT];
         private boolean running = false;
         private int phase = 0;
 
         public WavePanelView(android.content.Context ctx) {
             super(ctx);
-            bg.setColor(Color.rgb(18, 18, 20));
+            bg.setColor(0xFF090D14);
             bg.setStyle(Paint.Style.FILL);
 
-            glow.setColor(Color.WHITE);
-            glow.setStrokeWidth(10.0f);
-            glow.setAlpha(60);
-            glow.setStrokeCap(Paint.Cap.ROUND);
+            gridPaint.setColor(0x226FE7FF);
+            gridPaint.setStrokeWidth(1.0f);
 
-            line.setColor(Color.WHITE);
-            line.setStrokeWidth(6.0f);
-            line.setStrokeCap(Paint.Cap.ROUND);
+            wavePaint.setColor(0xFF00E5FF);
+            wavePaint.setStrokeWidth(2.0f);
+            wavePaint.setStrokeCap(Paint.Cap.ROUND);
+
+            waveGlowPaint.setColor(0x5500E5FF);
+            waveGlowPaint.setStrokeWidth(5.0f);
+            waveGlowPaint.setStrokeCap(Paint.Cap.ROUND);
+
+            textPaint.setColor(0x886FE7FF);
+            textPaint.setTextSize(9.0f * ctx.getResources().getDisplayMetrics().density);
+            textPaint.setTypeface(Typeface.MONOSPACE);
+
+            java.util.Arrays.fill(waterfallPixels, 0xFF050914);
+            waterfallBitmap = Bitmap.createBitmap(WF_WIDTH, WF_HEIGHT, Bitmap.Config.ARGB_8888);
+            waterfallBitmap.setPixels(waterfallPixels, 0, WF_WIDTH, 0, 0, WF_WIDTH, WF_HEIGHT);
         }
 
         public void setRunning(boolean r) {
@@ -3826,33 +3982,108 @@ public class MainActivity extends Activity {
             phase = (phase + 1) % 1000;
         }
 
-        protected void onDraw(Canvas c) {
-            super.onDraw(c);
+        public synchronized void pushSpectrogramColumn(float[] bins) {
+            if (bins == null || bins.length == 0) return;
+            int n = Math.min(bins.length, WF_HEIGHT);
+            System.arraycopy(bins, 0, currentBins, 0, n);
 
+            for (int y = 0; y < WF_HEIGHT; y++) {
+                int rowOff = y * WF_WIDTH;
+                System.arraycopy(waterfallPixels, rowOff + 1, waterfallPixels, rowOff, WF_WIDTH - 1);
+                int binIdx = (WF_HEIGHT - 1) - y;
+                float val = binIdx < n ? bins[binIdx] : 0.0f;
+                waterfallPixels[rowOff + WF_WIDTH - 1] = heatmapColor(val);
+            }
+
+            if (waterfallBitmap != null) {
+                waterfallBitmap.setPixels(waterfallPixels, 0, WF_WIDTH, 0, 0, WF_WIDTH, WF_HEIGHT);
+            }
+            postInvalidate();
+        }
+
+        private static int heatmapColor(float val) {
+            if (val <= 0.02f) return 0xFF050914;
+            if (val >= 1.0f) return 0xFFFFFFFF;
+            if (val < 0.25f) {
+                float t = val / 0.25f;
+                int r = (int)(5 + t * (60 - 5));
+                int g = (int)(9 + t * (15 - 9));
+                int b = (int)(20 + t * (120 - 20));
+                return 0xFF000000 | (r << 16) | (g << 8) | b;
+            } else if (val < 0.50f) {
+                float t = (val - 0.25f) / 0.25f;
+                int r = (int)(60 + t * (0 - 60));
+                int g = (int)(15 + t * (200 - 15));
+                int b = (int)(120 + t * (255 - 120));
+                return 0xFF000000 | (r << 16) | (g << 8) | b;
+            } else if (val < 0.75f) {
+                float t = (val - 0.50f) / 0.25f;
+                int r = (int)(0 + t * (255 - 0));
+                int g = (int)(200 + t * (230 - 200));
+                int b = (int)(255 + t * (0 - 255));
+                return 0xFF000000 | (r << 16) | (g << 8) | b;
+            } else {
+                float t = (val - 0.75f) / 0.25f;
+                int r = 255;
+                int g = (int)(230 + t * (255 - 230));
+                int b = (int)(0 + t * (255 - 0));
+                return 0xFF000000 | (r << 16) | (g << 8) | b;
+            }
+        }
+
+        @Override
+        protected synchronized void onDraw(Canvas c) {
+            super.onDraw(c);
             float w = getWidth();
             float h = getHeight();
+            if (w <= 0 || h <= 0) return;
+
             box.set(0, 0, w, h);
-            c.drawRoundRect(box, 18.0f, 18.0f, bg);
+            c.drawRoundRect(box, 12.0f, 12.0f, bg);
 
-            float mid = h * 0.52f;
-            int bars = 34;
-            float gap = w / (bars + 1);
+            float labelWidth = 28.0f * getResources().getDisplayMetrics().density;
+            float topOscHeight = h * 0.32f;
+            float wfTop = topOscHeight + 4.0f;
+            float wfHeight = h - wfTop - 4.0f;
 
-            for (int i = 0; i < bars; i++) {
-                float x = gap * (i + 1);
-                float a = (float)Math.sin((i * 0.75f) + (phase * 0.28f));
-                float b = (float)Math.cos((i * 0.39f) + (phase * 0.18f));
-                float mag = Math.abs(a * 0.55f + b * 0.45f);
+            // Oscilloscope Spectrum Response
+            float oscMidY = topOscHeight * 0.55f;
+            c.drawLine(labelWidth, oscMidY, w - 8.0f, oscMidY, gridPaint);
+
+            int oscPoints = 64;
+            float oscStep = (w - labelWidth - 12.0f) / (oscPoints - 1);
+            float prevX = labelWidth;
+            float prevY = oscMidY;
+
+            for (int i = 0; i < oscPoints; i++) {
+                float px = labelWidth + i * oscStep;
+                float val = i < currentBins.length ? currentBins[i] : 0.0f;
                 if (!running) {
-                    mag = 0.42f + (mag * 0.18f);
+                    val = 0.12f * (float)Math.sin(i * 0.4f + phase * 0.2f);
                 }
-                float amp = 20.0f + mag * (h * 0.28f);
-                c.drawLine(x, mid - amp, x, mid + amp, glow);
-                c.drawLine(x, mid - amp, x, mid + amp, line);
+                float py = oscMidY - (val * (topOscHeight * 0.44f));
+                if (i > 0) {
+                    c.drawLine(prevX, prevY, px, py, waveGlowPaint);
+                    c.drawLine(prevX, prevY, px, py, wavePaint);
+                }
+                prevX = px;
+                prevY = py;
+            }
+
+            c.drawText("FFT", 8.0f, 13.0f * getResources().getDisplayMetrics().density, textPaint);
+
+            // 2D Spectroid Waterfall Heatmap
+            if (waterfallBitmap != null && wfHeight > 8.0f) {
+                waterfallDst.set(labelWidth, wfTop, w - 8.0f, wfTop + wfHeight);
+                c.drawBitmap(waterfallBitmap, waterfallSrc, waterfallDst, bitmapPaint);
+
+                c.drawText("8k", 8.0f, wfTop + 10.0f, textPaint);
+                c.drawText("4k", 8.0f, wfTop + (wfHeight * 0.5f), textPaint);
+                c.drawText("0", 12.0f, wfTop + wfHeight - 2.0f, textPaint);
             }
 
             if (running) {
-                postInvalidateDelayed(60);
+                postInvalidateDelayed(50);
             }
         }
     }
@@ -3867,7 +4098,10 @@ public class MainActivity extends Activity {
 
         private float currentMag = 0.0f;
         private float currentDelta = 0.0f;
+        private float currentVibe = 0.0f;
         private boolean isSpike = false;
+        private boolean isVibeSpike = false;
+        private long calFlashUntilMs = 0L;
         private String statusText = "BASELINE";
 
         public EmfMeterView(android.content.Context ctx) {
@@ -3876,12 +4110,23 @@ public class MainActivity extends Activity {
             bgPaint.setStyle(Paint.Style.FILL);
 
             textPaint.setColor(0xFFE8F7FF);
-            textPaint.setTextSize(12.5f * getResources().getDisplayMetrics().density);
+            textPaint.setTextSize(11.5f * getResources().getDisplayMetrics().density);
             textPaint.setTypeface(Typeface.DEFAULT_BOLD);
             textPaint.setAntiAlias(true);
 
             glowPaint.setStyle(Paint.Style.STROKE);
             glowPaint.setStrokeWidth(1.5f * getResources().getDisplayMetrics().density);
+        }
+
+        public void showCalibrationFlash() {
+            this.calFlashUntilMs = System.currentTimeMillis() + 1000L;
+            postInvalidate();
+        }
+
+        public void updateVibe(float vibe, boolean spike) {
+            this.currentVibe = vibe;
+            this.isVibeSpike = spike;
+            postInvalidate();
         }
 
         public void updateEmf(float mag, float delta, boolean spike) {
@@ -3907,21 +4152,25 @@ public class MainActivity extends Activity {
             float h = getHeight();
             box.set(0, 0, w, h);
 
-            int strokeColor = isSpike ? 0xFFFF1744 : (currentDelta >= 1.5f ? 0xFFFFD600 : 0xFF283548);
+            long now = System.currentTimeMillis();
+            boolean isCalFlash = now < calFlashUntilMs;
+            int strokeColor = isCalFlash ? 0xFF00E676 : (isSpike ? 0xFFFF1744 : (isVibeSpike ? 0xFFFF9100 : (currentDelta >= 1.5f ? 0xFFFFD600 : 0xFF283548)));
             glowPaint.setColor(strokeColor);
             c.drawRoundRect(box, 10.0f, 10.0f, bgPaint);
             c.drawRoundRect(box, 10.0f, 10.0f, glowPaint);
 
-            String header = String.format(Locale.US, "EMF: %.1f µT   Δ %.1f µT  [%s]", currentMag, currentDelta, statusText);
-            int textColor = isSpike ? 0xFFFF5252 : (currentDelta >= 1.5f ? 0xFFFFEE58 : 0xFF6FE7FF);
+            String statusStr = isCalFlash ? "ZERO-CALIBRATED" : statusText;
+            String header = String.format(Locale.US, "EMF: %.1f µT (Δ%.1f) [%s]  •  VIBE: %.2f m/s²%s",
+                    currentMag, currentDelta, statusStr, currentVibe, isVibeSpike ? " [SPIKE]" : "");
+            int textColor = isCalFlash ? 0xFF00E676 : (isSpike ? 0xFFFF5252 : (isVibeSpike ? 0xFFFFAB40 : (currentDelta >= 1.5f ? 0xFFFFEE58 : 0xFF6FE7FF)));
             textPaint.setColor(textColor);
-            c.drawText(header, 14.0f, 18.0f * getResources().getDisplayMetrics().density, textPaint);
+            c.drawText(header, 12.0f, 17.0f * getResources().getDisplayMetrics().density, textPaint);
 
             int totalSegs = 10;
             float padX = 12.0f * getResources().getDisplayMetrics().density;
-            float segY = 24.0f * getResources().getDisplayMetrics().density;
-            float segH = h - segY - (8.0f * getResources().getDisplayMetrics().density);
-            if (segH < 6.0f) segH = 6.0f;
+            float segY = 23.0f * getResources().getDisplayMetrics().density;
+            float segH = h - segY - (7.0f * getResources().getDisplayMetrics().density);
+            if (segH < 5.0f) segH = 5.0f;
             float segGap = 4.0f * getResources().getDisplayMetrics().density;
             float totalGap = segGap * (totalSegs - 1);
             float segW = (w - (padX * 2) - totalGap) / totalSegs;
