@@ -5,8 +5,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define FV_CAMERA_WIDTH 320
-#define FV_CAMERA_HEIGHT 180
+#define FV_CAMERA_WIDTH 640
+#define FV_CAMERA_HEIGHT 360
 
 typedef enum {
     FV_CAM_FILTER_PHOSPHOR = 0, /* Night-vision green */
@@ -24,6 +24,7 @@ bool fv_camera_start(void);
 void fv_camera_stop(void);
 bool fv_camera_copy_luma(uint8_t out_luma[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT]);
 bool fv_camera_is_active(void);
+bool fv_camera_is_healthy(uint64_t max_age_ms);
 const char *fv_camera_filter_name(FvCameraFilter filter);
 void fv_camera_luma_to_argb(const uint8_t *luma, uint32_t *out_argb, int count, FvCameraFilter filter);
 void fv_camera_luma_to_argb_rotated(const uint8_t *luma, int src_w, int src_h,

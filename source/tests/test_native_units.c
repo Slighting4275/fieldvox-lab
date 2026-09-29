@@ -445,7 +445,28 @@ int main(void) {
         for (int i = 0; i < dw * dh; i++) {
             assert(hit_map[i] == 1); /* All destination pixels covered */
         }
-        printf("  [PASS] Camera sensor orientation compensation & bijective 90° portrait rotation\n");
+
+        /* Test 90-degree clockwise bijective coordinate mapping for 640x360 -> 360x640 */
+        const int sw2 = 640, sh2 = 360;
+        const int dw2 = sh2, dh2 = sw2; /* 360 x 640 */
+        uint8_t *hit_map2 = (uint8_t *)calloc((size_t)dw2 * (size_t)dh2, 1);
+        assert(hit_map2 != NULL);
+        for (int sy = 0; sy < sh2; sy++) {
+            for (int sx = 0; sx < sw2; sx++) {
+                const int dx = (sh2 - 1) - sy;
+                const int dy = sx;
+                assert(dx >= 0 && dx < dw2);
+                assert(dy >= 0 && dy < dh2);
+                const int idx = dy * dw2 + dx;
+                assert(hit_map2[idx] == 0);
+                hit_map2[idx] = 1;
+            }
+        }
+        for (int i = 0; i < dw2 * dh2; i++) {
+            assert(hit_map2[i] == 1);
+        }
+        free(hit_map2);
+        printf("  [PASS] Camera sensor orientation compensation & bijective 90° portrait rotation (320x180 & 640x360)\n");
     }
 
     printf("ALL FieldVox native C unit tests PASSED.\n");

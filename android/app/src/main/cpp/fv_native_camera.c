@@ -31,6 +31,7 @@ typedef struct {
     bool active;
     bool failed;
     int sensor_orientation;
+    uint64_t last_frame_ms;
 } FvCameraState;
 
 static FvCameraState s_camera = {
@@ -38,6 +39,12 @@ static FvCameraState s_camera = {
     .sensor_orientation = 90,
 };
 static pthread_mutex_t s_camera_control_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t current_camera_time_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+}
 
 static JNIEnv *fv_get_env(ANativeActivity *activity, bool *attached) {
     if (!activity || !activity->vm) return NULL;
@@ -109,35 +116,46 @@ void fv_android_request_runtime_permissions(ANativeActivity *activity) {
 
 static void fv_camera_image_available(void *context, AImageReader *reader) {
     (void)context;
+    AImage *latest_image = NULL;
     AImage *image = NULL;
-    if (AImageReader_acquireLatestImage(reader, &image) != AMEDIA_OK || !image) return;
+
+    /* Drain all pending images from the reader queue to return older buffers immediately to the HAL */
+    while (AImageReader_acquireNextImage(reader, &image) == AMEDIA_OK && image) {
+        if (latest_image) {
+            AImage_delete(latest_image);
+        }
+        latest_image = image;
+        image = NULL;
+    }
+
+    if (!latest_image) return;
+
     uint8_t *data = NULL;
     int data_len = 0;
     int32_t row_stride = 0;
     int32_t pixel_stride = 1;
-    if (AImage_getPlaneData(image, 0, &data, &data_len) == AMEDIA_OK && data &&
-        AImage_getPlaneRowStride(image, 0, &row_stride) == AMEDIA_OK &&
+    if (AImage_getPlaneData(latest_image, 0, &data, &data_len) == AMEDIA_OK && data &&
+        AImage_getPlaneRowStride(latest_image, 0, &row_stride) == AMEDIA_OK &&
         row_stride >= FV_CAMERA_WIDTH) {
-        AImage_getPlanePixelStride(image, 0, &pixel_stride);
-        static int s_logged = 0;
-        if (s_logged++ < 3) {
-            CAM_LOGI("image plane 0: data_len=%d, row_stride=%d, pixel_stride=%d, needed=%zu",
-                     data_len, row_stride, pixel_stride,
-                     (size_t)(FV_CAMERA_HEIGHT - 1) * (size_t)row_stride + (size_t)FV_CAMERA_WIDTH * (size_t)pixel_stride);
-        }
-        if (pixel_stride > 0 &&
-            data_len >= (int)((size_t)(FV_CAMERA_HEIGHT - 1) * (size_t)row_stride + (size_t)FV_CAMERA_WIDTH * (size_t)pixel_stride)) {
+        AImage_getPlanePixelStride(latest_image, 0, &pixel_stride);
+        if (pixel_stride <= 0) pixel_stride = 1;
+
+        const size_t needed = (size_t)(FV_CAMERA_HEIGHT - 1) * (size_t)row_stride + (size_t)FV_CAMERA_WIDTH * (size_t)pixel_stride;
+        if (data_len >= (int)needed) {
             pthread_mutex_lock(&s_camera.mutex);
             for (int y = 0; y < FV_CAMERA_HEIGHT; y++) {
                 const uint8_t *src = data + (size_t)y * (size_t)row_stride;
                 uint8_t *dst = s_camera.luma + y * FV_CAMERA_WIDTH;
-                for (int x = 0; x < FV_CAMERA_WIDTH; x++) dst[x] = src[x * pixel_stride];
+                for (int x = 0; x < FV_CAMERA_WIDTH; x++) {
+                    dst[x] = src[x * pixel_stride];
+                }
             }
             s_camera.frame_ready = true;
+            s_camera.last_frame_ms = current_camera_time_ms();
             pthread_mutex_unlock(&s_camera.mutex);
         }
     }
-    AImage_delete(image);
+    AImage_delete(latest_image);
 }
 
 static void fv_camera_disconnected(void *context, ACameraDevice *device) {
@@ -181,7 +199,11 @@ static void fv_session_active(void *context, ACameraCaptureSession *session) {
     (void)context;
     pthread_mutex_lock(&s_camera.mutex);
     const bool current_session = s_camera.session == session;
-    if (current_session) s_camera.active = true;
+    if (current_session) {
+        s_camera.active = true;
+        s_camera.failed = false;
+        s_camera.last_frame_ms = current_camera_time_ms();
+    }
     pthread_mutex_unlock(&s_camera.mutex);
     if (current_session) CAM_LOGI("Native camera preview active");
 }
@@ -234,7 +256,7 @@ bool fv_camera_start(void) {
     ACameraManager_deleteCameraIdList(ids);
 
     AImageReader *reader = NULL;
-    if (AImageReader_new(FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT, AIMAGE_FORMAT_YUV_420_888, 3, &reader) != AMEDIA_OK || !reader) {
+    if (AImageReader_new(FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT, AIMAGE_FORMAT_YUV_420_888, 8, &reader) != AMEDIA_OK || !reader) {
         ACameraManager_delete(manager);
         CAM_LOGE("AImageReader creation failed");
         pthread_mutex_unlock(&s_camera_control_mutex);
@@ -372,6 +394,7 @@ void fv_camera_stop(void) {
     s_camera.active = false;
     s_camera.failed = false;
     s_camera.frame_ready = false;
+    s_camera.last_frame_ms = 0;
     pthread_mutex_unlock(&s_camera.mutex);
     if (session) {
         ACameraCaptureSession_stopRepeating(session);
@@ -404,6 +427,19 @@ bool fv_camera_is_active(void) {
     const bool active = s_camera.active;
     pthread_mutex_unlock(&s_camera.mutex);
     return active;
+}
+
+bool fv_camera_is_healthy(uint64_t max_age_ms) {
+    pthread_mutex_lock(&s_camera.mutex);
+    if (!s_camera.active || s_camera.failed) {
+        pthread_mutex_unlock(&s_camera.mutex);
+        return false;
+    }
+    const uint64_t now = current_camera_time_ms();
+    const uint64_t elapsed = (now > s_camera.last_frame_ms) ? (now - s_camera.last_frame_ms) : 0;
+    const bool healthy = elapsed <= max_age_ms;
+    pthread_mutex_unlock(&s_camera.mutex);
+    return healthy;
 }
 
 const char *fv_camera_filter_name(FvCameraFilter filter) {

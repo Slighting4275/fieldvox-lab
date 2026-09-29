@@ -1715,13 +1715,23 @@ static void *camera_thread_func(void *arg) {
         pthread_mutex_lock(&g_state_mutex);
         const bool cam = (g_app.cam_filter != FV_CAM_FILTER_OFF) || g_app.cam_hud_active;
         pthread_mutex_unlock(&g_state_mutex);
-        if (atomic_load(&g_app.resumed) && cam && !fv_camera_is_active() &&
-            fv_android_has_permission(g_app.activity, "android.permission.CAMERA")) {
-            if (!fv_camera_start()) {
+        const bool resumed = atomic_load(&g_app.resumed);
+        const bool has_perm = fv_android_has_permission(g_app.activity, "android.permission.CAMERA");
+
+        if (resumed && cam && has_perm) {
+            const bool active = fv_camera_is_active();
+            const bool healthy = fv_camera_is_healthy(2000);
+            if (!active || !healthy) {
+                if (active && !healthy) {
+                    LOGI("Camera frame watchdog triggered (> 2000 ms stall) - restarting camera pipeline");
+                }
                 fv_camera_stop();
-                sleep(2);
+                if (!fv_camera_start()) {
+                    fv_camera_stop();
+                    sleep(1);
+                }
             }
-        } else if ((!atomic_load(&g_app.resumed) || !cam) && fv_camera_is_active()) {
+        } else if (fv_camera_is_active()) {
             fv_camera_stop();
         }
         usleep(250000);
