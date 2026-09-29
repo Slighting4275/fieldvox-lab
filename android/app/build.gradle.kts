@@ -11,8 +11,8 @@ android {
         applicationId = "org.fieldvox.lab"
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0-stage1u-n-audio-dwell"
+        versionCode = 2
+        versionName = "0.2.0-native"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -20,7 +20,6 @@ android {
 
         externalNativeBuild {
             cmake {
-                cppFlags += listOf("-std=c++20", "-O3", "-Wall", "-Wextra")
                 cFlags += listOf("-std=c11", "-O3", "-Wall", "-Wextra")
             }
         }
@@ -34,8 +33,4 @@ android {
             version = "4.1.2"
         }
     }
-}
-
-dependencies {
-    testImplementation("junit:junit:4.13.2")
 }

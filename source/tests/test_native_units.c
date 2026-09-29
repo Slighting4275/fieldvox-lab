@@ -3,8 +3,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
+#include <unistd.h>
 
 #include "../../android/app/src/main/cpp/fv_station_blob_data.h"
+#include "../../android/app/src/main/cpp/fv_native_audio.h"
+#include "../../android/app/src/main/cpp/fv_grain_gate.h"
 
 /* Minimal standalone SHA-256 for test verification */
 typedef struct {
@@ -124,7 +127,105 @@ static uint32_t crc32_buf(uint32_t crc, const uint8_t *buf, size_t len) {
     return ~crc;
 }
 
+static int count_trigger_events_str(const char *jsonl) {
+    if (!jsonl) return 0;
+    int count = 0;
+    const char *p = jsonl;
+    while (*p) {
+        const char *next_line = strchr(p, '\n');
+        size_t line_len = next_line ? (size_t)(next_line - p) : strlen(p);
+        if (strstr(p, "\"type\":\"trigger\"") != NULL || strstr(p, "\"event\":\"trigger\"") != NULL) {
+            // Check that the match is within this line
+            const char *m1 = strstr(p, "\"type\":\"trigger\"");
+            const char *m2 = strstr(p, "\"event\":\"trigger\"");
+            if ((m1 && m1 < p + line_len) || (m2 && m2 < p + line_len)) {
+                count++;
+            }
+        }
+        if (!next_line) break;
+        p = next_line + 1;
+    }
+    return count;
+}
+
+/* Grain gate timing must stay inside the Java carrier's ranges (MainActivity.openOnlineCarrierGate). */
+static void test_grain_gate(void) {
+    const uint32_t rate = 48000;
+    const uint64_t ms = rate / 1000;
+    FvGrainGate gate;
+    float gain[1024];
+
+    /* No carrier ready: nothing opens. */
+    fv_gate_init(&gate, rate, 12345u, 0);
+    for (uint64_t t = 0; t < 10 * rate; t += 1024) {
+        fv_gate_process(&gate, t, gain, 1024, false, 450);
+        for (int i = 0; i < 1024; i++) assert(gain[i] == 0.0f);
+    }
+    assert(!gate.open);
+
+    /* Carrier ready for 10 minutes: every packet obeys the Java grain, gap and silence ranges. */
+    fv_gate_init(&gate, rate, 777u, 0);
+    fv_gate_carrier_started(&gate, 0);
+    int packets = 0, advances = 0;
+    bool was_open = false;
+    uint64_t last_packet_end = 0, last_next_allowed = 0;
+    for (uint64_t t = 0; t < 600 * rate; t += 1024) {
+        if (fv_gate_process(&gate, t, gain, 1024, true, 450)) advances++;
+        for (int i = 0; i < 1024; i++) assert(gain[i] >= 0.0f && gain[i] <= 1.0f);
+        if (gate.open && !was_open) {
+            packets++;
+            assert(gate.packet_start >= 1200 * ms - 1024);           /* first auto-scan after 1.2 s */
+            if (packets > 1) assert(gate.packet_start >= last_next_allowed - 1024);
+            assert(gate.grain_count >= 1 && gate.grain_count <= FV_GATE_MAX_GRAINS);
+            for (int k = 0; k < gate.grain_count; k++) {
+                assert(gate.grain_len[k] >= 65 * ms && gate.grain_len[k] <= 390 * ms);
+                if (k > 0) {
+                    const uint64_t gap = gate.grain_start[k] - (gate.grain_start[k - 1] + gate.grain_len[k - 1]);
+                    assert(gap >= 30 * ms && gap <= 260 * ms);
+                }
+            }
+            const uint64_t silence = gate.next_allowed - (gate.packet_start + gate.packet_len);
+            assert(silence >= 1100 * ms && silence <= 4700 * ms);
+            last_packet_end = gate.packet_start + gate.packet_len;
+            last_next_allowed = gate.next_allowed;
+        }
+        was_open = gate.open;
+    }
+    (void)last_packet_end;
+    /* Auto-scan every 1.7-6.0 s plus 1.1-4.7 s silence: roughly 60-200 packets in 10 minutes. */
+    assert(packets >= 60 && packets <= 220);
+    assert(advances >= packets - 1 && advances <= packets);
+    printf("  [PASS] Grain gate: %d packets / %d station advances in 10 min, all within Java ranges\n",
+           packets, advances);
+
+    /* Proximity bypasses forced silence but never overlaps an open packet. */
+    fv_gate_init(&gate, rate, 99u, 0);
+    assert(fv_gate_request(&gate, 0, FV_GATE_MAGNETOMETER, 4.0f, 450, true));
+    const uint64_t end = gate.packet_start + gate.packet_len;
+    assert(!fv_gate_request(&gate, 1024, FV_GATE_PROXIMITY, 1.0f, 450, true)); /* queued */
+    assert(gate.proximity_pending);
+    uint64_t t = 0;
+    while (t <= end + 2048) {
+        fv_gate_process(&gate, t, gain, 1024, true, 450);
+        t += 1024;
+    }
+    assert(gate.open && gate.reason == FV_GATE_PROXIMITY);  /* flushed right after the packet */
+    assert(gate.packet_start < end + 3 * 1024);             /* did not wait out the 1.1 s silence */
+    /* Sensor cooldowns: a magnetometer spike right after a packet is refused. */
+    fv_gate_init(&gate, rate, 5u, 0);
+    assert(fv_gate_request(&gate, 0, FV_GATE_MAGNETOMETER, 3.0f, 450, true));
+    assert(!fv_gate_request(&gate, gate.packet_len + 10, FV_GATE_MAGNETOMETER, 3.0f, 450, true));
+    fv_gate_init(NULL, rate, 0, 0);
+    fv_gate_carrier_started(NULL, 0);
+    assert(!fv_gate_request(NULL, 0, FV_GATE_AUTO_SCAN, 0.0f, 450, true));
+    assert(!fv_gate_process(NULL, 0, gain, 1024, true, 450));
+    assert(!fv_gate_process(&gate, 0, gain, 0, true, 450));
+    assert(!fv_gate_process(&gate, 0, gain, -1, true, 450));
+    printf("  [PASS] Grain gate proximity queue and sensor cooldowns\n");
+}
+
 int main(void) {
+    test_grain_gate();
     printf("[TEST] Running FieldVox native C unit tests...\n");
 
     /* 1. Verify SHA-256 standard test vector */
@@ -143,7 +244,16 @@ int main(void) {
     assert(is_safe_session_stem(NULL) == 0);
     printf("  [PASS] Session stem safety assertions\n");
 
-    /* 3. Verify Station Blob Magic, Count, and CRC32 */
+    /* 3. Verify Trigger Event Counting */
+    const char *test_jsonl =
+        "{\"type\":\"trigger\",\"trigger\":1,\"t_ns\":1000,\"mag\":1.0,\"delta\":0.5,\"freq_hz\":440.0,\"threshold\":0.4,\"cooldown_ms\":450}\n"
+        "{\"type\":\"frame\",\"seq\":2}\n"
+        "{\"event\":\"trigger\",\"mode\":\"realtime_evp_monitor\",\"source\":\"microphone\",\"t_ms\":2000}\n"
+        "{\"type\":\"trigger\",\"trigger\":2,\"t_ns\":3000,\"mag\":1.2,\"delta\":0.6,\"freq_hz\":880.0,\"threshold\":0.4,\"cooldown_ms\":450}\n";
+    assert(count_trigger_events_str(test_jsonl) == 3);
+    printf("  [PASS] Native trigger counting (3 events)\n");
+
+    /* 4. Verify Station Blob Magic, Count, and CRC32 */
     assert(sizeof(FV_STATION_PLAN_BINARY_DATA) >= 16);
     uint32_t magic = ((uint32_t)FV_STATION_PLAN_BINARY_DATA[0]) |
                      ((uint32_t)FV_STATION_PLAN_BINARY_DATA[1] << 8) |
@@ -155,8 +265,9 @@ int main(void) {
                      ((uint32_t)FV_STATION_PLAN_BINARY_DATA[9] << 8) |
                      ((uint32_t)FV_STATION_PLAN_BINARY_DATA[10] << 16) |
                      ((uint32_t)FV_STATION_PLAN_BINARY_DATA[11] << 24);
-    assert(count == 64);
     assert(count == FV_STATION_BLOB_COUNT);
+    assert(count == 512);
+    assert(FV_STATION_BLOB_COUNT == 512);
 
     uint32_t expected_crc = ((uint32_t)FV_STATION_PLAN_BINARY_DATA[12]) |
                            ((uint32_t)FV_STATION_PLAN_BINARY_DATA[13] << 8) |
@@ -168,15 +279,65 @@ int main(void) {
     size_t record_len = count * sizeof(FvBlobStationEntry);
     uint32_t computed_crc = crc32_buf(0, record_bytes, record_len);
     assert(computed_crc == expected_crc);
-    printf("  [PASS] Zig packed station blob header & CRC32 verification (64 stations)\n");
+    printf("  [PASS] Zig packed station blob header & CRC32 verification (%u stations)\n", (unsigned)count);
 
-    /* 4. Verify first station entry in binary blob */
+    /* 5. Verify first station entry in binary blob */
     const FvBlobStationEntry *e0 = (const FvBlobStationEntry *)record_bytes;
     assert(e0->slot_id == 0);
     assert(strcmp(e0->callsign, "KIRO 97.3") == 0);
     assert(strcmp(e0->country, "US") == 0);
     assert(strncmp(e0->url, "https://", 8) == 0);
     printf("  [PASS] Binary station blob slot 0: %s (%s)\n", e0->name, e0->callsign);
+
+    /* Every slot must be a direct http(s) stream the native extractor can open: no playlists or HLS. */
+    for (uint32_t i = 0; i < count; i++) {
+        const FvBlobStationEntry *e = (const FvBlobStationEntry *)(record_bytes + (size_t)i * sizeof(FvBlobStationEntry));
+        assert(e->slot_id == i);
+        assert(memchr(e->callsign, '\0', sizeof(e->callsign)) != NULL);
+        assert(memchr(e->name, '\0', sizeof(e->name)) != NULL);
+        assert(memchr(e->country, '\0', sizeof(e->country)) != NULL);
+        assert(memchr(e->lang, '\0', sizeof(e->lang)) != NULL);
+        assert(memchr(e->url_hash, '\0', sizeof(e->url_hash)) != NULL);
+        assert(memchr(e->url, '\0', sizeof(e->url)) != NULL);
+        assert(strncmp(e->url, "https://", 8) == 0 || strncmp(e->url, "http://", 7) == 0);
+        assert(strstr(e->url, ".m3u") == NULL && strstr(e->url, ".pls") == NULL);
+        assert(e->callsign[0] != '\0' && e->name[0] != '\0');
+    }
+    printf("  [PASS] All %u station slots are direct http(s) streams\n", count);
+
+    /* 6. Exercise the production native DSP and WAV exporter. */
+    fv_audio_dsp_reset();
+    int16_t full_scale[8192];
+    for (size_t i = 0; i < sizeof(full_scale) / sizeof(full_scale[0]); i++) {
+        full_scale[i] = INT16_MAX;
+    }
+    fv_apply_schroeder_reverb(full_scale, (int)(sizeof(full_scale) / sizeof(full_scale[0])));
+    for (size_t i = 0; i < sizeof(full_scale) / sizeof(full_scale[0]); i++) {
+        assert(full_scale[i] >= 0);
+    }
+    printf("  [PASS] Native reverb feedback remains saturated without signed wraparound\n");
+
+    const int16_t capture[] = { -32768, -1234, 0, 1234, 32767 };
+    fv_audio_capture_and_analyze(capture, (int)(sizeof(capture) / sizeof(capture[0])));
+    char wav_path[128];
+    snprintf(wav_path, sizeof(wav_path), "/tmp/fieldvox-preroll-%ld.wav", (long)getpid());
+    assert(fv_audio_export_preroll_wav(wav_path, 1));
+    FILE *wav = fopen(wav_path, "rb");
+    assert(wav != NULL);
+    uint8_t wav_header[44];
+    const size_t header_read = fread(wav_header, 1, sizeof(wav_header), wav);
+    assert(header_read == sizeof(wav_header));
+    assert(memcmp(wav_header, "RIFF", 4) == 0);
+    assert(memcmp(wav_header + 8, "WAVEfmt ", 8) == 0);
+    assert(memcmp(wav_header + 36, "data", 4) == 0);
+    const int seek_result = fseek(wav, 0, SEEK_END);
+    assert(seek_result == 0);
+    const long wav_size = ftell(wav);
+    assert(wav_size == 96044L);
+    const int close_result = fclose(wav);
+    assert(close_result == 0);
+    assert(unlink(wav_path) == 0);
+    printf("  [PASS] Production pre-roll WAV header and payload size\n");
 
     printf("ALL FieldVox native C unit tests PASSED.\n");
     return 0;

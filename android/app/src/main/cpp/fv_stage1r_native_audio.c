@@ -1,8 +1,17 @@
-#include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
+
+#include "fv_native_audio.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#ifdef FIELDVOX_ENABLE_LEGACY_JNI
+#include <jni.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
 
@@ -594,6 +603,7 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1SCNoteLegacyCarrierBlocked(JNIEnv
         (*env)->ReleaseStringUTFChars(env, method_name, m);
     }
 }
+#endif
 
 // NATIVE AUDIO DSP & SPECTROGRAM ENGINE (C)
 // Full Suite: 256-point FFT waterfall, Schroeder Reverb, Granular Pitch Shift, Pre-roll Ring Buffer
@@ -629,6 +639,115 @@ static uint32_t s_rev_ia1 = 0, s_rev_ia2 = 0;
 static int16_t s_pitch_buf[FV_PITCH_BUF_SIZE];
 static uint32_t s_pitch_write = 0;
 static float s_pitch_read = 0.0f;
+
+/* Vocal Formant Bandpass Filter (300Hz - 3400Hz @ 48kHz, Direct Form II Transposed) */
+static float s_bp_hp_d1 = 0.0f, s_bp_hp_d2 = 0.0f;
+static float s_bp_lp_d1 = 0.0f, s_bp_lp_d2 = 0.0f;
+
+static inline int16_t fv_clamp_i16(int32_t value) {
+    if (value > INT16_MAX) return INT16_MAX;
+    if (value < INT16_MIN) return INT16_MIN;
+    return (int16_t)value;
+}
+
+static inline float fv_vocal_bandpass_single(float in_val) {
+    // Stage 1: High-pass at 300 Hz
+    float hp_out = 0.972614f * in_val + s_bp_hp_d1;
+    s_bp_hp_d1 = -1.945228f * in_val - (-1.944487f * hp_out) + s_bp_hp_d2;
+    s_bp_hp_d2 = 0.972614f * in_val - (0.945978f * hp_out);
+
+    // Stage 2: Low-pass at 3400 Hz
+    float lp_out = 0.037320f * hp_out + s_bp_lp_d1;
+    s_bp_lp_d1 = 0.074639f * hp_out - (-1.384079f * lp_out) + s_bp_lp_d2;
+    s_bp_lp_d2 = 0.037320f * hp_out - (0.533358f * lp_out);
+
+    return lp_out;
+}
+
+void fv_vocal_bandpass(int16_t *samples, int count, uint32_t sample_rate) {
+    (void)sample_rate;
+    for (int i = 0; i < count; i++) {
+        float f = fv_vocal_bandpass_single((float)samples[i]);
+        if (f > 32767.0f) f = 32767.0f;
+        if (f < -32768.0f) f = -32768.0f;
+        samples[i] = (int16_t)f;
+    }
+}
+
+void fv_apply_schroeder_reverb(int16_t *samples, int count) {
+    for (int i = 0; i < count; i++) {
+        int32_t in_val = samples[i];
+        int32_t c1_out = s_rev_c1[s_rev_ic1];
+        s_rev_c1[s_rev_ic1] = fv_clamp_i16(in_val + (c1_out * 78 / 100));
+        s_rev_ic1 = (s_rev_ic1 + 1) % FV_REV_C1;
+
+        int32_t c2_out = s_rev_c2[s_rev_ic2];
+        s_rev_c2[s_rev_ic2] = fv_clamp_i16(in_val + (c2_out * 78 / 100));
+        s_rev_ic2 = (s_rev_ic2 + 1) % FV_REV_C2;
+
+        int32_t c3_out = s_rev_c3[s_rev_ic3];
+        s_rev_c3[s_rev_ic3] = fv_clamp_i16(in_val + (c3_out * 78 / 100));
+        s_rev_ic3 = (s_rev_ic3 + 1) % FV_REV_C3;
+
+        int32_t c4_out = s_rev_c4[s_rev_ic4];
+        s_rev_c4[s_rev_ic4] = fv_clamp_i16(in_val + (c4_out * 78 / 100));
+        s_rev_ic4 = (s_rev_ic4 + 1) % FV_REV_C4;
+
+        int32_t comb_sum = (c1_out + c2_out + c3_out + c4_out) / 4;
+
+        int32_t a1_delayed = s_rev_a1[s_rev_ia1];
+        int32_t a1_out = -comb_sum * 65 / 100 + a1_delayed;
+        s_rev_a1[s_rev_ia1] = fv_clamp_i16(comb_sum + (a1_out * 65 / 100));
+        s_rev_ia1 = (s_rev_ia1 + 1) % FV_REV_A1;
+
+        int32_t a2_delayed = s_rev_a2[s_rev_ia2];
+        int32_t a2_out = -a1_out * 65 / 100 + a2_delayed;
+        s_rev_a2[s_rev_ia2] = fv_clamp_i16(a1_out + (a2_out * 65 / 100));
+        s_rev_ia2 = (s_rev_ia2 + 1) % FV_REV_A2;
+
+        int32_t wet = in_val * 70 / 100 + a2_out * 45 / 100;
+        if (wet > 32767) wet = 32767;
+        if (wet < -32768) wet = -32768;
+        samples[i] = fv_clamp_i16(wet);
+    }
+}
+
+void fv_apply_granular_pitch(int16_t *samples, int count, int semitones) {
+    if (semitones == 0) return;
+    const float step = powf(2.0f, (float)semitones / 12.0f);
+    for (int i = 0; i < count; i++) {
+        s_pitch_buf[s_pitch_write] = samples[i];
+        s_pitch_write = (s_pitch_write + 1) % FV_PITCH_BUF_SIZE;
+        s_pitch_read += step;
+        if (s_pitch_read >= FV_PITCH_BUF_SIZE) s_pitch_read -= FV_PITCH_BUF_SIZE;
+        int r_idx = (int)s_pitch_read;
+        samples[i] = s_pitch_buf[r_idx];
+    }
+}
+
+/* Acoustic REM-Pod Dynamic Multi-Tone Synthesizer */
+#ifdef FIELDVOX_ENABLE_LEGACY_JNI
+static float s_rem_pod_phase = 0.0f;
+static uint32_t s_rem_pod_sample_count = 0;
+
+static inline int16_t fv_rem_pod_generate(int level) {
+    if (level <= 0) return 0;
+    float freq = level == 1 ? 440.0f : (level == 2 ? 880.0f : (level == 3 ? 1320.0f : 1760.0f));
+    uint32_t period = level == 1 ? 24000 : (level == 2 ? 12000 : (level == 3 ? 4800 : 1));
+    uint32_t on_samples = level == 1 ? 2400 : (level == 2 ? 2880 : (level == 3 ? 1920 : 1));
+
+    s_rem_pod_sample_count++;
+    uint32_t cycle = s_rem_pod_sample_count % period;
+    if (level < 4 && cycle > on_samples) {
+        return 0;
+    }
+
+    s_rem_pod_phase += (2.0f * (float)M_PI * freq) / 48000.0f;
+    if (s_rem_pod_phase >= 2.0f * (float)M_PI) s_rem_pod_phase -= 2.0f * (float)M_PI;
+
+    return (int16_t)(sinf(s_rem_pod_phase) * 5500.0f);
+}
+#endif
 
 /* Real-Time Radix-2 FFT (256 points) for 2D Waterfall Spectrogram */
 #define FV_FFT_SIZE 256
@@ -687,10 +806,7 @@ static void fv_radix2_fft(float *re, float *im, int n) {
     }
 }
 
-JNIEXPORT void JNICALL
-Java_org_fieldvox_lab_MainActivity_nativeResetAudioDsp(JNIEnv *env, jobject thiz) {
-    (void)env;
-    (void)thiz;
+void fv_audio_dsp_reset(void) {
     memset(s_native_echo_buffer, 0, sizeof(s_native_echo_buffer));
     s_native_echo_index = 0;
     s_native_noise_prng = 0x854351239ULL;
@@ -703,9 +819,133 @@ Java_org_fieldvox_lab_MainActivity_nativeResetAudioDsp(JNIEnv *env, jobject thiz
     memset(s_rev_a1, 0, sizeof(s_rev_a1));
     memset(s_rev_a2, 0, sizeof(s_rev_a2));
     memset(s_pitch_buf, 0, sizeof(s_pitch_buf));
+    memset(s_latest_spec_bins, 0, sizeof(s_latest_spec_bins));
     s_pitch_write = 0;
     s_pitch_read = 0.0f;
     s_fft_acc_count = 0;
+    s_bp_hp_d1 = s_bp_hp_d2 = 0.0f;
+    s_bp_lp_d1 = s_bp_lp_d2 = 0.0f;
+#ifdef FIELDVOX_ENABLE_LEGACY_JNI
+    s_rem_pod_phase = 0.0f;
+    s_rem_pod_sample_count = 0;
+#endif
+}
+
+void fv_audio_capture_and_analyze(const int16_t *samples, int count) {
+    if (!samples || count <= 0) return;
+    fv_init_hanning();
+    for (int i = 0; i < count; i++) {
+        const int16_t raw = samples[i];
+        s_preroll_ring[s_preroll_write] = raw;
+        s_preroll_write = (s_preroll_write + 1) % FV_PREROLL_SAMPLES;
+        s_fft_acc[s_fft_acc_count++] = raw;
+        if (s_fft_acc_count < FV_FFT_SIZE) continue;
+        for (int k = 0; k < FV_FFT_SIZE; k++) {
+            s_fft_re[k] = (float)s_fft_acc[k] * s_hanning[k];
+            s_fft_im[k] = 0.0f;
+        }
+        fv_radix2_fft(s_fft_re, s_fft_im, FV_FFT_SIZE);
+        for (int b = 0; b < FV_SPEC_BINS; b++) {
+            const float r = s_fft_re[b];
+            const float im = s_fft_im[b];
+            const float mag = sqrtf(r * r + im * im) / 32768.0f;
+            float log_mag = log1pf(mag * 12.0f) / 2.5f;
+            if (log_mag > 1.0f) log_mag = 1.0f;
+            s_latest_spec_bins[b] = s_latest_spec_bins[b] * 0.4f + log_mag * 0.6f;
+        }
+        s_fft_acc_count = 0;
+    }
+}
+
+void fv_audio_apply_echo(int16_t *samples, int count) {
+    if (!samples || count <= 0) return;
+    for (int i = 0; i < count; i++) {
+        const int16_t delayed = s_native_echo_buffer[s_native_echo_index];
+        int32_t mixed = (int32_t)samples[i] + (int32_t)(delayed * 0.42f);
+        int32_t feedback = (int32_t)samples[i] + (int32_t)(delayed * 0.32f);
+        if (mixed > 32767) mixed = 32767;
+        if (mixed < -32768) mixed = -32768;
+        if (feedback > 32767) feedback = 32767;
+        if (feedback < -32768) feedback = -32768;
+        s_native_echo_buffer[s_native_echo_index] = (int16_t)feedback;
+        s_native_echo_index = (s_native_echo_index + 1) % FV_DSP_ECHO_DELAY_SAMPLES;
+        samples[i] = (int16_t)mixed;
+    }
+}
+
+void fv_audio_apply_noise(int16_t *samples, int count, int amplitude) {
+    if (!samples || count <= 0 || amplitude <= 0) return;
+    for (int i = 0; i < count; i++) {
+        s_native_noise_prng = s_native_noise_prng * 6364136223846793005ULL + 1442695040888963407ULL;
+        const int32_t noise = (int32_t)(((int64_t)(s_native_noise_prng >> 33) * amplitude) / 1073741824LL) - amplitude;
+        int32_t mixed = (int32_t)samples[i] + noise;
+        if (mixed > 32767) mixed = 32767;
+        if (mixed < -32768) mixed = -32768;
+        samples[i] = (int16_t)mixed;
+    }
+}
+
+void fv_audio_reverse(int16_t *samples, int count) {
+    if (!samples || count <= 1) return;
+    for (int i = 0; i < count / 2; i++) {
+        const int16_t tmp = samples[i];
+        samples[i] = samples[count - 1 - i];
+        samples[count - 1 - i] = tmp;
+    }
+}
+
+void fv_audio_get_spectrum(float out_bins[FV_NATIVE_SPECTRUM_BINS]) {
+    if (out_bins) memcpy(out_bins, s_latest_spec_bins, sizeof(s_latest_spec_bins));
+}
+
+bool fv_audio_export_preroll_wav(const char *path, int pre_seconds) {
+    if (!path || !*path) return false;
+    const int seconds = pre_seconds <= 0 ? 3 : (pre_seconds > FV_PREROLL_SECONDS ? FV_PREROLL_SECONDS : pre_seconds);
+    const uint32_t sample_count = (uint32_t)(seconds * 48000);
+    const uint32_t pcm_bytes = sample_count * 2;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    const uint32_t riff_size = pcm_bytes + 36;
+    const uint32_t sample_rate = 48000;
+    const uint16_t channels = 1;
+    const uint16_t bits = 16;
+    const uint32_t byte_rate = sample_rate * channels * (bits / 8);
+    const uint16_t block_align = channels * (bits / 8);
+    uint8_t header[44] = {0};
+    memcpy(&header[0], "RIFF", 4);
+    memcpy(&header[4], &riff_size, 4);
+    memcpy(&header[8], "WAVEfmt ", 8);
+    header[16] = 16;
+    header[20] = 1;
+    memcpy(&header[22], &channels, 2);
+    memcpy(&header[24], &sample_rate, 4);
+    memcpy(&header[28], &byte_rate, 4);
+    memcpy(&header[32], &block_align, 2);
+    memcpy(&header[34], &bits, 2);
+    memcpy(&header[36], "data", 4);
+    memcpy(&header[40], &pcm_bytes, 4);
+    bool ok = fwrite(header, 1, sizeof(header), f) == sizeof(header);
+    const uint32_t start_idx = (s_preroll_write + FV_PREROLL_SAMPLES - sample_count) % FV_PREROLL_SAMPLES;
+    const uint32_t first_count = sample_count < FV_PREROLL_SAMPLES - start_idx
+        ? sample_count : FV_PREROLL_SAMPLES - start_idx;
+    if (ok) {
+        ok = fwrite(&s_preroll_ring[start_idx], sizeof(int16_t), first_count, f) == first_count;
+    }
+    if (ok && first_count < sample_count) {
+        const uint32_t second_count = sample_count - first_count;
+        ok = fwrite(s_preroll_ring, sizeof(int16_t), second_count, f) == second_count;
+    }
+    ok = fclose(f) == 0 && ok;
+    if (!ok) unlink(path);
+    return ok;
+}
+
+#ifdef FIELDVOX_ENABLE_LEGACY_JNI
+JNIEXPORT void JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeResetAudioDsp(JNIEnv *env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    fv_audio_dsp_reset();
 }
 
 JNIEXPORT jboolean JNICALL
@@ -789,6 +1029,9 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
         jboolean noise_enabled,
         jboolean reverb_enabled,
         jint pitch_shift,
+        jboolean vocal_filter_enabled,
+        jint rem_pod_level,
+        jfloat spatial_pan,
         jfloat boost_factor,
         jfloatArray j_metrics) {
     (void)thiz;
@@ -873,6 +1116,16 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
             }
         }
 
+        // Voice Formant Bandpass Filter (300Hz - 3400Hz speech isolation)
+        if (vocal_filter_enabled) {
+            for (jint i = 0; i < count; i++) {
+                float filtered = fv_vocal_bandpass_single((float)monitor[i]);
+                if (filtered > 32767.0f) filtered = 32767.0f;
+                else if (filtered < -32768.0f) filtered = -32768.0f;
+                monitor[i] = (int16_t)filtered;
+            }
+        }
+
         if (echo_enabled) {
             for (jint i = 0; i < count; i++) {
                 int16_t delayed = s_native_echo_buffer[s_native_echo_index];
@@ -942,6 +1195,33 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
                 monitor[i] = (int16_t)mixed;
             }
         }
+
+        // Acoustic REM-Pod Dynamic Multi-Tone Synthesizer
+        if (rem_pod_level > 0) {
+            for (jint i = 0; i < count; i++) {
+                int16_t tone = fv_rem_pod_generate(rem_pod_level);
+                int32_t mixed = (int32_t)monitor[i] + (int32_t)tone;
+                if (mixed > 32767) mixed = 32767;
+                if (mixed < -32768) mixed = -32768;
+                monitor[i] = (int16_t)mixed;
+            }
+        }
+
+        // Stereo expansion & 3D Binaural Spatial Panning
+        jsize monitor_len = j_monitor ? (*env)->GetArrayLength(env, j_monitor) : 0;
+        if (monitor_len >= count * 2) {
+            float p = spatial_pan < -1.0f ? -1.0f : (spatial_pan > 1.0f ? 1.0f : spatial_pan);
+            float angle = (float)M_PI * 0.25f * (1.0f + p);
+            float g_l = cosf(angle);
+            float g_r = sinf(angle);
+            for (jint i = count - 1; i >= 0; i--) {
+                int32_t s = monitor[i];
+                int32_t l = (int32_t)(s * g_l);
+                int32_t r = (int32_t)(s * g_r);
+                monitor[i * 2] = (int16_t)(l > 32767 ? 32767 : (l < -32768 ? -32768 : l));
+                monitor[i * 2 + 1] = (int16_t)(r > 32767 ? 32767 : (r < -32768 ? -32768 : r));
+            }
+        }
     }
 
     if (j_metrics) {
@@ -958,4 +1238,4 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
     if (pcm) (*env)->ReleaseByteArrayElements(env, j_pcm, pcm, 0);
     if (monitor) (*env)->ReleaseShortArrayElements(env, j_monitor, monitor, 0);
 }
-
+#endif

@@ -13,10 +13,10 @@ TEST_BIN := fv-unit-test
 MAIN_SRC := src/main.c src/fv_core.c
 DUMP_SRC := src/fv_blobdump.c src/fv_core.c
 CSV_SRC := src/fv_csvvox.c src/fv_core.c
-TEST_SRC := tests/test_native_units.c
+TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_grain_gate.c
 HDR := src/fv_core.h
 
-.PHONY: all clean run inspect dump extract csvtest audition test blobgen
+.PHONY: all clean run inspect dump extract csvtest audition test zigtest blobgen
 
 all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN)
 
@@ -60,7 +60,11 @@ audition:
 
 test: all
 >./$(TEST_BIN)
+>$(MAKE) zigtest
 >./tests/test_smoke.sh
+
+zigtest:
+>$(ZIG) test ../android/app/src/main/cpp/fieldvox_zig_dsp.zig
 
 blobgen:
 >$(ZIG) run -lc src/station_blob_gen.zig
