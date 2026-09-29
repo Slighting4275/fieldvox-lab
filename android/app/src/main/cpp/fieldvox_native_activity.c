@@ -135,7 +135,7 @@ typedef struct {
     bool estes_mode, cam_hud_active, cam_hud_red;
     FvCameraFilter cam_filter;
     bool video_recording_active;
-    char video_artifact[256];
+    char video_artifact[512];
     bool recording_active, monitor_active;
     bool controls_visible;
     float threshold;         /* uT, Java default 1.65 */
@@ -575,7 +575,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
     /* Space available on each flank of the center shutter */
     const float side_clearance = r_outer + 8.0f * d;
     const float avail_w = (w * 0.5f) - side_clearance;
-    const float btn_w = fmaxf(44.0f * d, (avail_w - gap) * 0.5f);
+    const float btn_w = (avail_w - gap) * 0.5f;
 
     /* --- Left Flank: SWEEP (ARM/LIVE) & MARK HIT --- */
     {
@@ -881,10 +881,12 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
     const float bottom_bar_y = (float)h - bottom_inset - bottom_bar_h;
 
-    /* 6. Centered Floating Sound Visualizer (docked above bottom bar, leaving camera viewfinder visible) */
+    /* 6. Centered Floating Sound Visualizer (only rendered and clickable when drawer is closed) */
     const float vis_h = (landscape ? 54.0f : 80.0f) * d;
     const float vis_top = bottom_bar_y - vis_h - 8.0f * d;
-    draw_floating_visualizer(&ui, &s, ui.x0, vis_top, ui.w, vis_h, now);
+    if (!s.controls_visible) {
+        draw_floating_visualizer(&ui, &s, ui.x0, vis_top, ui.w, vis_h, now);
+    }
 
     /* 7. Bottom Action Bar (only rendered and clickable when drawer is closed) */
     if (!s.controls_visible) {

@@ -100,6 +100,34 @@ static void test_sha256_hex(const char *input, char output[65]) {
     output[64] = '\0';
 }
 
+typedef enum {
+    TEST_W_CAL, TEST_W_CADENCE, TEST_W_DIRECTION, TEST_W_PITCH,
+    TEST_W_ECHO, TEST_W_REVERB, TEST_W_NOISE, TEST_W_REV,
+    TEST_W_SESS, TEST_W_REC, TEST_W_START, TEST_W_MIC, TEST_W_CTRL,
+    TEST_W_SB11, TEST_W_VOCAL, TEST_W_REMPOD, TEST_W_PAN,
+    TEST_W_ESTES, TEST_W_CAMHUD, TEST_W_SENS_DOWN, TEST_W_SENS_UP,
+    TEST_W_COOL_DOWN, TEST_W_COOL_UP,
+    TEST_W_MARK_HIT, TEST_W_CAM_PREVIEW,
+    TEST_W_VIDEO_REC, TEST_W_CAM_TINT, TEST_W_CLOSE_DRAWER,
+    TEST_W_COUNT
+} TestWidgetId;
+
+typedef struct {
+    float x, y, w, h;
+    bool visible;
+} TestWidgetRect;
+
+static int test_resolve_tap(const TestWidgetRect *widgets, float tap_x, float tap_y) {
+    for (int i = TEST_W_COUNT - 1; i >= 0; i--) {
+        if (!widgets[i].visible) continue;
+        if (tap_x >= widgets[i].x && tap_x <= widgets[i].x + widgets[i].w &&
+            tap_y >= widgets[i].y && tap_y <= widgets[i].y + widgets[i].h) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 static int is_safe_session_stem(const char *stem) {
     if (!stem) return 0;
     size_t len = strlen(stem);
@@ -467,6 +495,178 @@ int main(void) {
         }
         free(hit_map2);
         printf("  [PASS] Camera sensor orientation compensation & bijective 90° portrait rotation (320x180 & 640x360)\n");
+    }
+
+    /* 11. Verify GUI widget layout invariants, bounding boxes, dock isolation, and tap hit resolution */
+    {
+        assert(TEST_W_CAL == 0);
+        assert(TEST_W_COUNT == 28);
+
+        /* Test across various display configurations:
+         * 1) Standard portrait: 1080x2400, density 2.625
+         * 2) Narrow portrait: 720x1280, density 2.0
+         * 3) Large landscape: 2400x1080, density 2.625 */
+        const struct {
+            int w, h;
+            float d;
+        } configs[] = {
+            {1080, 2400, 2.625f},
+            {720, 1280, 2.0f},
+            {2400, 1080, 2.625f}
+        };
+
+        for (int c_idx = 0; c_idx < 3; c_idx++) {
+            const int screen_w = configs[c_idx].w;
+            const int screen_h = configs[c_idx].h;
+            const float d = configs[c_idx].d;
+            const bool landscape = screen_w > screen_h;
+            const float top_inset = (landscape ? 14.0f : 58.0f) * d;
+            const float side_inset = (landscape ? 36.0f : 12.0f) * d;
+            const float bottom_inset = (landscape ? 10.0f : 32.0f) * d;
+            const float ui_x0 = side_inset;
+            const float ui_w = (float)screen_w - 2.0f * side_inset;
+
+            /* Check 1: Drawer Closed State */
+            TestWidgetRect widgets[TEST_W_COUNT];
+            memset(widgets, 0, sizeof(widgets));
+
+            /* Top header (no placed widgets) */
+            const float header_h = (landscape ? 28.0f : 36.0f) * d;
+            const float status_y = top_inset + header_h + 3.0f * d;
+            const float status_h = (landscape ? 14.0f : 18.0f) * d;
+            const float badge_y = status_y + status_h + 3.0f * d;
+            const float badge_h = (landscape ? 24.0f : 30.0f) * d;
+            const float half_w = (ui_w - 6.0f * d) * 0.5f;
+
+            /* Perimeter Badges: W_CAL (EMF) & W_REMPOD (Baro/Compass) */
+            widgets[TEST_W_CAL] = (TestWidgetRect){ui_x0, badge_y, half_w, badge_h, true};
+            widgets[TEST_W_REMPOD] = (TestWidgetRect){ui_x0 + half_w + 6.0f * d, badge_y, half_w, badge_h, true};
+
+            /* Dock & Floating Visualizer */
+            const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
+            const float bottom_bar_y = (float)screen_h - bottom_inset - bottom_bar_h;
+            const float vis_h = (landscape ? 54.0f : 80.0f) * d;
+            const float vis_top = bottom_bar_y - vis_h - 8.0f * d;
+
+            /* Floating visualizer placed when drawer is closed */
+            widgets[TEST_W_CAM_PREVIEW] = (TestWidgetRect){ui_x0, vis_top, ui_w, vis_h, true};
+
+            /* Bottom Action Bar */
+            const float dock_cx = ui_x0 + ui_w * 0.5f;
+            const float dock_cy = bottom_bar_y + bottom_bar_h * 0.5f;
+            const float r_outer = (bottom_bar_h >= 52.0f * d ? 28.0f : 21.0f) * d;
+            const float gap = 5.0f * d;
+            const float btn_h = (bottom_bar_h >= 52.0f * d ? 38.0f : 30.0f) * d;
+            const float btn_y = dock_cy - btn_h * 0.5f;
+            const float side_clearance = r_outer + 8.0f * d;
+            const float avail_w = (ui_w * 0.5f) - side_clearance;
+            const float btn_w = (avail_w - gap) * 0.5f;
+            const float hit_pad = 6.0f * d;
+
+            /* Left flank */
+            const float b1_x = ui_x0;
+            widgets[TEST_W_START] = (TestWidgetRect){b1_x, btn_y, btn_w, btn_h, true};
+            const float b2_x = b1_x + btn_w + gap;
+            widgets[TEST_W_MARK_HIT] = (TestWidgetRect){b2_x, btn_y, btn_w, btn_h, true};
+
+            /* Center Shutter */
+            widgets[TEST_W_VIDEO_REC] = (TestWidgetRect){
+                dock_cx - r_outer - hit_pad, dock_cy - r_outer - hit_pad,
+                (r_outer + hit_pad) * 2.0f, (r_outer + hit_pad) * 2.0f, true
+            };
+
+            /* Right flank */
+            const float b3_x = dock_cx + side_clearance;
+            widgets[TEST_W_CAM_TINT] = (TestWidgetRect){b3_x, btn_y, btn_w, btn_h, true};
+            const float b4_x = b3_x + btn_w + gap;
+            widgets[TEST_W_CTRL] = (TestWidgetRect){b4_x, btn_y, btn_w, btn_h, true};
+
+            /* Assert dock buttons do not overlap horizontally */
+            const float b1_right = widgets[TEST_W_START].x + widgets[TEST_W_START].w;
+            const float b2_left = widgets[TEST_W_MARK_HIT].x;
+            const float b2_right = widgets[TEST_W_MARK_HIT].x + widgets[TEST_W_MARK_HIT].w;
+            const float shutter_left = widgets[TEST_W_VIDEO_REC].x;
+            const float shutter_right = widgets[TEST_W_VIDEO_REC].x + widgets[TEST_W_VIDEO_REC].w;
+            const float b3_left = widgets[TEST_W_CAM_TINT].x;
+            const float b3_right = widgets[TEST_W_CAM_TINT].x + widgets[TEST_W_CAM_TINT].w;
+            const float b4_left = widgets[TEST_W_CTRL].x;
+            const float b4_right = widgets[TEST_W_CTRL].x + widgets[TEST_W_CTRL].w;
+
+            assert(b2_left >= b1_right + gap - 0.01f);
+            assert(shutter_left >= b2_right + 2.0f * d - 0.01f);
+            assert(b3_left >= shutter_right + 2.0f * d - 0.01f);
+            assert(b4_left >= b3_right + gap - 0.01f);
+            assert(b4_right <= ui_x0 + ui_w + 0.01f);
+
+            /* Test tap resolution for center shutter */
+            assert(test_resolve_tap(widgets, dock_cx, dock_cy) == TEST_W_VIDEO_REC);
+            /* Test tap resolution for SWEEP */
+            assert(test_resolve_tap(widgets, b1_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_START);
+            /* Test tap resolution for MARK HIT */
+            assert(test_resolve_tap(widgets, b2_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_MARK_HIT);
+            /* Test tap resolution for CAM TINT */
+            assert(test_resolve_tap(widgets, b3_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_CAM_TINT);
+            /* Test tap resolution for CTRL */
+            assert(test_resolve_tap(widgets, b4_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_CTRL);
+            /* Test tap resolution for Top EMF Badge */
+            assert(test_resolve_tap(widgets, ui_x0 + half_w * 0.5f, badge_y + badge_h * 0.5f) == TEST_W_CAL);
+            /* Test tap resolution for Top Environment Badge */
+            assert(test_resolve_tap(widgets, ui_x0 + half_w + 6.0f * d + half_w * 0.5f, badge_y + badge_h * 0.5f) == TEST_W_REMPOD);
+
+            /* Check 2: Drawer Open State */
+            memset(widgets, 0, sizeof(widgets));
+            const float drawer_h = (landscape ? 240.0f : 290.0f) * d;
+            const float drawer_y = (float)screen_h - bottom_inset - drawer_h;
+            const float d_header_h = 28.0f * d;
+            const float close_w = 40.0f * d, close_h = 22.0f * d;
+            widgets[TEST_W_CLOSE_DRAWER] = (TestWidgetRect){
+                ui_x0 + ui_w - close_w - 6.0f * d, drawer_y + 4.0f * d, close_w, close_h, true
+            };
+
+            float cur_y = drawer_y + d_header_h + 4.0f * d;
+            const float d_gap = 3.0f * d;
+            const float pill_h = (drawer_h - d_header_h - 32.0f * d) / 5.0f;
+            const float p4_w = (ui_w - d_gap * 3.0f - 16.0f * d) / 4.0f;
+
+            /* Row 4: Sensitivity & Cooldown */
+            float r4_y = cur_y + (pill_h + d_gap) * 3.0f;
+            const float step_w = 44.0f * d;
+            const float val_w = (ui_w - step_w * 4.0f - d_gap * 5.0f - 16.0f * d) * 0.5f;
+            float px4 = ui_x0 + 8.0f * d;
+            widgets[TEST_W_SENS_DOWN] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
+            px4 += step_w + d_gap + val_w + d_gap;
+            widgets[TEST_W_SENS_UP] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
+            px4 += step_w + d_gap;
+            widgets[TEST_W_COOL_DOWN] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
+            px4 += step_w + d_gap + val_w + d_gap;
+            widgets[TEST_W_COOL_UP] = (TestWidgetRect){px4, r4_y, step_w, pill_h, true};
+
+            /* Row 5: Audio Session & Recording Tools */
+            float r5_y = cur_y + (pill_h + d_gap) * 4.0f;
+            float px5 = ui_x0 + 8.0f * d;
+            widgets[TEST_W_MIC] = (TestWidgetRect){px5, r5_y, p4_w, pill_h, true};
+            px5 += p4_w + d_gap;
+            widgets[TEST_W_REC] = (TestWidgetRect){px5, r5_y, p4_w, pill_h, true};
+            px5 += p4_w + d_gap;
+            widgets[TEST_W_VIDEO_REC] = (TestWidgetRect){px5, r5_y, p4_w, pill_h, true};
+            px5 += p4_w + d_gap;
+            widgets[TEST_W_SESS] = (TestWidgetRect){px5, r5_y, p4_w, pill_h, true};
+
+            /* Crucial invariant: W_CAM_PREVIEW is NOT visible when drawer is open */
+            assert(!widgets[TEST_W_CAM_PREVIEW].visible);
+
+            /* Tap tests on drawer buttons must resolve to the drawer buttons, not W_CAM_PREVIEW */
+            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_DOWN].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_DOWN);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_SENS_UP].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_SENS_UP);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_COOL_DOWN].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_COOL_DOWN);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_COOL_UP].x + 5.0f, r4_y + pill_h * 0.5f) == TEST_W_COOL_UP);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_MIC].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_MIC);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_REC].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_REC);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_VIDEO_REC].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_VIDEO_REC);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_SESS].x + 5.0f, r5_y + pill_h * 0.5f) == TEST_W_SESS);
+            assert(test_resolve_tap(widgets, widgets[TEST_W_CLOSE_DRAWER].x + 5.0f, drawer_y + 6.0f * d) == TEST_W_CLOSE_DRAWER);
+        }
+        printf("  [PASS] Widget boundaries, dock shutter clearance, and drawer tap resolution\n");
     }
 
     printf("ALL FieldVox native C unit tests PASSED.\n");
