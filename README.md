@@ -6,10 +6,16 @@ FieldVox lets you listen in real time while a session is running, mark interesti
 
 ## Current Android checkpoint
 
-Stage 1U-N adds the native 1000-slot station ring, a one-second visible channel sweep,
-and a separate six-second audio-source dwell cadence. The app also records live microphone
-sessions to paired WAV/JSONL files and checkpoints WAV headers so interrupted recordings
-remain recoverable.
+Stage 1U-P expands FieldVox Lab with a comprehensive GhostTube-style ITC suite:
+- **64–128 Active Channel Station Pool**: Seeded 64 diverse public/talk radio stations in native C and up to 128 active channels via RadioBrowser discovery (`all.api.radio-browser.info`), with automatic startup caching.
+- **Live Magnetometer EMF Meter**: Real-time micro-Tesla ($\mu\text{T}$) readout, dynamic baseline tracking ($\Delta\,\mu\text{T}$), status badges (`BASELINE`, `FLUCTUATING`, `ELEVATED`, `SPIKE DETECTED`), and a 10-segment dynamic color-coded LED gauge.
+- **Interactive Sweep Controller**: User-selectable sweep cadences (`100ms`, `250ms`, `500ms`, `1.0s`) and sweep directions (`▶ FWD`, `◀ REV`, `🔀 RND`) with a live station indicator badge (`CH XXX / XXX • Station Name`).
+- **Live Audio FX Suite**: Real-time DSP effects for live monitoring:
+  - **ECHO**: Circular feedback delay (~150ms buffer) for atmospheric reverb.
+  - **NOISE**: Uniform/Gaussian white noise generator for sensory deprivation.
+  - **REV**: Real-time PCM block audio reversal to counteract auditory pareidolia.
+- **Adaptive Notch-Safe Dashboard**: Safe-area display cutout handling for camera notches and system navigation bars, plus responsive portrait and landscape scaling within a unified scroll container.
+- **WAV/JSONL Session Engine**: Records live microphone sessions to paired WAV/JSONL files with continuous header checkpointing so interrupted recordings remain recoverable.
 
 The Ctrl panel includes:
 
@@ -18,6 +24,7 @@ The Ctrl panel includes:
 - Export Manifest
 - Live microphone capture with bounded station grains
 - Native station-ring channel display and audio dwell sweep
+- Real-time live speaker monitoring with Audio FX
 
 Export Manifest creates fieldvox-session-manifest.tsv from matched JSONL/WAV session pairs and exports it to public Downloads/FieldVoxLab.
 
@@ -26,10 +33,12 @@ Export Manifest creates fieldvox-session-manifest.tsv from matched JSONL/WAV ses
 Verified on Pixel 9 Pro XL / GrapheneOS (Android 17 / API 37):
 
 - Android package: org.fieldvox.lab
-- Version: 0.1.0-stage1u-n-audio-dwell
+- Version: 0.1.0-stage1u-p-ghosttube-itc
 - Target SDK: 37
 - Build toolchain: Android Gradle Plugin 9.4.0, Gradle 9.8.0, Build Tools 37.0.0, NDK r30, CMake 4.1.2
-- Android lint: clean
+- Android lint: clean (0 errors)
+- Unit tests: 22/22 tests passing
+- Native C smoke tests: passing
 - Manifest export verified with private/public byte-for-byte match
 - Public JSONL/WAV exports verified byte-for-byte against app-private session files
 - No broad Android storage permissions are used
@@ -163,6 +172,38 @@ That makes it easier to find from Android Files, copy to a computer, or share fo
 A source audit is extra proof-of-process information. It records what the app knew about the session, hit, timeline, and source metadata when a hit was marked.
 
 It does not prove that a hit is paranormal. It helps reviewers see what the app did and what files were created.
+
+### What the live EMF meter means
+
+The live EMF (Electromagnetic Field) meter uses your phone's built-in magnetic sensor (magnetometer) to measure environmental magnetic field changes in micro-Tesla ($\mu\text{T}$).
+
+The meter shows:
+- **Total field magnitude**: The overall magnetic field reading in $\mu\text{T}$.
+- **Delta ($\Delta\,\mu\text{T}$)**: The difference between the current reading and your room's natural baseline.
+- **Status badge**: Categorizes activity into `BASELINE`, `FLUCTUATING`, `ELEVATED`, or `SPIKE DETECTED`.
+- **10-Segment visual LED gauge**: Lights up green, yellow, orange, and red as field fluctuations increase.
+
+**Important**: EMF spikes are routinely caused by phone movement, internal electronics, appliances, metal studs, wiring, or cell towers. They do **not** prove the presence of ghosts or paranormal activity. FieldVox logs these fluctuations as physical telemetry alongside your audio.
+
+### What the sweep controls mean
+
+Ghost boxes sweep across radio channels at rapid speeds. FieldVox Lab gives you direct interactive control:
+- **Cadence button (`250ms`)**: Tap to cycle through sweep speeds: `100ms`, `250ms`, `500ms`, or `1.0s`.
+- **Direction button (`▶ FWD`)**: Tap to cycle sweep directions: Forward (`▶ FWD`), Reverse (`◀ REV`), or Random (`🔀 RND`).
+- **Channel banner**: Shows the active channel number, total channel pool size, and station name (e.g. `CH 005 / 128 • WNYC New York`).
+
+### What the Audio FX suite does
+
+The sweep bar includes real-time audio processing buttons that illuminate neon-green when active:
+- **ECHO**: Adds a circular delay feedback (~150ms) to create an atmospheric reverb chamber.
+- **NOISE**: Blends in calibrated white noise. In traditional ITC research, sensory noise floors are believed to assist auditory focus or sensory deprivation.
+- **REV**: Reverses audio buffers in real time. Playing radio snippets backward helps prevent "audio pareidolia" — your brain mistakenly hearing English words from ordinary forward speech.
+
+### What the expanded station pool means
+
+Earlier builds only cycled through 4 seed stations. Stage 1U-P expands the radio pool to **64 to 128 active stations**:
+- A curated seed list of 64 diverse public, talk, and news feeds in native C.
+- Background integration with the public RadioBrowser catalog (`all.api.radio-browser.info`), assembling an active session pool of up to 128 verified spoken-word stations.
 
 ## For technical people: what the app does
 
@@ -309,6 +350,69 @@ The canonical Stage 1P-B commit removed duplicate JSON object names from `sweep_
 
 Playback remains unchanged in Stage 1P-B.
 
+### Hardware Magnetometer & EMF Meter (`EmfMeterView`)
+
+Stage 1U-P integrates a hardware magnetometer gauge:
+- Listens to Android `Sensor.TYPE_MAGNETIC_FIELD`.
+- Calculates total field intensity:
+  $$B = \sqrt{x^2 + y^2 + z^2}\quad (\mu\text{T})$$
+- Computes baseline deviation:
+  $$\Delta B = |B - B_{\text{baseline}}|$$
+  where $B_{\text{baseline}}$ is established upon sensor initialization.
+- Dynamic categorization:
+  - `BASELINE`: $\Delta B < 0.5\,\mu\text{T}$
+  - `FLUCTUATING`: $0.5 \le \Delta B < 1.5\,\mu\text{T}$
+  - `ELEVATED`: $1.5 \le \Delta B < 3.0\,\mu\text{T}$
+  - `SPIKE DETECTED`: $\Delta B \ge 3.0\,\mu\text{T}$ or magnetic trigger hit
+- Custom canvas drawing:
+  - Header readout: `EMF: XX.X µT  Δ X.X µT  [STATUS]`
+  - 10-segment dynamic LED gauge: Segments 1–3 (green `0xFF00E676`), 4–6 (yellow `0xFFFFD600`), 7–8 (orange `0xFFFF9100`), 9–10 (crimson red `0xFFFF1744`).
+
+### Interactive Sweep Controller & Direction Engine
+
+The sweep bar provides real-time control over the station sweep loop:
+- **Sweep Cadences**:
+  - `100ms`: High-speed grain scanning.
+  - `250ms`: Standard GhostTube/Spirit Box cadence (default).
+  - `500ms`: Medium phonetic dwell.
+  - `1.0s` (`1000ms`): Full word/syllable dwell.
+- **Sweep Directions**:
+  - `▶ FWD` (`direction = 1`): Increments logical station slot index.
+  - `◀ REV` (`direction = -1`): Decrements logical station slot index.
+  - `🔀 RND` (`direction = 0`): Pseudorandom station slot selection.
+- Synchronized GUI badge: Updates immediately with current slot, pool size, and station callsign/name.
+
+### Live DSP Audio FX Pipeline
+
+Integrated directly into `liveSpeakerMonitor()` during live 48kHz audio track playback:
+- **Echo / Reverb (`ECHO`)**:
+  - 150ms circular delay feedback buffer (`LIVE_SAMPLE_RATE * 150 / 1000 = 7,200` samples).
+  - Multi-tap circular write/read with 45% attenuation decay.
+- **White Noise Generator (`NOISE`)**:
+  - Uniform pseudorandom PCM noise floor generator.
+  - Mixed into output buffer at calibrated background masking volume (~15% peak).
+- **Reverse Audio Synthesis (`REV`)**:
+  - Real-time PCM buffer block reversal.
+  - Blocks of 1,024–2,048 samples are reversed in place before feeding the audio sink, preventing cognitive speech pareidolia while preserving raw phonetic spectrum.
+- **Hardware-Style Visual Feedback**: Buttons toggle between idle slate-blue borders (`0xFF384E6C`) and active glowing neon-green borders/fills (`0xFF00E676`).
+
+### 64–128 Channel Station Pool & Discovery Architecture
+
+- **Native C Seeding (`fv_source_audit.c`)**: Expanded `FVSA_SWEEP_SLOT_COUNT` from 4 to 64 diverse public, talk, and news feeds (NPR, BBC, CBC, RTE, DW, France Info, OPB, WBUR, KCRW, WNYC, etc.). Native JSON serialization capacity increased to 64KB.
+- **Dynamic Online Discovery (`RadioBrowserDiscoveryCache.java`)**:
+  - Queries `all.api.radio-browser.info` DNS round-robin.
+  - Targets 1,000-station catalog cache and 128-station session pool.
+  - `autoDiscoverSourcesIfNeeded()` automatically warms up the cache on launch or resume if local available slots fall below 32.
+
+### Responsive Notch-Safe Display Architecture
+
+- **Window Insets & Display Cutouts**:
+  - Handled via `View.setOnApplyWindowInsetsListener` with `DisplayCutout` safe inset queries.
+  - Respects top camera notches, bottom navigation bars, and horizontal side notches in landscape mode.
+- **Orientation Adaptation**:
+  - Automatically adapts glyph dimensions (84dp in portrait vs 44dp in landscape), wave panel heights (88dp vs 54dp), and EMF gauge heights (52dp vs 42dp).
+  - Entire view hierarchy resides in a single, non-clipping root `ScrollView` with `fillViewport=true`, ensuring that controls, action buttons, hit markers, and logs remain accessible across all screen aspect ratios, foldables, and multi-window splits.
+
 ## Clean-room and safety position
 
 FieldVox Lab is a clean-room open-source experimental tool. It does not use proprietary branding, assets, databases, or marketing copy from any commercial paranormal app. It does not include a haunted-place database.
@@ -340,7 +444,13 @@ FieldVox Lab now uses a native C binary-blob station ring with separated visible
 - Stage 1U-N changes network/source audio dwell to 6000 ms so internet streams have time to prepare and buffer.
 - Stage 1U-N removes the duplicate GUI repaint from the station-selection path.
 - Stage 1U-N removes the one-second audio reset path that prevented audible stream content from settling.
-- User field check after Stage 1U-N: the app was working well and audible voices/source content were heard.
+- **Stage 1U-P:** introduced full GhostTube-style ITC suite:
+  - 64–128 active radio channels (64 native C seed stations + up to 128 dynamic online channels via RadioBrowser).
+  - Live EMF meter widget with 10-segment dynamic LED bar and micro-Tesla telemetry readout.
+  - Interactive Sweep Controller: Cadence (100ms, 250ms, 500ms, 1.0s) and Direction (FWD, REV, RND) cycling.
+  - Live Audio FX suite: Circular Echo delay (~150ms), White Noise generator, and Reverse Audio DSP toggles with glowing feedback.
+  - Notch-safe display cutout insets and responsive portrait/landscape dashboard layout.
+- User field check after Stage 1U-P: all controls verified on physical Google Pixel 9 Pro XL; zero clipping or regressions.
 - The station ring and timing constants are controlled by native C/JNI and binary blob metadata.
 - Java is used only where Android UI, lifecycle, permission, scheduler, MediaPlayer preparation, or JNI platform glue requires it.
 - There is no word bank and no TTS.
@@ -349,11 +459,11 @@ FieldVox Lab now uses a native C binary-blob station ring with separated visible
 
 ### Timing model
 
-- Visible channel clock: 1000 ms.
+- Visible channel clock: User-configurable via sweep bar (100 ms, 250 ms, 500 ms, 1000 ms; default 250 ms).
 - Network/source audio dwell: 6000 ms.
-- Native station ring: 1000 logical slots.
-- GUI display: three-digit channel number only.
-- Main GUI does not display raw station names or raw stream URLs.
+- Native station ring: 1000 logical slots (seeded with 64 diverse feeds, expandable up to 128 via online catalog cache).
+- Sweep directions: Forward (`▶ FWD`), Reverse (`◀ REV`), Random (`🔀 RND`).
+- GUI display: Channel indicator badge (`CH XXX / XXX • Station Name`).
 
 ### Network reality
 
