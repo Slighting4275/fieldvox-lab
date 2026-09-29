@@ -39,7 +39,7 @@ static const unsigned char FVSA_MAGIC_BLOB[] = {
 #define FVSA_TIMELINE_CAP 256
 #define FVSA_TIMELINE_KIND_CAP 64
 #define FVSA_TIMELINE_DETAIL_CAP 1024
-#define FVSA_SWEEP_SLOT_COUNT 4
+#define FVSA_SWEEP_SLOT_COUNT 64
 
 typedef struct FvsaTimelineEvent {
     long long unix_ms;
@@ -76,10 +76,70 @@ static unsigned long long fvsa_sweep_seq = 0ULL;
 static unsigned long long fvsa_sweep_state = 0x4656534153503141ULL; /* "FVSASP1A" */
 
 static const FvsaSweepSlot fvsa_slots[FVSA_SWEEP_SLOT_COUNT] = {
-    {0, "stage1p-a-slot-kiro", "KIRO Newsradio Seattle 97.3", "US", "en", "hash_pending_kiro_2643_48_aac", "KIRO Newsradio Seattle 97.3"},
-    {1, "stage1p-a-slot-nwnews", "Northwest Newsradio KOMO/KNWN", "US", "en", "hash_pending_northwest_newsradio", "Northwest Newsradio KOMO/KNWN"},
-    {2, "stage1p-a-slot-kuow", "KUOW", "US", "en", "hash_pending_kuow", "KUOW"},
-    {3, "stage1p-a-slot-bbc", "BBC", "GB", "en", "hash_pending_bbc", "BBC"}
+    {0, "stage1p-a-slot-kiro", "KIRO Newsradio Seattle 97.3", "US", "en", "hash_kiro_2643_48_aac", "KIRO Newsradio Seattle 97.3"},
+    {1, "stage1p-a-slot-nwnews", "Northwest Newsradio KOMO/KNWN", "US", "en", "hash_northwest_newsradio", "Northwest Newsradio KOMO/KNWN"},
+    {2, "stage1p-a-slot-kuow", "KUOW Seattle 94.9", "US", "en", "hash_kuow", "KUOW Seattle 94.9"},
+    {3, "stage1p-a-slot-bbc", "BBC World Service", "GB", "en", "hash_bbc_world_service", "BBC World Service"},
+    {4, "stage1p-a-slot-wnyc", "WNYC AM 820 New York", "US", "en", "hash_wnyc_am", "WNYC AM 820 New York"},
+    {5, "stage1p-a-slot-wbur", "WBUR 90.9 Boston", "US", "en", "hash_wbur", "WBUR 90.9 Boston"},
+    {6, "stage1p-a-slot-wamu", "WAMU 88.5 Washington DC", "US", "en", "hash_wamu", "WAMU 88.5 Washington DC"},
+    {7, "stage1p-a-slot-mpr", "Minnesota Public Radio News", "US", "en", "hash_mpr_news", "Minnesota Public Radio News"},
+    {8, "stage1p-a-slot-vpr", "Vermont Public Radio", "US", "en", "hash_vpr", "Vermont Public Radio"},
+    {9, "stage1p-a-slot-wbez", "WBEZ 91.5 Chicago", "US", "en", "hash_wbez", "WBEZ 91.5 Chicago"},
+    {10, "stage1p-a-slot-opb", "Oregon Public Broadcasting OPB", "US", "en", "hash_opb", "Oregon Public Broadcasting OPB"},
+    {11, "stage1p-a-slot-kcrw", "KCRW 89.9 Santa Monica", "US", "en", "hash_kcrw", "KCRW 89.9 Santa Monica"},
+    {12, "stage1p-a-slot-wunc", "WUNC 91.5 North Carolina", "US", "en", "hash_wunc", "WUNC 91.5 North Carolina"},
+    {13, "stage1p-a-slot-whyy", "WHYY 90.9 Philadelphia", "US", "en", "hash_whyy", "WHYY 90.9 Philadelphia"},
+    {14, "stage1p-a-slot-kera", "KERA 90.1 North Texas", "US", "en", "hash_kera", "KERA 90.1 North Texas"},
+    {15, "stage1p-a-slot-wlrn", "WLRN 91.3 South Florida", "US", "en", "hash_wlrn", "WLRN 91.3 South Florida"},
+    {16, "stage1p-a-slot-kqed", "KQED 88.5 San Francisco", "US", "en", "hash_kqed", "KQED 88.5 San Francisco"},
+    {17, "stage1p-a-slot-wpr", "Wisconsin Public Radio News", "US", "en", "hash_wpr", "Wisconsin Public Radio News"},
+    {18, "stage1p-a-slot-ipr", "Iowa Public Radio News", "US", "en", "hash_ipr", "Iowa Public Radio News"},
+    {19, "stage1p-a-slot-noaa", "NOAA Puget Sound Marine Weather", "US", "en", "hash_noaa", "NOAA Puget Sound Marine Weather"},
+    {20, "stage1p-a-slot-cspan", "C-SPAN Radio Washington", "US", "en", "hash_cspan", "C-SPAN Radio Washington"},
+    {21, "stage1p-a-slot-cbc", "CBC Radio One Toronto", "CA", "en", "hash_cbc", "CBC Radio One Toronto"},
+    {22, "stage1p-a-slot-rte", "RTE Radio 1 Dublin", "IE", "en", "hash_rte", "RTE Radio 1 Dublin"},
+    {23, "stage1p-a-slot-abc-au", "ABC NewsRadio Sydney", "AU", "en", "hash_abc_au", "ABC NewsRadio Sydney"},
+    {24, "stage1p-a-slot-bbc4", "BBC Radio 4 London", "GB", "en", "hash_bbc4", "BBC Radio 4 London"},
+    {25, "stage1p-a-slot-finfo", "France Info Paris", "FR", "fr", "hash_finfo", "France Info Paris"},
+    {26, "stage1p-a-slot-dw", "Deutsche Welle English", "DE", "en", "hash_dw", "Deutsche Welle English"},
+    {27, "stage1p-a-slot-nhk", "NHK World Radio Tokyo", "JP", "en", "hash_nhk", "NHK World Radio Tokyo"},
+    {28, "stage1p-a-slot-rnz", "Radio New Zealand National", "NZ", "en", "hash_rnz", "Radio New Zealand National"},
+    {29, "stage1p-a-slot-cpr", "Colorado Public Radio CPR", "US", "en", "hash_cpr", "Colorado Public Radio CPR"},
+    {30, "stage1p-a-slot-tpr", "Texas Public Radio KSTX", "US", "en", "hash_tpr", "Texas Public Radio KSTX"},
+    {31, "stage1p-a-slot-gpb", "Georgia Public Broadcasting GPB", "US", "en", "hash_gpb", "Georgia Public Broadcasting GPB"},
+    {32, "stage1p-a-slot-wuom", "Michigan Radio WUOM", "US", "en", "hash_wuom", "Michigan Radio WUOM"},
+    {33, "stage1p-a-slot-kwmu", "St. Louis Public Radio KWMU", "US", "en", "hash_kwmu", "St. Louis Public Radio KWMU"},
+    {34, "stage1p-a-slot-kut", "KUT 90.5 Austin", "US", "en", "hash_kut", "KUT 90.5 Austin"},
+    {35, "stage1p-a-slot-nhpr", "New Hampshire Public Radio NHPR", "US", "en", "hash_nhpr", "New Hampshire Public Radio NHPR"},
+    {36, "stage1p-a-slot-maine", "Maine Public Radio", "US", "en", "hash_maine", "Maine Public Radio"},
+    {37, "stage1p-a-slot-boise", "Boise State Public Radio", "US", "en", "hash_boise", "Boise State Public Radio"},
+    {38, "stage1p-a-slot-wpr-wy", "Wyoming Public Radio", "US", "en", "hash_wpr_wy", "Wyoming Public Radio"},
+    {39, "stage1p-a-slot-kufm", "Montana Public Radio KUFM", "US", "en", "hash_kufm", "Montana Public Radio KUFM"},
+    {40, "stage1p-a-slot-kska", "Alaska Public Media KSKA", "US", "en", "hash_kska", "Alaska Public Media KSKA"},
+    {41, "stage1p-a-slot-hpr", "Hawaii Public Radio HPR", "US", "en", "hash_hpr", "Hawaii Public Radio HPR"},
+    {42, "stage1p-a-slot-kpcc", "KPCC 89.3 Pasadena", "US", "en", "hash_kpcc", "KPCC 89.3 Pasadena"},
+    {43, "stage1p-a-slot-kalw", "KALW 91.7 San Francisco", "US", "en", "hash_kalw", "KALW 91.7 San Francisco"},
+    {44, "stage1p-a-slot-knpr", "Nevada Public Radio KNPR", "US", "en", "hash_knpr", "Nevada Public Radio KNPR"},
+    {45, "stage1p-a-slot-kuaz", "Arizona Public Media KUAZ", "US", "en", "hash_kuaz", "Arizona Public Media KUAZ"},
+    {46, "stage1p-a-slot-kunm", "New Mexico Public Radio KUNM", "US", "en", "hash_kunm", "New Mexico Public Radio KUNM"},
+    {47, "stage1p-a-slot-upr", "Utah Public Radio UPR", "US", "en", "hash_upr", "Utah Public Radio UPR"},
+    {48, "stage1p-a-slot-npm", "Nebraska Public Media", "US", "en", "hash_npm", "Nebraska Public Media"},
+    {49, "stage1p-a-slot-sdpb", "South Dakota Public Broadcasting", "US", "en", "hash_sdpb", "South Dakota Public Broadcasting"},
+    {50, "stage1p-a-slot-ndpr", "North Dakota Public Radio Prairie", "US", "en", "hash_ndpr", "North Dakota Public Radio Prairie"},
+    {51, "stage1p-a-slot-kpr", "Kansas Public Radio KPR", "US", "en", "hash_kpr", "Kansas Public Radio KPR"},
+    {52, "stage1p-a-slot-kgou", "Oklahoma Public Media KGOU", "US", "en", "hash_kgou", "Oklahoma Public Media KGOU"},
+    {53, "stage1p-a-slot-kuar", "Arkansas Public Media KUAR", "US", "en", "hash_kuar", "Arkansas Public Media KUAR"},
+    {54, "stage1p-a-slot-wrkf", "Louisiana Public Broadcasting WRKF", "US", "en", "hash_wrkf", "Louisiana Public Broadcasting WRKF"},
+    {55, "stage1p-a-slot-mpb", "Mississippi Public Broadcasting MPB", "US", "en", "hash_mpb", "Mississippi Public Broadcasting MPB"},
+    {56, "stage1p-a-slot-apr", "Alabama Public Radio APR", "US", "en", "hash_apr", "Alabama Public Radio APR"},
+    {57, "stage1p-a-slot-wpln", "Tennessee Public Radio WPLN", "US", "en", "hash_wpln", "Tennessee Public Radio WPLN"},
+    {58, "stage1p-a-slot-wfpl", "Kentucky Public Radio WFPL", "US", "en", "hash_wfpl", "Kentucky Public Radio WFPL"},
+    {59, "stage1p-a-slot-wfiu", "Indiana Public Media WFIU", "US", "en", "hash_wfiu", "Indiana Public Media WFIU"},
+    {60, "stage1p-a-slot-wosu", "Ohio Public Radio WOSU", "US", "en", "hash_wosu", "Ohio Public Radio WOSU"},
+    {61, "stage1p-a-slot-wvpb", "West Virginia Public Broadcasting", "US", "en", "hash_wvpb", "West Virginia Public Broadcasting"},
+    {62, "stage1p-a-slot-wnpr", "Connecticut Public Radio WNPR", "US", "en", "hash_wnpr", "Connecticut Public Radio WNPR"},
+    {63, "stage1p-a-slot-ripbs", "Rhode Island PBS Radio", "US", "en", "hash_ripbs", "Rhode Island PBS Radio"}
 };
 
 static long long fvsa_now_ms(void) {
@@ -418,7 +478,7 @@ static char *fvsa_sweep_event_json(const FvsaSweepEvent *ev) {
 }
 
 static char *fvsa_source_slots_json(void) {
-    size_t cap = 4096;
+    size_t cap = 65536;
     char *out = (char *)malloc(cap);
     if (out == NULL) {
         return NULL;

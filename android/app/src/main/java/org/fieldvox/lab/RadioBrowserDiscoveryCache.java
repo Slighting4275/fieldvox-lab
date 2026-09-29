@@ -29,7 +29,7 @@ public final class RadioBrowserDiscoveryCache {
     public static final String USER_AGENT = "FieldVoxLab/0.1.0 (+https://codeberg.org/Exalted6165/fieldvox-lab)";
     private static final String DNS_DISCOVERY_HOST = "all.api.radio-browser.info";
     private static final int TARGET_CATALOG_COUNT = 1000;
-    private static final int TARGET_SESSION_POOL_COUNT = 64;
+    private static final int TARGET_SESSION_POOL_COUNT = 128;
     private static final int MAX_RESPONSE_CHARS = 24 * 1024 * 1024;
 
     private RadioBrowserDiscoveryCache() {

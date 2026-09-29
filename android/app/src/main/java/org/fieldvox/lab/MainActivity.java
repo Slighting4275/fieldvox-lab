@@ -35,9 +35,15 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.FrameLayout;
+import android.content.res.Configuration;
 import android.widget.TextView;
 import android.widget.SeekBar;
 import android.widget.EditText;
+import android.graphics.Typeface;
+import android.text.TextUtils;
+import android.widget.Toast;
+import android.content.Context;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -172,6 +178,24 @@ public class MainActivity extends Activity {
     private Button speakerMonitorButton;
     private Button markHitButton;
     private Button exportHitsButton;
+
+    // GhostTube-Style EMF & Audio Suite
+    private EmfMeterView emfMeterView;
+    private TextView channelBadgeView;
+    private int userSweepCadenceMs = 250;
+    private int userSweepDirection = 1; // 1 = FWD, -1 = REV, 0 = RND
+    private volatile boolean userEchoFxEnabled = false;
+    private volatile boolean userWhiteNoiseEnabled = false;
+    private volatile boolean userReverseAudioEnabled = false;
+
+    private Button sweepCadenceButton;
+    private Button sweepDirectionButton;
+    private Button audioFxEchoButton;
+    private Button audioNoiseButton;
+    private Button audioRevButton;
+
+    private final short[] echoDelayBuffer = new short[LIVE_SAMPLE_RATE * 150 / 1000];
+    private int echoDelayIndex = 0;
 
     // FIELDVOX_STAGE1Q_C_VISIBLE_SOURCE_CATALOG
     private android.widget.Button liveSourcesButton;
@@ -308,18 +332,117 @@ public class MainActivity extends Activity {
         Button b = new Button(this);
         b.setText(label);
         b.setTextColor(Color.WHITE);
-        b.setTextSize(10);
+        b.setTextSize(12);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
         b.setAllCaps(false);
-        b.setSingleLine(false);
+        b.setSingleLine(true);
+        b.setEllipsize(TextUtils.TruncateAt.END);
+        b.setGravity(Gravity.CENTER);
+        b.setIncludeFontPadding(false);
+        b.setBackground(stage1KRoundRect(0xFF151722, 0xFF6FE7FF, 12.0f, 1));
+        b.setPadding(dp(this, 4), dp(this, 6), dp(this, 4), dp(this, 6));
+        return b;
+    }
+
+    private Button makePillButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextColor(0xFFE8F7FF);
+        b.setTextSize(10.0f);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setAllCaps(false);
+        b.setSingleLine(true);
         b.setGravity(Gravity.CENTER);
         b.setIncludeFontPadding(false);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
-        b.setMinHeight(0);
-        b.setMinimumHeight(0);
-        b.setBackgroundColor(Color.rgb(28, 28, 32));
-        b.setPadding(0, 0, 0, 0);
+        b.setBackground(stage1KRoundRect(0xFF101622, 0xFF384E6C, 8.0f, 1));
+        b.setPadding(dp(this, 1), dp(this, 2), dp(this, 1), dp(this, 2));
         return b;
+    }
+
+    private void updateFxButtonState(Button b, boolean active, String label) {
+        if (b == null) return;
+        b.setText(label);
+        if (active) {
+            b.setTextColor(0xFF00E676);
+            b.setBackground(stage1KRoundRect(0xFF082215, 0xFF00E676, 8.0f, 1));
+        } else {
+            b.setTextColor(0xFFE8F7FF);
+            b.setBackground(stage1KRoundRect(0xFF101622, 0xFF384E6C, 8.0f, 1));
+        }
+    }
+
+    private void cycleSweepCadence() {
+        if (userSweepCadenceMs == 100) {
+            userSweepCadenceMs = 250;
+        } else if (userSweepCadenceMs == 250) {
+            userSweepCadenceMs = 500;
+        } else if (userSweepCadenceMs == 500) {
+            userSweepCadenceMs = 1000;
+        } else {
+            userSweepCadenceMs = 100;
+        }
+        if (sweepCadenceButton != null) {
+            sweepCadenceButton.setText(userSweepCadenceMs >= 1000 ? "1.0s" : userSweepCadenceMs + "ms");
+        }
+    }
+
+    private void cycleSweepDirection() {
+        if (userSweepDirection == 1) {
+            userSweepDirection = -1;
+            if (sweepDirectionButton != null) sweepDirectionButton.setText("◀ REV");
+        } else if (userSweepDirection == -1) {
+            userSweepDirection = 0;
+            if (sweepDirectionButton != null) sweepDirectionButton.setText("🔀 RND");
+        } else {
+            userSweepDirection = 1;
+            if (sweepDirectionButton != null) sweepDirectionButton.setText("▶ FWD");
+        }
+    }
+
+    private void toggleAudioFxEcho() {
+        userEchoFxEnabled = !userEchoFxEnabled;
+        updateFxButtonState(audioFxEchoButton, userEchoFxEnabled, "ECHO");
+    }
+
+    private void toggleAudioNoise() {
+        userWhiteNoiseEnabled = !userWhiteNoiseEnabled;
+        updateFxButtonState(audioNoiseButton, userWhiteNoiseEnabled, "NOISE");
+    }
+
+    private void toggleAudioRev() {
+        userReverseAudioEnabled = !userReverseAudioEnabled;
+        updateFxButtonState(audioRevButton, userReverseAudioEnabled, "REV");
+    }
+
+    private void autoDiscoverSourcesIfNeeded() {
+        File slotsFile = liveSourceSlotsFile();
+        boolean needsRefresh = true;
+        if (slotsFile.isFile()) {
+            try {
+                JSONObject obj = new JSONObject(readSmallTextFile(slotsFile, 512 * 1024));
+                int slotCount = obj.optInt("slot_count", 0);
+                if (slotCount >= 32) {
+                    needsRefresh = false;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (needsRefresh) {
+            final Context appContext = getApplicationContext();
+            new Thread(() -> {
+                try {
+                    JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
+                    runOnUiThread(() -> {
+                        refreshLiveSourcesStatus();
+                        stage1KShowChannelNumberOnly(stage1ULFastSweepCursor);
+                    });
+                } catch (Throwable t) {
+                    Log.w("FieldVox", "Auto-discovery initial fetch deferred: " + t);
+                }
+            }, "fieldvox-auto-discover").start();
+        }
     }
 
     private Button makeWideButton(String label) {
@@ -1555,6 +1678,23 @@ public class MainActivity extends Activity {
                 .setTitle("Live Source Catalog")
                 .setMessage(buildLiveSourcesDialogText())
                 .setPositiveButton("OK", null)
+                .setNeutralButton("Refresh Online Stations", (dialog, which) -> {
+                    Toast.makeText(this, "Discovering online radio streams...", Toast.LENGTH_SHORT).show();
+                    final Context appContext = getApplicationContext();
+                    new Thread(() -> {
+                        try {
+                            JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
+                            int count = result.optInt("slot_count", 0);
+                            runOnUiThread(() -> {
+                                refreshLiveSourcesStatus();
+                                stage1KShowChannelNumberOnly(stage1ULFastSweepCursor);
+                                Toast.makeText(this, "Cached " + count + " active station slots", Toast.LENGTH_LONG).show();
+                            });
+                        } catch (Throwable t) {
+                            runOnUiThread(() -> Toast.makeText(this, "Discovery failed: " + t.getMessage(), Toast.LENGTH_LONG).show());
+                        }
+                    }, "user-refresh-stations").start();
+                })
                 .show();
     }
 
@@ -1862,10 +2002,6 @@ public class MainActivity extends Activity {
 
         onlineCarrierSensorListener = new SensorEventListener() {
             public void onSensorChanged(SensorEvent event) {
-                if (!onlineCarrierActive) {
-                    return;
-                }
-
                 long now = System.currentTimeMillis();
                 int type = event.sensor.getType();
 
@@ -1885,12 +2021,25 @@ public class MainActivity extends Activity {
 
                     onlineCarrierMagBaseline = onlineCarrierMagBaseline * 0.985f + mag * 0.015f;
                     float delta = Math.abs(mag - onlineCarrierMagBaseline);
+                    boolean isSpike = delta >= Math.max(2.10f, threshold * 0.90f);
 
-                    if (delta >= Math.max(2.10f, threshold * 0.90f)
+                    if (emfMeterView != null) {
+                        emfMeterView.updateEmf(mag, delta, isSpike);
+                    }
+
+                    if (!onlineCarrierActive) {
+                        return;
+                    }
+
+                    if (isSpike
                             && now >= onlineCarrierNextAllowedGateMs
                             && now - onlineCarrierLastGateMs >= Math.max(1800, cooldownMs + 1200)) {
                         openOnlineCarrierGate("magnetometer", delta);
                     }
+                    return;
+                }
+
+                if (!onlineCarrierActive) {
                     return;
                 }
 
@@ -2121,6 +2270,12 @@ public class MainActivity extends Activity {
     private void stage1KBeautifyTree(android.view.View root) {
         if (root == null) return;
         try {
+            if (root == sweepCadenceButton || root == sweepDirectionButton
+                    || root == audioFxEchoButton || root == audioNoiseButton || root == audioRevButton
+                    || root == sessionsButton || root == exportButton || root == startButton
+                    || root == shareButton || root == controlsButton || root == markHitButton) {
+                return;
+            }
             if (root instanceof android.widget.Button) {
                 android.widget.Button b = (android.widget.Button) root;
                 b.setTextColor(0xFFFFFFFF);
@@ -2131,7 +2286,7 @@ public class MainActivity extends Activity {
                 b.setPadding(10, 8, 10, 8);
             } else if (root instanceof android.widget.TextView) {
                 android.widget.TextView tv = (android.widget.TextView) root;
-                if (tv != exportStatus) {
+                if (tv != exportStatus && tv != channelBadgeView && tv != thresholdLabel && tv != cooldownLabel) {
                     tv.setTextColor(0xFFE8F7FF);
                     tv.setShadowLayer(6.0f, 0.0f, 0.0f, 0xAA6FE7FF);
                 }
@@ -2173,17 +2328,21 @@ public class MainActivity extends Activity {
     private void stage1KShowChannelNumberOnly(final int logicalIndex) {
         try {
             final String number = stage1KThreeDigitChannelNumber(logicalIndex);
+            final String label = stage1UNativeStationLabel(logicalIndex);
+            final int ring = stage1ULastRingCount > 0 ? stage1ULastRingCount : 1000;
             appendStage1QDLiveEvent("native_station_ring_gui_number_only", null, "ready", number);
             runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        android.view.View root = getWindow() != null ? getWindow().getDecorView() : null;
+                        View root = getWindow() != null ? getWindow().getDecorView() : null;
                         stage1KBeautifyTree(root);
                         stage1KHideOldStatusText(root);
-                        stage1KMakeExportStatusTinyNumberBox(number);
+                        if (channelBadgeView != null) {
+                            channelBadgeView.setText(String.format(Locale.US, "CH %s / %03d • %s", number, ring, label));
+                        }
                     } catch (Throwable t) {
-                        android.util.Log.w("FieldVox", "Stage 1U-K tiny channel GUI failed: " + t);
+                        android.util.Log.w("FieldVox", "Stage 1U-K channel GUI failed: " + t);
                     }
                 }
             });
@@ -2192,22 +2351,24 @@ public class MainActivity extends Activity {
     }
 
     private int stage1ULFastSweepPeriodMs() {
-        try {
-            int ms = nativeStage1ULFastSweepPeriodMs();
-            if (ms < 60) return 60;
-            if (ms > 1500) return 1500;
-            return ms;
-        } catch (Throwable ignored) {
-            return 1000;
-        }
+        return userSweepCadenceMs > 0 ? userSweepCadenceMs : 250;
     }
 
     private void stage1ULFastSweepTick() {
         try {
             int ring = nativeStage1UStationRingCount();
             if (ring <= 0) ring = 1000;
-            int logical = stage1ULFastSweepCursor % ring;
-            stage1ULFastSweepCursor = (logical + 1) % ring;
+            int logical;
+            if (userSweepDirection == 1) { // Forward
+                logical = stage1ULFastSweepCursor % ring;
+                stage1ULFastSweepCursor = (logical + 1) % ring;
+            } else if (userSweepDirection == -1) { // Reverse
+                logical = stage1ULFastSweepCursor % ring;
+                stage1ULFastSweepCursor = (logical - 1 + ring) % ring;
+            } else { // Random
+                logical = (int)(Math.random() * ring);
+                stage1ULFastSweepCursor = logical;
+            }
             stage1KShowChannelNumberOnly(logical);
             appendStage1QDLiveEvent("native_station_ring_one_second_sweep", null, "ready",
                     String.format(java.util.Locale.US, "%03d period_ms=%d", logical, stage1ULFastSweepPeriodMs()));
@@ -2647,6 +2808,7 @@ public class MainActivity extends Activity {
         exportStatus.setText(getString(R.string.native_ring_active, result, carrier));
         status.setText(getString(R.string.two_line_status, result, carrier));
         updateLiveButtons();
+        autoDiscoverSourcesIfNeeded();
     }
 
 
@@ -2960,6 +3122,33 @@ public class MainActivity extends Activity {
                     pcmBytes += (long)n * 2L;
 
                     if (speakerMonitorEnabled) {
+                        if (userReverseAudioEnabled) {
+                            for (int i = 0; i < n / 2; i++) {
+                                short tmp = monitorSamples[i];
+                                monitorSamples[i] = monitorSamples[n - 1 - i];
+                                monitorSamples[n - 1 - i] = tmp;
+                            }
+                        }
+
+                        if (userEchoFxEnabled && echoDelayBuffer != null && echoDelayBuffer.length > 0) {
+                            for (int i = 0; i < n; i++) {
+                                short delayed = echoDelayBuffer[echoDelayIndex];
+                                int mixed = monitorSamples[i] + (int)(delayed * 0.42f);
+                                mixed = Math.max(-32768, Math.min(32767, mixed));
+                                echoDelayBuffer[echoDelayIndex] = (short)Math.max(-32768, Math.min(32767, monitorSamples[i] + (int)(delayed * 0.32f)));
+                                echoDelayIndex = (echoDelayIndex + 1) % echoDelayBuffer.length;
+                                monitorSamples[i] = (short)mixed;
+                            }
+                        }
+
+                        if (userWhiteNoiseEnabled) {
+                            for (int i = 0; i < n; i++) {
+                                int noise = (int)((Math.random() - 0.5) * 1400.0);
+                                int mixed = monitorSamples[i] + noise;
+                                monitorSamples[i] = (short)Math.max(-32768, Math.min(32767, mixed));
+                            }
+                        }
+
                         int written = writeAllSamples(track, monitorSamples, n);
                         if (written < 0) {
                             speakerMonitorEnabled = false;
@@ -3154,39 +3343,114 @@ public class MainActivity extends Activity {
         nativeSetThreshold(threshold);
         nativeSetCooldownMs(cooldownMs);
 
+        boolean isLandscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+
+        ScrollView rootScroll = new ScrollView(this);
+        rootScroll.setFillViewport(true);
+        rootScroll.setBackgroundColor(Color.BLACK);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(this, 18), dp(this, 24), dp(this, 18), dp(this, 18));
+        root.setPadding(dp(this, 12), dp(this, 8), dp(this, 12), dp(this, 12));
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         root.setBackgroundColor(Color.BLACK);
 
-        TextView title = makeLabel("FIELDVOX", Color.WHITE, 40);
-        title.setShadowLayer(12.0f, 0.0f, 0.0f, Color.WHITE);
+        rootScroll.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top = insets.getSystemWindowInsetTop();
+            int bottom = insets.getSystemWindowInsetBottom();
+            int left = insets.getSystemWindowInsetLeft();
+            int right = insets.getSystemWindowInsetRight();
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                android.view.DisplayCutout cutout = insets.getDisplayCutout();
+                if (cutout != null) {
+                    top = Math.max(top, cutout.getSafeInsetTop());
+                    bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                    left = Math.max(left, cutout.getSafeInsetLeft());
+                    right = Math.max(right, cutout.getSafeInsetRight());
+                }
+            }
+            v.setPadding(left + dp(this, 12), top + dp(this, 4), right + dp(this, 12), bottom + dp(this, 8));
+            return insets;
+        });
+
+        TextView title = makeLabel("FIELDVOX LAB", Color.WHITE, isLandscape ? 22 : 28);
+        title.setShadowLayer(10.0f, 0.0f, 0.0f, 0xFF6FE7FF);
         root.addView(title);
 
-        TextView subtitle = makeLabel("LAB", Color.WHITE, 28);
-        subtitle.setShadowLayer(8.0f, 0.0f, 0.0f, Color.WHITE);
-        root.addView(subtitle);
-
-        TextView stage = makeLabel("Stage 1U-A • Native blob 1000-ring", Color.LTGRAY, 12);
-        stage.setPadding(0, dp(this, 8), 0, dp(this, 18));
+        TextView stage = makeLabel("GhostTube ITC Mode • 64–128 Channels • Live EMF", 0xFF6FE7FF, isLandscape ? 10 : 11);
+        stage.setPadding(0, dp(this, 1), 0, dp(this, isLandscape ? 2 : 4));
         root.addView(stage);
 
         LogoGlyphView glyph = new LogoGlyphView(this);
-        root.addView(glyph, new LinearLayout.LayoutParams(dp(this, 132), dp(this, 132)));
+        int glyphSize = isLandscape ? dp(this, 44) : dp(this, 84);
+        root.addView(glyph, new LinearLayout.LayoutParams(glyphSize, glyphSize));
 
         wavePanel = new WavePanelView(this);
+        int waveHeight = isLandscape ? dp(this, 54) : dp(this, 88);
         LinearLayout.LayoutParams waveParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(this, 150)
+                waveHeight
         );
-        waveParams.setMargins(0, dp(this, 34), 0, dp(this, 20));
+        waveParams.setMargins(0, dp(this, 2), 0, dp(this, isLandscape ? 3 : 5));
         root.addView(wavePanel, waveParams);
+
+        emfMeterView = new EmfMeterView(this);
+        int emfHeight = isLandscape ? dp(this, 42) : dp(this, 52);
+        LinearLayout.LayoutParams emfParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                emfHeight
+        );
+        emfParams.setMargins(0, 0, 0, dp(this, isLandscape ? 3 : 5));
+        root.addView(emfMeterView, emfParams);
+
+        channelBadgeView = makeLabel("CH 000 / 064 • INITIALIZING SWEEP", 0xFFE8F7FF, 12);
+        channelBadgeView.setBackground(stage1KRoundRect(0xFF07121A, 0xFF6FE7FF, 6.0f, 1));
+        channelBadgeView.setPadding(dp(this, 8), dp(this, 6), dp(this, 8), dp(this, 6));
+        channelBadgeView.setTypeface(Typeface.DEFAULT_BOLD);
+        channelBadgeView.setShadowLayer(6.0f, 0.0f, 0.0f, 0xFF6FE7FF);
+        LinearLayout.LayoutParams channelLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        channelLp.setMargins(0, 0, 0, dp(this, 6));
+        root.addView(channelBadgeView, channelLp);
+
+        LinearLayout sweepBar = new LinearLayout(this);
+        sweepBar.setOrientation(LinearLayout.HORIZONTAL);
+        sweepBar.setGravity(Gravity.CENTER);
+        sweepBar.setPadding(0, 0, 0, dp(this, 6));
+
+        sweepCadenceButton = makePillButton("250ms");
+        sweepCadenceButton.setOnClickListener(v -> cycleSweepCadence());
+
+        sweepDirectionButton = makePillButton("▶ FWD");
+        sweepDirectionButton.setOnClickListener(v -> cycleSweepDirection());
+
+        audioFxEchoButton = makePillButton("ECHO");
+        audioFxEchoButton.setOnClickListener(v -> toggleAudioFxEcho());
+
+        audioNoiseButton = makePillButton("NOISE");
+        audioNoiseButton.setOnClickListener(v -> toggleAudioNoise());
+
+        audioRevButton = makePillButton("REV");
+        audioRevButton.setOnClickListener(v -> toggleAudioRev());
+
+        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(0, dp(this, 36), 1.0f);
+        int pGap = dp(this, 2);
+        pillLp.setMargins(pGap, 0, pGap, 0);
+
+        sweepBar.addView(sweepCadenceButton, pillLp);
+        sweepBar.addView(sweepDirectionButton, pillLp);
+        sweepBar.addView(audioFxEchoButton, pillLp);
+        sweepBar.addView(audioNoiseButton, pillLp);
+        sweepBar.addView(audioRevButton, pillLp);
+
+        root.addView(sweepBar);
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.HORIZONTAL);
         bottom.setGravity(Gravity.CENTER);
-        bottom.setPadding(0, dp(this, 6), 0, dp(this, 8));
+        bottom.setPadding(0, 0, 0, dp(this, 6));
 
         sessionsButton = makeCircleButton("Sess");
         exportButton = makeCircleButton("Export");
@@ -3194,14 +3458,11 @@ public class MainActivity extends Activity {
         shareButton = makeCircleButton("Share");
         controlsButton = makeCircleButton("Ctrl");
 
-        int small = dp(this, 62);
-        int big = dp(this, 72);
         int gap = dp(this, 2);
-
-        LinearLayout.LayoutParams smallLp = new LinearLayout.LayoutParams(small, small);
+        LinearLayout.LayoutParams smallLp = new LinearLayout.LayoutParams(0, dp(this, 44), 1.0f);
         smallLp.setMargins(gap, 0, gap, 0);
 
-        LinearLayout.LayoutParams bigLp = new LinearLayout.LayoutParams(big, big);
+        LinearLayout.LayoutParams bigLp = new LinearLayout.LayoutParams(0, dp(this, 44), 1.15f);
         bigLp.setMargins(gap, 0, gap, 0);
 
         bottom.addView(sessionsButton, smallLp);
@@ -3212,8 +3473,8 @@ public class MainActivity extends Activity {
 
         root.addView(bottom);
 
-        exportStatus = makeLabel("Local news/talk grains • no word bank/TTS", Color.rgb(255, 230, 160), 12);
-        exportStatus.setPadding(0, dp(this, 4), 0, dp(this, 8));
+        exportStatus = makeLabel("Auto Live active • 64 channels ready", Color.rgb(255, 230, 160), 12);
+        exportStatus.setPadding(0, dp(this, 2), 0, dp(this, 6));
         root.addView(exportStatus);
 
         controlPanel = new LinearLayout(this);
@@ -3268,60 +3529,52 @@ public class MainActivity extends Activity {
         status = new TextView(this);
         status.setTextColor(Color.WHITE);
         status.setTextSize(12);
-        status.setPadding(0, dp(this, 12), 0, 0);
+        status.setPadding(0, dp(this, 8), 0, dp(this, 4));
         status.setText(nativeStatus());
+        root.addView(status);
 
-        sessions = new TextView(this);
-        sessions.setTextColor(Color.rgb(210, 240, 255));
-        sessions.setTextSize(12);
-        sessions.setPadding(0, dp(this, 12), 0, dp(this, 24));
-        sessions.setText(nativeSessionList());
-
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.addView(status);
         markHitButton = makeWideButton("MARK HIT");
         markHitButton.setTextSize(18);
         markHitButton.setContentDescription("MARK HIT");
         markHitButton.setBackgroundColor(Color.rgb(92, 30, 30));
-        content.addView(markHitButton, new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams markHitLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(this, 62)));
+                dp(this, 54));
+        markHitLp.setMargins(0, dp(this, 4), 0, dp(this, 4));
+        root.addView(markHitButton, markHitLp);
 
         exportHitsButton = makeWideButton("Export Hits");
         exportHitsButton.setTextSize(16);
         exportHitsButton.setContentDescription("Export Hits");
+        LinearLayout.LayoutParams expHitsLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(this, 48));
+        expHitsLp.setMargins(0, dp(this, 2), 0, dp(this, 2));
+        root.addView(exportHitsButton, expHitsLp);
 
         liveSourcesButton = makeWideButton("Live Sources");
         liveSourcesButton.setTextSize(16.0f);
         liveSourcesButton.setContentDescription("Live Sources");
-        liveSourcesButton.setMinHeight(dp(this, 54));
-
-        liveSourcesStatusView = new android.widget.TextView(this);
-        liveSourcesStatusView.setTextSize(14.0f);
-        liveSourcesStatusView.setTextColor(android.graphics.Color.WHITE);
-        liveSourcesStatusView.setPadding(dp(this, 12), dp(this, 8), dp(this, 12), dp(this, 8));
-        liveSourcesStatusView.setText("Live Source Catalog\nLoading cached source summary...");
-        liveSourcesStatusView.setContentDescription("Live Source Catalog Status");
+        liveSourcesButton.setMinHeight(dp(this, 48));
+        LinearLayout.LayoutParams liveSrcLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(this, 48));
+        liveSrcLp.setMargins(0, dp(this, 2), 0, dp(this, 2));
         liveSourcesButton.setOnClickListener(v -> showLiveSourcesDialog());
         refreshLiveSourcesStatus();
-        content.addView(exportHitsButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(this, 54)));
-        content.addView(liveSourcesButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(this, 54)));
+        root.addView(liveSourcesButton, liveSrcLp);
 
         liveStreamStatusText = new TextView(this);
         liveStreamStatusText.setText("Experimental Live Stream: stopped\nOne cached source only. Raw stream URLs stay app-private.\nThis does not prove paranormal communication.");
-        liveStreamStatusText.setTextSize(13.0f);
-        content.addView(liveStreamStatusText);
+        liveStreamStatusText.setTextSize(12.0f);
+        liveStreamStatusText.setPadding(0, dp(this, 4), 0, dp(this, 2));
+        root.addView(liveStreamStatusText);
 
         liveStreamButton = new Button(this);
         liveStreamButton.setText(R.string.live_stream_disabled);
         liveStreamButton.setAllCaps(false);
         liveStreamButton.setOnClickListener(v -> startStage1QDLiveStream());
-        content.addView(liveStreamButton);
+        root.addView(liveStreamButton);
 
         if (isDebuggableBuild() && getIntent() != null
                 && getIntent().getBooleanExtra("fieldvox_stage1qd_autostart", false)) {
@@ -3333,23 +3586,29 @@ public class MainActivity extends Activity {
             }, 900);
         }
 
-        content.addView(liveSourcesStatusView, new LinearLayout.LayoutParams(
+        liveSourcesStatusView = new android.widget.TextView(this);
+        liveSourcesStatusView.setTextSize(13.0f);
+        liveSourcesStatusView.setTextColor(android.graphics.Color.WHITE);
+        liveSourcesStatusView.setPadding(dp(this, 12), dp(this, 6), dp(this, 12), dp(this, 6));
+        liveSourcesStatusView.setText("Live Source Catalog\nLoading cached source summary...");
+        liveSourcesStatusView.setContentDescription("Live Source Catalog Status");
+        root.addView(liveSourcesStatusView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
 
+        sessions = new TextView(this);
+        sessions.setTextColor(Color.rgb(210, 240, 255));
+        sessions.setTextSize(12);
+        sessions.setPadding(0, dp(this, 8), 0, dp(this, 24));
+        sessions.setText(nativeSessionList());
+        root.addView(sessions);
 
-        content.addView(sessions);
-
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1.0f
+        rootScroll.addView(root, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
         ));
 
-        setContentView(root);
+        setContentView(rootScroll);
 
         stage1ULogNativeRingProbeOnce();
 
@@ -3445,7 +3704,8 @@ public class MainActivity extends Activity {
 
 
     protected void onResume() {
-        // FIELDVOX_STAGE1Q_C_ONRESUME_REFRESH
+        startOnlineCarrierSensors();
+        autoDiscoverSourcesIfNeeded();
         refreshLiveSourcesStatus();
         super.onResume();
         handler.removeCallbacks(tick);
@@ -3638,6 +3898,98 @@ public class MainActivity extends Activity {
 
             if (running) {
                 postInvalidateDelayed(60);
+            }
+        }
+    }
+
+    public static final class EmfMeterView extends View {
+        private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF box = new RectF();
+        private final RectF seg = new RectF();
+
+        private float currentMag = 0.0f;
+        private float currentDelta = 0.0f;
+        private boolean isSpike = false;
+        private String statusText = "BASELINE";
+
+        public EmfMeterView(android.content.Context ctx) {
+            super(ctx);
+            bgPaint.setColor(0xFF0C1017);
+            bgPaint.setStyle(Paint.Style.FILL);
+
+            textPaint.setColor(0xFFE8F7FF);
+            textPaint.setTextSize(12.5f * getResources().getDisplayMetrics().density);
+            textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+            textPaint.setAntiAlias(true);
+
+            glowPaint.setStyle(Paint.Style.STROKE);
+            glowPaint.setStrokeWidth(1.5f * getResources().getDisplayMetrics().density);
+        }
+
+        public void updateEmf(float mag, float delta, boolean spike) {
+            this.currentMag = mag;
+            this.currentDelta = delta;
+            this.isSpike = spike;
+            if (spike) {
+                this.statusText = "SPIKE DETECTED";
+            } else if (delta >= 1.5f) {
+                this.statusText = "ELEVATED";
+            } else if (delta >= 0.5f) {
+                this.statusText = "FLUCTUATING";
+            } else {
+                this.statusText = "BASELINE";
+            }
+            postInvalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            super.onDraw(c);
+            float w = getWidth();
+            float h = getHeight();
+            box.set(0, 0, w, h);
+
+            int strokeColor = isSpike ? 0xFFFF1744 : (currentDelta >= 1.5f ? 0xFFFFD600 : 0xFF283548);
+            glowPaint.setColor(strokeColor);
+            c.drawRoundRect(box, 10.0f, 10.0f, bgPaint);
+            c.drawRoundRect(box, 10.0f, 10.0f, glowPaint);
+
+            String header = String.format(Locale.US, "EMF: %.1f µT   Δ %.1f µT  [%s]", currentMag, currentDelta, statusText);
+            int textColor = isSpike ? 0xFFFF5252 : (currentDelta >= 1.5f ? 0xFFFFEE58 : 0xFF6FE7FF);
+            textPaint.setColor(textColor);
+            c.drawText(header, 14.0f, 18.0f * getResources().getDisplayMetrics().density, textPaint);
+
+            int totalSegs = 10;
+            float padX = 12.0f * getResources().getDisplayMetrics().density;
+            float segY = 24.0f * getResources().getDisplayMetrics().density;
+            float segH = h - segY - (8.0f * getResources().getDisplayMetrics().density);
+            if (segH < 6.0f) segH = 6.0f;
+            float segGap = 4.0f * getResources().getDisplayMetrics().density;
+            float totalGap = segGap * (totalSegs - 1);
+            float segW = (w - (padX * 2) - totalGap) / totalSegs;
+
+            int activeSegs = (int)Math.min(totalSegs, Math.max(1, (currentDelta / 2.5f) * totalSegs));
+
+            for (int i = 0; i < totalSegs; i++) {
+                float sx = padX + i * (segW + segGap);
+                seg.set(sx, segY, sx + segW, segY + segH);
+                if (i < activeSegs) {
+                    if (i < 4) {
+                        barPaint.setColor(0xFF00E676); // Green
+                    } else if (i < 7) {
+                        barPaint.setColor(0xFFFFD600); // Yellow/Amber
+                    } else if (i < 9) {
+                        barPaint.setColor(0xFFFF9100); // Orange
+                    } else {
+                        barPaint.setColor(0xFFFF1744); // Red
+                    }
+                } else {
+                    barPaint.setColor(0xFF161F2E);
+                }
+                c.drawRoundRect(seg, 3.0f, 3.0f, barPaint);
             }
         }
     }
