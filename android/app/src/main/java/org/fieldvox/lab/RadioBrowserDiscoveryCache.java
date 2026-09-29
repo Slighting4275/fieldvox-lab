@@ -32,6 +32,17 @@ public final class RadioBrowserDiscoveryCache {
     private static final int TARGET_SESSION_POOL_COUNT = 128;
     private static final int MAX_RESPONSE_CHARS = 24 * 1024 * 1024;
 
+    static {
+        try {
+            System.loadLibrary("fieldvox");
+        } catch (UnsatisfiedLinkError ignored) {
+        }
+    }
+
+    private static native int nativeMinimumAcceptableCatalogCount(int target);
+    private static native String nativeSha256Hex(String text);
+    private static native String nativeCleanText(String text);
+
     private RadioBrowserDiscoveryCache() {
     }
 
@@ -256,7 +267,11 @@ public final class RadioBrowserDiscoveryCache {
     }
 
     static int minimumAcceptableCatalogCount(int catalogTarget) {
-        return Math.min(500, Math.max(1, catalogTarget / 2));
+        try {
+            return nativeMinimumAcceptableCatalogCount(catalogTarget);
+        } catch (UnsatisfiedLinkError ignored) {
+            return Math.min(500, Math.max(1, catalogTarget / 2));
+        }
     }
 
     private static JSONArray buildSessionPool(JSONArray publicCatalog, int sessionPoolTarget) throws Exception {
@@ -429,12 +444,16 @@ public final class RadioBrowserDiscoveryCache {
         if (s == null) {
             return "";
         }
-        String t = s.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').trim();
-        t = t.replace("http://", "hxxp://").replace("https://", "hxxps://");
-        if (t.length() > 240) {
-            t = t.substring(0, 240);
+        try {
+            return nativeCleanText(s);
+        } catch (UnsatisfiedLinkError ignored) {
+            String t = s.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').trim();
+            t = t.replace("http://", "hxxp://").replace("https://", "hxxps://");
+            if (t.length() > 240) {
+                t = t.substring(0, 240);
+            }
+            return t;
         }
-        return t;
     }
 
     private static String safeHttpUrl(String value) {
@@ -472,14 +491,25 @@ public final class RadioBrowserDiscoveryCache {
         }
     }
 
-    private static String sha256Hex(String text) throws Exception {
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        byte[] data = md.digest((text == null ? "" : text).getBytes(StandardCharsets.UTF_8));
-        StringBuilder b = new StringBuilder(data.length * 2);
-        for (byte x : data) {
-            b.append(String.format(Locale.US, "%02x", x & 0xff));
+    private static String sha256Hex(String text) {
+        if (text == null) {
+            return "";
         }
-        return b.toString();
+        try {
+            return nativeSha256Hex(text);
+        } catch (UnsatisfiedLinkError ignored) {
+            try {
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] data = md.digest(text.getBytes(StandardCharsets.UTF_8));
+                StringBuilder b = new StringBuilder(data.length * 2);
+                for (byte x : data) {
+                    b.append(String.format(Locale.US, "%02x", x & 0xff));
+                }
+                return b.toString();
+            } catch (Exception e) {
+                return "";
+            }
+        }
     }
 
     private static String jsonl(JSONArray array) {

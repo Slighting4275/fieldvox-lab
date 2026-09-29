@@ -135,6 +135,12 @@ public class MainActivity extends Activity {
     private native String nativeGetStationCallsign(int slot);
     private native String nativeGetStationUrl(int slot);
 
+    private static native boolean nativeIsSafeSessionStem(String stem);
+    private static native int nativeCountTriggerEvents(String path);
+    private static native boolean nativeRewriteWavHeader(String path, long pcmBytes);
+    private native String nativeBuildManifestTsv(String dirPath);
+    private static native String nativeSha256Hex(String text);
+
     private int stage1UNativeLogicalCursor = 0;
     private int stage1ULastRingCount = 0;
     private String stage1ULastNativeStationJson = "";
@@ -684,21 +690,28 @@ public class MainActivity extends Activity {
     }
 
     static int countTriggerEvents(File jsonl) {
-        int count = 0;
-        try (java.io.BufferedReader br = new java.io.BufferedReader(
-                new java.io.InputStreamReader(
-                        new java.io.FileInputStream(jsonl),
-                        java.nio.charset.StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.contains("\"event\":\"trigger\"") || line.contains("\"type\":\"trigger\"")) {
-                    count += 1;
-                }
-            }
-        } catch (IOException ignored) {
+        if (jsonl == null || !jsonl.isFile()) {
             return -1;
         }
-        return count;
+        try {
+            return nativeCountTriggerEvents(jsonl.getAbsolutePath());
+        } catch (UnsatisfiedLinkError ignored) {
+            int count = 0;
+            try (java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(
+                            new java.io.FileInputStream(jsonl),
+                            java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (line.contains("\"event\":\"trigger\"") || line.contains("\"type\":\"trigger\"")) {
+                        count += 1;
+                    }
+                }
+            } catch (IOException e) {
+                return -1;
+            }
+            return count;
+        }
     }
 
     private String exportSessionManifest() {
@@ -707,62 +720,14 @@ public class MainActivity extends Activity {
         }
 
         File dir = new File(getFilesDir(), "fieldvox-sessions");
-        File[] files = dir.listFiles();
-        if (files == null) {
-            return "No session folder found.";
-        }
-
-        java.util.Arrays.sort(files, (a, b) -> a.getName().compareTo(b.getName()));
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("session\tjsonl_file\twav_file\tjsonl_bytes\twav_bytes\ttrigger_count\twav_duration_seconds\tjsonl_modified_ms\twav_modified_ms\n");
-
-        int pairs = 0;
-        long totalBytes = 0;
-
-        for (File jsonl : files) {
-            String name = jsonl.getName();
-            if (!jsonl.isFile() || !name.startsWith("session-") || !name.endsWith(".jsonl")) {
-                continue;
-            }
-
-            String stem = name.substring(0, name.length() - ".jsonl".length());
-            File wav = new File(dir, stem + ".wav");
-            if (!wav.isFile()) {
-                continue;
-            }
-
-            long jsonlBytes = jsonl.length();
-            long wavBytes = wav.length();
-            int triggerCount = countTriggerEvents(jsonl);
-
-            double durationSeconds = 0.0;
-            if (wavBytes > 44) {
-                durationSeconds = (double)(wavBytes - 44L) / 96000.0;
-            }
-
-            sb.append(stem).append('\t')
-                    .append(jsonl.getName()).append('\t')
-                    .append(wav.getName()).append('\t')
-                    .append(jsonlBytes).append('\t')
-                    .append(wavBytes).append('\t')
-                    .append(triggerCount).append('\t')
-                    .append(String.format(java.util.Locale.US, "%.3f", durationSeconds)).append('\t')
-                    .append(jsonl.lastModified()).append('\t')
-                    .append(wav.lastModified()).append('\n');
-
-            pairs += 1;
-            totalBytes += jsonlBytes + wavBytes;
-        }
-
-        if (pairs == 0) {
+        String tsvContent = nativeBuildManifestTsv(dir.getAbsolutePath());
+        if (tsvContent == null || tsvContent.isEmpty() || !tsvContent.contains("\n")) {
             return "No matched JSONL+WAV session pairs found for manifest.";
         }
 
         File manifest = new File(getFilesDir(), "fieldvox-session-manifest.tsv");
-
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(manifest, false)) {
-            out.write(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            out.write(tsvContent.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         } catch (IOException e) {
             return "Manifest write failed: " + e.getMessage();
         }
@@ -771,8 +736,6 @@ public class MainActivity extends Activity {
             ExportResult manifestOut = exportOneToDownloads(manifest, "text/tab-separated-values");
             return "Exported session manifest to Downloads/FieldVoxLab:\n"
                     + manifest.getName()
-                    + "\nSession pairs: " + pairs
-                    + "\nSession bytes: " + totalBytes
                     + "\nManifest bytes: " + manifestOut.bytes;
         } catch (IOException e) {
             return "Manifest export failed: " + e.getMessage();
@@ -973,19 +936,23 @@ public class MainActivity extends Activity {
     }
 
     private static String sha256Text(String text) {
+        if (text == null) return "";
         try {
-            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest((text == null ? "" : text)
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder out = new StringBuilder(hash.length * 2);
-            for (byte value : hash) {
-                int v = value & 0xff;
-                out.append(Character.forDigit((v >>> 4) & 0x0f, 16));
-                out.append(Character.forDigit(v & 0x0f, 16));
+            return nativeSha256Hex(text);
+        } catch (UnsatisfiedLinkError ignored) {
+            try {
+                java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] hash = digest.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder out = new StringBuilder(hash.length * 2);
+                for (byte value : hash) {
+                    int v = value & 0xff;
+                    out.append(Character.forDigit((v >>> 4) & 0x0f, 16));
+                    out.append(Character.forDigit(v & 0x0f, 16));
+                }
+                return out.toString();
+            } catch (java.security.NoSuchAlgorithmException impossible) {
+                throw new IllegalStateException("SHA-256 unavailable", impossible);
             }
-            return out.toString();
-        } catch (java.security.NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 unavailable", impossible);
         }
     }
 
@@ -1257,8 +1224,15 @@ public class MainActivity extends Activity {
     }
 
     static boolean isSafeSessionStem(String value) {
-        return isSafeArtifactComponent(value, 160)
-                && value.startsWith("session-");
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        try {
+            return nativeIsSafeSessionStem(value);
+        } catch (UnsatisfiedLinkError ignored) {
+            return isSafeArtifactComponent(value, 160)
+                    && value.startsWith("session-");
+        }
     }
 
     private static String tsvCell(String value) {
@@ -2911,6 +2885,12 @@ public class MainActivity extends Activity {
     }
 
     private static void rewriteWavHeader(File wav, long pcmBytes) throws IOException {
+        try {
+            if (nativeRewriteWavHeader(wav.getAbsolutePath(), pcmBytes)) {
+                return;
+            }
+        } catch (UnsatisfiedLinkError ignored) {
+        }
         try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(wav, "rw")) {
             raf.seek(0);
             raf.write(makeWavHeader(pcmBytes));

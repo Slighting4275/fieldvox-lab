@@ -990,3 +990,353 @@ Java_org_fieldvox_lab_MainActivity_nativeUpdateSensorTelemetry(
     return is_spike ? JNI_TRUE : JNI_FALSE;
 }
 
+// -------------------------------------------------------------
+// NATIVE C SESSION MANAGEMENT & UTILITIES
+// -------------------------------------------------------------
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeIsSafeSessionStem(JNIEnv *env, jclass, jstring j_stem) {
+    if (j_stem == nullptr) return JNI_FALSE;
+    const char *stem = env->GetStringUTFChars(j_stem, nullptr);
+    if (!stem) return JNI_FALSE;
+    size_t len = std::strlen(stem);
+    if (len == 0 || len > 160) {
+        env->ReleaseStringUTFChars(j_stem, stem);
+        return JNI_FALSE;
+    }
+    if (std::strncmp(stem, "session-", 8) != 0) {
+        env->ReleaseStringUTFChars(j_stem, stem);
+        return JNI_FALSE;
+    }
+    if (std::strstr(stem, "..") != nullptr || std::strchr(stem, '/') != nullptr || std::strchr(stem, '\\') != nullptr) {
+        env->ReleaseStringUTFChars(j_stem, stem);
+        return JNI_FALSE;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = stem[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) {
+            env->ReleaseStringUTFChars(j_stem, stem);
+            return JNI_FALSE;
+        }
+    }
+    env->ReleaseStringUTFChars(j_stem, stem);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeCountTriggerEvents(JNIEnv *env, jclass, jstring j_path) {
+    if (j_path == nullptr) return -1;
+    const char *path = env->GetStringUTFChars(j_path, nullptr);
+    if (!path) return -1;
+    FILE *fp = std::fopen(path, "rb");
+    env->ReleaseStringUTFChars(j_path, path);
+    if (!fp) return -1;
+
+    char line_buf[4096];
+    int count = 0;
+    while (std::fgets(line_buf, sizeof(line_buf), fp)) {
+        if (std::strstr(line_buf, "\"event\":\"trigger\"") != nullptr ||
+            std::strstr(line_buf, "\"type\":\"trigger\"") != nullptr) {
+            count++;
+        }
+    }
+    std::fclose(fp);
+    return count;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeRewriteWavHeader(JNIEnv *env, jclass, jstring j_path, jlong pcm_bytes) {
+    if (j_path == nullptr) return JNI_FALSE;
+    const char *path = env->GetStringUTFChars(j_path, nullptr);
+    if (!path) return JNI_FALSE;
+    FILE *fp = std::fopen(path, "r+b");
+    if (!fp) {
+        fp = std::fopen(path, "wb");
+    }
+    env->ReleaseStringUTFChars(j_path, path);
+    if (!fp) return JNI_FALSE;
+
+    std::fseek(fp, 0, SEEK_SET);
+    bool ok = wav_write_header(fp, static_cast<uint64_t>(pcm_bytes > 0 ? pcm_bytes : 0));
+    std::fflush(fp);
+    std::fclose(fp);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeBuildManifestTsv(JNIEnv *env, jobject, jstring j_dir) {
+    if (j_dir == nullptr) return env->NewStringUTF("");
+    const char *dir_path = env->GetStringUTFChars(j_dir, nullptr);
+    if (!dir_path) return env->NewStringUTF("");
+
+    DIR *dp = opendir(dir_path);
+    if (dp == nullptr) {
+        env->ReleaseStringUTFChars(j_dir, dir_path);
+        return env->NewStringUTF("");
+    }
+
+    struct Row {
+        std::string stem;
+        std::string jsonl_name;
+        std::string wav_name;
+        uint64_t jsonl_bytes;
+        uint64_t wav_bytes;
+        int trigger_count;
+        double duration_seconds;
+        long long jsonl_mtime_ms;
+        long long wav_mtime_ms;
+    };
+    std::vector<Row> rows;
+
+    struct dirent *ent = nullptr;
+    while ((ent = readdir(dp)) != nullptr) {
+        std::string name = ent->d_name;
+        if (name.rfind("session-", 0) != 0 || name.size() < 15 || name.compare(name.size() - 6, 6, ".jsonl") != 0) {
+            continue;
+        }
+
+        std::string stem = name.substr(0, name.size() - 6);
+        std::string jsonl_path = std::string(dir_path) + "/" + name;
+        std::string wav_name = stem + ".wav";
+        std::string wav_path = std::string(dir_path) + "/" + wav_name;
+
+        struct stat st_jsonl{};
+        struct stat st_wav{};
+        if (stat(jsonl_path.c_str(), &st_jsonl) != 0 || stat(wav_path.c_str(), &st_wav) != 0) {
+            continue;
+        }
+
+        FILE *fp = std::fopen(jsonl_path.c_str(), "rb");
+        int triggers = 0;
+        if (fp) {
+            char line[2048];
+            while (std::fgets(line, sizeof(line), fp)) {
+                if (std::strstr(line, "\"event\":\"trigger\"") || std::strstr(line, "\"type\":\"trigger\"")) {
+                    triggers++;
+                }
+            }
+            std::fclose(fp);
+        }
+
+        uint64_t wav_bytes = static_cast<uint64_t>(st_wav.st_size);
+        double duration = 0.0;
+        if (wav_bytes > 44) {
+            duration = static_cast<double>(wav_bytes - 44ULL) / 96000.0;
+        }
+
+        Row r;
+        r.stem = stem;
+        r.jsonl_name = name;
+        r.wav_name = wav_name;
+        r.jsonl_bytes = static_cast<uint64_t>(st_jsonl.st_size);
+        r.wav_bytes = wav_bytes;
+        r.trigger_count = triggers;
+        r.duration_seconds = duration;
+        r.jsonl_mtime_ms = static_cast<long long>(st_jsonl.st_mtime) * 1000LL;
+        r.wav_mtime_ms = static_cast<long long>(st_wav.st_mtime) * 1000LL;
+        rows.push_back(r);
+    }
+    closedir(dp);
+    env->ReleaseStringUTFChars(j_dir, dir_path);
+
+    std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+        return a.stem < b.stem;
+    });
+
+    std::ostringstream ss;
+    ss << "session\tjsonl_file\twav_file\tjsonl_bytes\twav_bytes\ttrigger_count\twav_duration_seconds\tjsonl_modified_ms\twav_modified_ms\n";
+    ss.setf(std::ios::fixed);
+    ss.precision(3);
+    for (const auto &r : rows) {
+        ss << r.stem << "\t"
+           << r.jsonl_name << "\t"
+           << r.wav_name << "\t"
+           << r.jsonl_bytes << "\t"
+           << r.wav_bytes << "\t"
+           << r.trigger_count << "\t"
+           << r.duration_seconds << "\t"
+           << r.jsonl_mtime_ms << "\t"
+           << r.wav_mtime_ms << "\n";
+    }
+
+    std::string result = ss.str();
+    return env->NewStringUTF(result.c_str());
+}
+
+// -------------------------------------------------------------
+// NATIVE SHA-256 & STRING SANITIZATION FOR RADIO BROWSER DISCOVERY
+// -------------------------------------------------------------
+
+struct FvSha256Ctx {
+    uint32_t state[8];
+    uint64_t count;
+    uint8_t buffer[64];
+};
+
+static inline uint32_t fv_sha256_rotr(uint32_t x, uint32_t n) { return (x >> n) | (x << (32 - n)); }
+
+static void fv_sha256_transform(uint32_t state[8], const uint8_t data[64]) {
+    static const uint32_t K[64] = {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    };
+    uint32_t W[64];
+    for (int i = 0; i < 16; i++) {
+        W[i] = ((uint32_t)data[i*4] << 24) | ((uint32_t)data[i*4+1] << 16) |
+               ((uint32_t)data[i*4+2] << 8)  | ((uint32_t)data[i*4+3]);
+    }
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = fv_sha256_rotr(W[i-15], 7) ^ fv_sha256_rotr(W[i-15], 18) ^ (W[i-15] >> 3);
+        uint32_t s1 = fv_sha256_rotr(W[i-2], 17) ^ fv_sha256_rotr(W[i-2], 19) ^ (W[i-2] >> 10);
+        W[i] = W[i-16] + s0 + W[i-7] + s1;
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t S1 = fv_sha256_rotr(e, 6) ^ fv_sha256_rotr(e, 11) ^ fv_sha256_rotr(e, 25);
+        uint32_t ch = (e & f) ^ ((~e) & g);
+        uint32_t temp1 = h + S1 + ch + K[i] + W[i];
+        uint32_t S0 = fv_sha256_rotr(a, 2) ^ fv_sha256_rotr(a, 13) ^ fv_sha256_rotr(a, 22);
+        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t temp2 = S0 + maj;
+        h = g; g = f; f = e; e = d + temp1;
+        d = c; c = b; b = a; a = temp1 + temp2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+static void fv_sha256_init(FvSha256Ctx *ctx) {
+    ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
+    ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
+    ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;
+    ctx->state[6] = 0x1f83d9ab; ctx->state[7] = 0x5be0cd19;
+    ctx->count = 0;
+}
+
+static void fv_sha256_update(FvSha256Ctx *ctx, const uint8_t *data, size_t len) {
+    size_t i = 0;
+    size_t idx = (size_t)(ctx->count & 63);
+    ctx->count += len;
+    while (len > 0) {
+        size_t part = 64 - idx;
+        if (len < part) part = len;
+        std::memcpy(&ctx->buffer[idx], &data[i], part);
+        idx = (idx + part) & 63;
+        i += part;
+        len -= part;
+        if (idx == 0) fv_sha256_transform(ctx->state, ctx->buffer);
+    }
+}
+
+static void fv_sha256_final(FvSha256Ctx *ctx, uint8_t hash[32]) {
+    uint8_t pad[64] = { 0x80 };
+    uint64_t bits = ctx->count * 8ULL;
+    size_t pad_len = (ctx->count & 63) < 56 ? (56 - (ctx->count & 63)) : (120 - (ctx->count & 63));
+    fv_sha256_update(ctx, pad, pad_len);
+    uint8_t len_bytes[8];
+    for (int i = 0; i < 8; i++) len_bytes[i] = (uint8_t)((bits >> ((7 - i) * 8)) & 0xff);
+    fv_sha256_update(ctx, len_bytes, 8);
+    for (int i = 0; i < 8; i++) {
+        hash[i*4]   = (uint8_t)((ctx->state[i] >> 24) & 0xff);
+        hash[i*4+1] = (uint8_t)((ctx->state[i] >> 16) & 0xff);
+        hash[i*4+2] = (uint8_t)((ctx->state[i] >> 8) & 0xff);
+        hash[i*4+3] = (uint8_t)(ctx->state[i] & 0xff);
+    }
+}
+
+static std::string fv_sha256_hex_str(const std::string &input) {
+    FvSha256Ctx ctx;
+    fv_sha256_init(&ctx);
+    fv_sha256_update(&ctx, reinterpret_cast<const uint8_t*>(input.data()), input.size());
+    uint8_t hash[32];
+    fv_sha256_final(&ctx, hash);
+    char buf[65];
+    for (int i = 0; i < 32; i++) {
+        std::snprintf(&buf[i*2], 3, "%02x", hash[i]);
+    }
+    buf[64] = '\0';
+    return std::string(buf);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_RadioBrowserDiscoveryCache_nativeSha256Hex(JNIEnv *env, jclass, jstring j_text) {
+    if (j_text == nullptr) return env->NewStringUTF("");
+    const char *text = env->GetStringUTFChars(j_text, nullptr);
+    if (!text) return env->NewStringUTF("");
+    std::string s(text);
+    env->ReleaseStringUTFChars(j_text, text);
+    std::string hex = fv_sha256_hex_str(s);
+    return env->NewStringUTF(hex.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_RadioBrowserDiscoveryCache_nativeCleanText(JNIEnv *env, jclass, jstring j_text) {
+    if (j_text == nullptr) return env->NewStringUTF("");
+    const char *text = env->GetStringUTFChars(j_text, nullptr);
+    if (!text) return env->NewStringUTF("");
+    std::string s(text);
+    env->ReleaseStringUTFChars(j_text, text);
+
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 32 || c == 127) {
+            out += ' ';
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+
+    std::string res;
+    bool in_space = false;
+    for (char c : out) {
+        if (c == ' ') {
+            if (!in_space && !res.empty()) {
+                res += ' ';
+                in_space = true;
+            }
+        } else {
+            res += c;
+            in_space = false;
+        }
+    }
+    while (!res.empty() && res.back() == ' ') res.pop_back();
+
+    std::string defanged;
+    defanged.reserve(res.size());
+    for (size_t i = 0; i < res.size(); ) {
+        if (res.compare(i, 8, "https://") == 0) {
+            defanged += "hxxps://";
+            i += 8;
+        } else if (res.compare(i, 7, "http://") == 0) {
+            defanged += "hxxp://";
+            i += 7;
+        } else {
+            defanged += res[i++];
+        }
+    }
+
+    if (defanged.size() > 240) {
+        defanged = defanged.substr(0, 240);
+    }
+    return env->NewStringUTF(defanged.c_str());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_fieldvox_lab_RadioBrowserDiscoveryCache_nativeMinimumAcceptableCatalogCount(JNIEnv *, jclass, jint target) {
+    if (target >= 1000) return 500;
+    return std::max(16, target / 2);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeSha256Hex(JNIEnv *env, jclass clazz, jstring j_text) {
+    return Java_org_fieldvox_lab_RadioBrowserDiscoveryCache_nativeSha256Hex(env, clazz, j_text);
+}
