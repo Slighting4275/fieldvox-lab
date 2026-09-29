@@ -23,28 +23,33 @@ FieldVox does not claim that sensor changes or audio fragments prove paranormal 
 - **Azimuth-driven 3D stereo panning**: Maps compass orientation to equal-power stereo gains.
 - **Estes blind mode**: AMOLED blackout screen with touch-based hit logging and a visible exit target.
 
-## Controls
+## Controls & GUI Layout
 
-| Control | Action | Behavior |
+The user interface follows a GhostTube VOX-inspired camera workstation layout with a bottom control dock, interactive telemetry HUD, and slide-up DSP drawer:
+
+| Control | Position | Behavior |
 | --- | --- | --- |
-| `REC` / `STOP` | Bottom Bar | Toggles real-time H.264 + AAC MP4 video recording. |
-| `MARK HIT` | Bottom Bar | Flushes the preceding 3 seconds of audio to a timestamped WAV file. |
-| `LIVE` / `ARM` | Bottom Bar | Starts/stops the live radio sweep engine and carrier decks. |
-| `PHOSPHOR` / `THERMAL` / `CYAN` / `STEALTH` | Header / Bar | Cycles through real-time viewfinder spectral filters. |
-| `SETTINGS` | Bottom Bar | Toggles the slide-up controls drawer. |
+| **Record Shutter** (`REC` / `STOP`) | **Bottom Center** | Prominent circular shutter button. In idle state, displays a white concentric ring with solid red trigger. When recording, morphs into a rounded Stop square with an animated pulsating red aura, live recording tally badge (`REC MM:SS`) with flashing red LED, and subtle perimeter viewfinder frame. |
+| `LIVE` / `SWEEP` | Bottom Left | Starts or stops the live 512-station radio sweep engine with green live tally indicator. |
+| `MARK HIT` | Bottom Left | Instantly flushes preceding 3 seconds from the 48 kHz ring buffer to a timestamped WAV hit file. |
+| `LENS` (`PHOSPHOR` / `THERMAL` / etc.) | Bottom Right | Cycles spectral camera filters (Night Vision Green, Heat Map Thermal, Twilight Cyan, Stealth OLED, Off). |
+| `SETTINGS` | Bottom Right | Slides open the DSP & investigation parameter drawer. |
+| **EMF Meter Badge** | **Top HUD Left** | Tapping the EMF meter badge directly zero-calibrates the magnetometer baseline. |
+| **Environment Badge** | **Top HUD Right** | Tapping the environment telemetry badge toggles REM-POD mode. |
 | `CAL ZERO` | Drawer | Re-zeros magnetometer and barometric baseline references. |
 | `CADENCE` | Drawer | Cycles sweep interval (100 ms, 250 ms, 500 ms, 1000 ms). |
 | `DIR` | Drawer | Toggles sweep pattern: Forward (`FWD`), Reverse (`REV`), Random (`RND`). |
-| `DUAL` | Drawer | Toggles dual simultaneous carrier sweepers. |
+| `DUAL` / `SB11` | Drawer | Toggles dual simultaneous carrier sweepers. |
 | `VOCAL` | Drawer | Toggles telephone voice-band pass filter (300 Hz–3.4 kHz). |
 | `ECHO` | Drawer | Toggles 150 ms feedback delay. |
 | `REVERB` | Drawer | Toggles native Schroeder reverberation. |
-| `PITCH` | Drawer | Toggles granular pitch transposition. |
+| `PITCH` | Drawer | Toggles granular pitch transposition (-2st, 0, +2st). |
 | `NOISE` | Drawer | Toggles background white-noise bed. |
 | `REMPOD` | Drawer | Toggles proximity/EMF audio alert synth. |
 | `3D PAN` | Drawer | Toggles compass-based stereo panning. |
 | `ESTES` | Drawer | Enters blind listener mode with tap-to-mark hit logging. |
-| `RECORD` | Drawer | Toggles continuous background WAV logging. |
+| `SESS WAV` | Drawer | Toggles continuous background WAV logging. |
+| `VID MP4` | Drawer | Toggles H.264 + AAC MP4 video recording directly from drawer. |
 
 ## Media Specifications
 

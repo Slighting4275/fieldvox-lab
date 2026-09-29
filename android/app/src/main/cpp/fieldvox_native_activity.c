@@ -390,9 +390,18 @@ static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w,
             fvg_clear(c, 0xFF060B11);
         }
 
-        /* Subtle viewfinder reticle */
+        /* Viewfinder reticle and perimeter recording indicator */
         const float rx = (float)w * 0.5f, ry = (float)h * 0.38f, r = 18.0f * d;
-        const uint32_t ret_col = 0x336FE7FF;
+        uint32_t ret_col = 0x336FE7FF;
+        if (s->video_recording_active) {
+            const float rpulse = 0.5f + 0.5f * sinf((float)(now % 1000) * (2.0f * 3.14159265f / 1000.0f));
+            ret_col = ((uint32_t)(90.0f + 140.0f * rpulse) << 24) | 0x00FF1744;
+
+            /* Subtle perimeter recording frame */
+            fvg_round_rect(c, 4.0f * d, 4.0f * d, (float)w - 8.0f * d, (float)h - 8.0f * d,
+                           12.0f * d, 0, ret_col, fmaxf(1.5f, 2.0f * d));
+        }
+
         fvg_circle(c, rx, ry, r, 0, ret_col, fmaxf(1.0f, d));
         fvg_line(c, rx - r * 1.8f, ry, rx - r * 0.6f, ry, fmaxf(1.0f, d), ret_col);
         fvg_line(c, rx + r * 0.6f, ry, rx + r * 1.8f, ry, fmaxf(1.0f, d), ret_col);
@@ -430,8 +439,9 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
     fvg_text_glow(c, FVG_FONT_SANS, ts, x + 10.0f * d, y + h * 0.68f, title, 0xFF6FE7FF, 2.0f * d, true);
     fvg_text(c, FVG_FONT_SANS, ts, x + 10.0f * d, y + h * 0.68f, title, 0xFFFFFFFF, true);
 
-    /* 2. Right: Recording indicator / filter badge */
-    const float rec_w = 90.0f * d, rec_h = h - 8.0f * d;
+    /* 2. Right: Recording indicator / filter badge (pure status indicator, no widget collision) */
+    const float rec_w = (ui->w > 500.0f * d ? 112.0f : 96.0f) * d;
+    const float rec_h = h - 8.0f * d;
     const float rec_x = x + w - rec_w - 6.0f * d;
     const float rec_y = y + 4.0f * d;
 
@@ -442,20 +452,17 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
         char rec_text[32];
         snprintf(rec_text, sizeof(rec_text), "REC %02u:%02u", mins, secs);
 
-        place(ui, W_VIDEO_REC, rec_x, rec_y, rec_w, rec_h);
-        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xEE330005, 0xFFFF1744, fmaxf(1.0f, d));
+        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xEE380008, 0xFFFF1744, fmaxf(1.5f, 1.5f * d));
         if ((now / 500L) % 2 == 0) {
             fvg_circle(c, rec_x + 12.0f * d, rec_y + rec_h * 0.5f, 4.0f * d, 0xFFFF1744, 0, 0);
         }
-        fvg_text_center(c, FVG_FONT_MONO, 10.0f * d, rec_x + 12.0f * d, rec_y, rec_w - 12.0f * d, rec_h,
+        fvg_text_center(c, FVG_FONT_MONO, 11.0f * d, rec_x + 12.0f * d, rec_y, rec_w - 14.0f * d, rec_h,
                         rec_text, 0xFFFFFFFF, true);
     } else if (s->recording_active) {
-        place(ui, W_REC, rec_x, rec_y, rec_w, rec_h);
         fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xEE332005, 0xFFFF9100, fmaxf(1.0f, d));
         fvg_text_center(c, FVG_FONT_MONO, 10.0f * d, rec_x, rec_y, rec_w, rec_h, "WAV REC", 0xFFFFE6A0, true);
     } else {
-        place(ui, W_CAM_TINT, rec_x, rec_y, rec_w, rec_h);
-        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xD00A1A28, 0xFF6FE7FF, fmaxf(1.0f, d));
+        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xD00A1A28, 0x806FE7FF, fmaxf(1.0f, d));
         fvg_text_center(c, FVG_FONT_MONO, 9.5f * d, rec_x, rec_y, rec_w, rec_h,
                         fv_camera_filter_name(s->cam_filter), 0xFF6FE7FF, true);
     }
@@ -482,8 +489,9 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
     const float d = ui->d;
     const float half_w = (w - 6.0f * d) * 0.5f;
 
-    /* Left Badge: EMF Meter */
+    /* Left Badge: EMF Meter - tap to zero-calibrate! */
     const float lx = x;
+    place(ui, W_CAL, lx, y, half_w, h);
     const bool cal = now_ms < s->cal_flash_until_ms;
     const uint32_t emf_stroke = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF1744 :
                                 (s->emf_delta >= 1.5f ? 0xFFFFD600 : 0x606FE7FF));
@@ -492,7 +500,7 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
 
     char emf_str[64];
     snprintf(emf_str, sizeof(emf_str), "EMF %.1f µT%s", s->emf_magnitude,
-             cal ? " [CAL]" : (s->emf_spike ? " [SPIKE!]" : ""));
+             cal ? " [CAL: OK]" : (s->emf_spike ? " [SPIKE!]" : ""));
     const uint32_t emf_text_col = s->emf_spike ? 0xFFFF5252 : (cal ? 0xFF00E676 : 0xFFFFFFFF);
     const float es = fit_size(FVG_FONT_SANS, 10.5f * d, emf_str, half_w * 0.65f, true);
     fvg_text(c, FVG_FONT_SANS, es, lx + 8.0f * d, y + h * 0.65f, emf_str, emf_text_col, true);
@@ -514,8 +522,9 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
         fvg_round_rect(c, led_start_x + (float)i * (led_w + led_gap), led_y, led_w, led_h, 1.5f * d, lcol, 0, 0);
     }
 
-    /* Right Badge: Environment Telemetry (Baro / Cold Spot / Compass / Rempod) */
+    /* Right Badge: Environment Telemetry - tap to toggle REM-POD! */
     const float rx = x + half_w + 6.0f * d;
+    place(ui, W_REMPOD, rx, y, half_w, h);
     char telem[96];
     uint32_t tel_bg = 0xC00A131C;
     uint32_t tel_stroke = 0x606FE7FF;
@@ -536,6 +545,11 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
         tel_stroke = 0xFFFF9100;
         tel_text = 0xFFFFAB40;
         snprintf(telem, sizeof(telem), "VIBE SPIKE (%.2f m/s²)", s->vibe_magnitude);
+    } else if (s->rem_pod_active) {
+        tel_bg = 0xDD121C30;
+        tel_stroke = 0xFF00E5FF;
+        tel_text = 0xFF80D8FF;
+        snprintf(telem, sizeof(telem), "REM-POD ARMED • DIR %.0f°", s->compass_azimuth);
     } else {
         snprintf(telem, sizeof(telem), "BARO %.1f hPa • DIR %.0f°", s->baro_current, s->compass_azimuth);
     }
@@ -545,30 +559,119 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
     fvg_text_center(c, FVG_FONT_SANS, ts, rx, y, half_w, h, telem, tel_text, true);
 }
 
-static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h) {
+/* GhostTube VOX style camera dock with prominent circular record shutter button */
+static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
+    FvCanvas *c = ui->c;
     const float d = ui->d;
-    const float gap = 4.0f * d;
-    const float unit = (w - gap * 4.0f) / 5.0f;
+    const float cx = x + w * 0.5f;
+    const float cy = y + h * 0.5f;
 
-    /* 1. W_VIDEO_REC: Big Video Record Button */
-    draw_round_button(ui, W_VIDEO_REC, x, y, unit, h,
-                      s->video_recording_active ? "STOP" : "REC",
-                      s->video_recording_active, 0xFFFF1744);
+    /* Outer circular shutter radius (28dp portrait, 22dp landscape) */
+    const float r_outer = (h >= 52.0f * d ? 28.0f : 21.0f) * d;
+    const float gap = 5.0f * d;
+    const float btn_h = (h >= 52.0f * d ? 38.0f : 30.0f) * d;
+    const float btn_y = cy - btn_h * 0.5f;
 
-    /* 2. W_MARK_HIT: Mark Hit Button */
-    draw_round_button(ui, W_MARK_HIT, x + (unit + gap), y, unit, h, "MARK HIT", false, 0xFFFF9100);
+    /* Space available on each flank of the center shutter */
+    const float side_clearance = r_outer + 8.0f * d;
+    const float avail_w = (w * 0.5f) - side_clearance;
+    const float btn_w = fmaxf(44.0f * d, (avail_w - gap) * 0.5f);
 
-    /* 3. W_START: LIVE / ARM Sweeper */
-    draw_round_button(ui, W_START, x + (unit + gap) * 2.0f, y, unit, h,
-                      s->sweep_active ? "LIVE" : "ARM", s->sweep_active, 0xFF00E676);
+    /* --- Left Flank: SWEEP (ARM/LIVE) & MARK HIT --- */
+    {
+        /* Button 1: W_START (Radio Sweep Live Toggle) */
+        const float b1_x = x;
+        place(ui, W_START, b1_x, btn_y, btn_w, btn_h);
+        const uint32_t b1_bg = s->sweep_active ? 0xDD072615 : 0xD00A131C;
+        const uint32_t b1_stroke = s->sweep_active ? 0xFF00E676 : 0x806FE7FF;
+        const uint32_t b1_txt = s->sweep_active ? 0xFF00E676 : 0xFFD2F0FF;
+        fvg_round_rect(c, b1_x, btn_y, btn_w, btn_h, 10.0f * d, b1_bg, b1_stroke, fmaxf(1.0f, 1.2f * d));
+        if (s->sweep_active) {
+            fvg_circle(c, b1_x + 13.0f * d, btn_y + btn_h * 0.5f, 3.2f * d, 0xFF00E676, 0, 0);
+            const float s1 = fit_size(FVG_FONT_SANS, 11.5f * d, "LIVE", btn_w - 20.0f * d, true);
+            fvg_text_center(c, FVG_FONT_SANS, s1, b1_x + 6.0f * d, btn_y, btn_w - 6.0f * d, btn_h, "LIVE", b1_txt, true);
+        } else {
+            const float s1 = fit_size(FVG_FONT_SANS, 11.5f * d, "SWEEP", btn_w - 6.0f * d, true);
+            fvg_text_center(c, FVG_FONT_SANS, s1, b1_x, btn_y, btn_w, btn_h, "SWEEP", b1_txt, true);
+        }
 
-    /* 4. W_CAM_TINT: Camera Spectral Filter */
-    draw_round_button(ui, W_CAM_TINT, x + (unit + gap) * 3.0f, y, unit, h,
-                      fv_camera_filter_name(s->cam_filter), false, 0xFF00E5FF);
+        /* Button 2: W_MARK_HIT (Pre-Roll Lossless Audio Capture) */
+        const float b2_x = b1_x + btn_w + gap;
+        place(ui, W_MARK_HIT, b2_x, btn_y, btn_w, btn_h);
+        fvg_round_rect(c, b2_x, btn_y, btn_w, btn_h, 10.0f * d, 0xD0241406, 0xFFFF9100, fmaxf(1.0f, 1.2f * d));
+        const float s2 = fit_size(FVG_FONT_SANS, 11.0f * d, "MARK HIT", btn_w - 6.0f * d, true);
+        fvg_text_center(c, FVG_FONT_SANS, s2, b2_x, btn_y, btn_w, btn_h, "MARK HIT", 0xFFFFD180, true);
+    }
 
-    /* 5. W_CTRL: Drawer Toggle */
-    draw_round_button(ui, W_CTRL, x + (unit + gap) * 4.0f, y, unit, h,
-                      s->controls_visible ? "CLOSE" : "SETTINGS", s->controls_visible, 0xFFE040FB);
+    /* --- Center: GhostTube Circular Camera Shutter (W_VIDEO_REC) --- */
+    {
+        /* Generous touch bounding box */
+        const float hit_pad = 6.0f * d;
+        place(ui, W_VIDEO_REC, cx - r_outer - hit_pad, cy - r_outer - hit_pad,
+              (r_outer + hit_pad) * 2.0f, (r_outer + hit_pad) * 2.0f);
+
+        /* Translucent dark glass disc under the shutter */
+        fvg_circle(c, cx, cy, r_outer + 2.0f * d, 0x88000000, 0, 0);
+        fvg_circle(c, cx, cy, r_outer, 0xDD081018, 0, 0);
+
+        if (!s->video_recording_active) {
+            /* IDLE STATE: Crisp white concentric ring with vivid red inner shutter circle */
+            fvg_circle(c, cx, cy, r_outer, 0, 0xFFFFFFFF, fmaxf(2.0f, 3.2f * d));
+
+            const float r_inner = r_outer - 6.0f * d;
+            fvg_circle(c, cx, cy, r_inner, 0xFFFF1744, 0x44000000, fmaxf(1.0f, 1.2f * d));
+            /* Subtle glossy 3D sheen */
+            fvg_circle(c, cx, cy - r_inner * 0.35f, r_inner * 0.45f, 0x22FFFFFF, 0, 0);
+            /* Centered white text label */
+            fvg_text_center(c, FVG_FONT_SANS, 10.5f * d, cx - r_inner, cy - r_inner,
+                            r_inner * 2.0f, r_inner * 2.0f, "REC", 0xFFFFFFFF, true);
+        } else {
+            /* RECORDING STATE: Pulsating red aura, morphing into rounded red stop square */
+            const float pulse = 0.5f + 0.5f * sinf((float)(now % 900) * (2.0f * 3.14159265f / 900.0f));
+
+            /* Pulsing outer aura ring */
+            const float aura_r = r_outer + (3.0f + 4.0f * pulse) * d;
+            const uint32_t aura_col = ((uint32_t)(70.0f + 140.0f * pulse) << 24) | 0x00FF1744;
+            fvg_circle(c, cx, cy, aura_r, 0, aura_col, 2.0f * d);
+
+            /* Main outer ring pulses between white and bright red */
+            const uint8_t gb = (uint8_t)(255.0f * (1.0f - pulse * 0.85f));
+            const uint32_t ring_stroke = 0xFF000000 | (0xFF << 16) | (gb << 8) | gb;
+            fvg_circle(c, cx, cy, r_outer, 0, ring_stroke, fmaxf(2.0f, 3.2f * d));
+
+            /* Inner Stop square */
+            const float sq_size = r_outer * 0.82f;
+            const float sq_half = sq_size * 0.5f;
+            const float sq_rad = 5.0f * d;
+            fvg_round_rect(c, cx - sq_half, cy - sq_half, sq_size, sq_size, sq_rad,
+                           0xFFFF1744, 0xFFFFFFFF, fmaxf(1.5f, 2.0f * d));
+            fvg_text_center(c, FVG_FONT_SANS, 9.5f * d, cx - sq_half, cy - sq_half,
+                            sq_size, sq_size, "STOP", 0xFFFFFFFF, true);
+        }
+    }
+
+    /* --- Right Flank: LENS (Spectral Filter) & SETTINGS (Drawer) --- */
+    {
+        /* Button 3: W_CAM_TINT (Spectral Lens Switcher) */
+        const float b3_x = cx + side_clearance;
+        place(ui, W_CAM_TINT, b3_x, btn_y, btn_w, btn_h);
+        fvg_round_rect(c, b3_x, btn_y, btn_w, btn_h, 10.0f * d, 0xD0061A28, 0xFF00E5FF, fmaxf(1.0f, 1.2f * d));
+
+        char lens_name[32];
+        const char *fname = fv_camera_filter_name(s->cam_filter);
+        snprintf(lens_name, sizeof(lens_name), "%s", fname);
+        const float s3 = fit_size(FVG_FONT_SANS, 10.5f * d, lens_name, btn_w - 6.0f * d, true);
+        fvg_text_center(c, FVG_FONT_SANS, s3, b3_x, btn_y, btn_w, btn_h, lens_name, 0xFF80D8FF, true);
+
+        /* Button 4: W_CTRL (DSP & Paranormal Settings Drawer) */
+        const float b4_x = b3_x + btn_w + gap;
+        place(ui, W_CTRL, b4_x, btn_y, btn_w, btn_h);
+        const uint32_t b4_bg = s->controls_visible ? 0xDD280A35 : 0xD01E0A28;
+        fvg_round_rect(c, b4_x, btn_y, btn_w, btn_h, 10.0f * d, b4_bg, 0xFFE040FB, fmaxf(1.0f, 1.2f * d));
+        const char *b4_label = s->controls_visible ? "CLOSE" : "SETTINGS";
+        const float s4 = fit_size(FVG_FONT_SANS, 10.5f * d, b4_label, btn_w - 6.0f * d, true);
+        fvg_text_center(c, FVG_FONT_SANS, s4, b4_x, btn_y, btn_w, btn_h, b4_label, 0xFFFF80AB, true);
+    }
 }
 
 static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
@@ -677,17 +780,21 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
         cur_y += pill_h + gap;
     }
 
-    /* Row 5: Audio Session & Tools */
-    const float p3_w = (w - gap * 2.0f - 16.0f * d) / 3.0f;
+    /* Row 5: Audio Session & Recording Tools */
     {
         float px = x + 8.0f * d;
-        draw_pill(ui, W_MIC, px, cur_y, p3_w, pill_h, s->monitor_active ? "MIC ON" : "MIC OFF",
+        draw_pill(ui, W_MIC, px, cur_y, p4_w, pill_h, s->monitor_active ? "MIC ON" : "MIC OFF",
                   s->monitor_active ? PILL_ACTIVE : PILL_IDLE);
-        px += p3_w + gap;
-        draw_pill(ui, W_REC, px, cur_y, p3_w, pill_h, s->recording_active ? "WAV REC ON" : "SESS WAV",
+        px += p4_w + gap;
+        draw_pill(ui, W_REC, px, cur_y, p4_w, pill_h, s->recording_active ? "WAV ON" : "SESS WAV",
                   s->recording_active ? PILL_ACTIVE : PILL_IDLE);
-        px += p3_w + gap;
-        draw_pill(ui, W_SESS, px, cur_y, p3_w, pill_h, "STATS", PILL_IDLE);
+        px += p4_w + gap;
+        PillStyle rec_st = PILL_IDLE;
+        if (s->video_recording_active) rec_st = (PillStyle){0xDD3A050B, 0xFFFF1744, 0xFFFF5252};
+        draw_pill(ui, W_VIDEO_REC, px, cur_y, p4_w, pill_h,
+                  s->video_recording_active ? "VID STOP" : "VID MP4", rec_st);
+        px += p4_w + gap;
+        draw_pill(ui, W_SESS, px, cur_y, p4_w, pill_h, "STATS", PILL_IDLE);
     }
 }
 
@@ -770,18 +877,18 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     const float badge_h = (landscape ? 24.0f : 30.0f) * d;
     draw_perimeter_badges(&ui, &s, ui.x0, badge_y, ui.w, badge_h, now);
 
-    /* 5. Bottom Action Bar position */
-    const float bottom_bar_h = (landscape ? 34.0f : 44.0f) * d;
+    /* 5. Bottom Action Bar position (GhostTube camera dock) */
+    const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
     const float bottom_bar_y = (float)h - bottom_inset - bottom_bar_h;
 
     /* 6. Centered Floating Sound Visualizer (docked above bottom bar, leaving camera viewfinder visible) */
-    const float vis_h = (landscape ? 64.0f : 110.0f) * d;
-    const float vis_top = bottom_bar_y - vis_h - 10.0f * d;
+    const float vis_h = (landscape ? 54.0f : 80.0f) * d;
+    const float vis_top = bottom_bar_y - vis_h - 8.0f * d;
     draw_floating_visualizer(&ui, &s, ui.x0, vis_top, ui.w, vis_h, now);
 
     /* 7. Bottom Action Bar (only rendered and clickable when drawer is closed) */
     if (!s.controls_visible) {
-        draw_bottom_action_bar(&ui, &s, ui.x0, bottom_bar_y, ui.w, bottom_bar_h);
+        draw_bottom_action_bar(&ui, &s, ui.x0, bottom_bar_y, ui.w, bottom_bar_h, now);
     }
 
     /* 8. Slide-Up Drawer Overlay (if toggled) */
