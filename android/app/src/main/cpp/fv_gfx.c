@@ -241,6 +241,19 @@ void fvg_blit_scaled(FvCanvas *c, const uint32_t *src, int sw, int sh, float dx,
     }
 }
 
+void fvg_blit_cover(FvCanvas *c, const uint32_t *src, int sw, int sh) {
+    if (!c || !src || sw <= 0 || sh <= 0 || c->w <= 0 || c->h <= 0) return;
+
+    /* Cover mode: scale so that src completely fills canvas with preserved aspect ratio */
+    const float scale = fmaxf((float)c->w / (float)sw, (float)c->h / (float)sh);
+    const float dw = (float)sw * scale;
+    const float dh = (float)sh * scale;
+    const float dx = ((float)c->w - dw) * 0.5f;
+    const float dy = ((float)c->h - dh) * 0.5f;
+
+    fvg_blit_scaled(c, src, sw, sh, dx, dy, dw, dh);
+}
+
 /* ---------- text ---------- */
 
 typedef struct {

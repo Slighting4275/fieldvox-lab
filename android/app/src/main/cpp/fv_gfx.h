@@ -32,6 +32,8 @@ void fvg_circle(FvCanvas *c, float cx, float cy, float r, uint32_t fill, uint32_
 void fvg_triangle(FvCanvas *c, float x0, float y0, float x1, float y1, float x2, float y2, uint32_t argb);
 /* Bilinear scaled blit of an opaque 0xAARRGGBB image. */
 void fvg_blit_scaled(FvCanvas *c, const uint32_t *src, int sw, int sh, float dx, float dy, float dw, float dh);
+/* Aspect-ratio preserving center-crop blit (cover mode) that fills canvas without stretching. */
+void fvg_blit_cover(FvCanvas *c, const uint32_t *src, int sw, int sh);
 
 bool fvg_font_load(int font, const char *path);
 bool fvg_font_ready(int font);

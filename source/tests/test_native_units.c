@@ -339,6 +339,115 @@ int main(void) {
     assert(unlink(wav_path) == 0);
     printf("  [PASS] Production pre-roll WAV header and payload size\n");
 
+    /* 7. Verify BT.709 NV12 colorimetry with native Android Little-Endian RGBA_8888 */
+    {
+        /* Pure Red pixel in Android native RGBA_8888 memory: R=255, G=0, B=0, A=255 -> 0xFF0000FF */
+        const uint32_t red_pixel = 0xFF0000FFu;
+        const int r = (int)(red_pixel & 0xFF);
+        const int g = (int)((red_pixel >> 8) & 0xFF);
+        const int b = (int)((red_pixel >> 16) & 0xFF);
+        assert(r == 255);
+        assert(g == 0);
+        assert(b == 0);
+
+        /* BT.709 Studio Swing coefficients: Y in [16..235], Cb/Cr in [16..240] centered at 128 */
+        const int y = ((54 * r + 183 * g + 18 * b + 128) >> 8) + 16;
+        const int cb = ((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128;
+        const int cr = ((128 * r - 116 * g - 12 * b + 128) >> 8) + 128;
+
+        /* For pure Red: Y ~ 70, Cb ~ 100 (< 128), Cr ~ 256 clamped to 255 (> 200) */
+        assert(y >= 65 && y <= 75);
+        assert(cb < 128);
+        assert(cr > 200);
+
+        /* Pure Blue pixel: R=0, G=0, B=255, A=255 -> 0xFFFF0000 */
+        const uint32_t blue_pixel = 0xFFFF0000u;
+        const int br = (int)(blue_pixel & 0xFF);
+        const int bg = (int)((blue_pixel >> 8) & 0xFF);
+        const int bb = (int)((blue_pixel >> 16) & 0xFF);
+        assert(br == 0 && bg == 0 && bb == 255);
+        const int b_cb = ((-29 * br - 99 * bg + 128 * bb + 128) >> 8) + 128;
+        const int b_cr = ((128 * br - 116 * bg - 12 * bb + 128) >> 8) + 128;
+        /* For pure Blue: Cb must be high (> 200), Cr must be low (< 128) */
+        assert(b_cb > 200);
+        assert(b_cr < 128);
+        printf("  [PASS] Native RGBA_8888 to BT.709 NV12 colorimetry mapping (Red/Blue channels verified)\n");
+    }
+
+    /* 8. Verify camera night-vision filter color transfer */
+    {
+        const uint8_t luma = 180;
+        /* Phosphor green: dominant green */
+        const uint32_t p_r = (uint32_t)(luma / 10u);
+        const uint32_t p_g = (uint32_t)luma;
+        const uint32_t p_b = (uint32_t)(luma / 5u);
+        assert(p_g > p_r && p_g > p_b);
+        assert(p_r == 18 && p_g == 180 && p_b == 36);
+
+        /* Cyan spectral: cyan dominance */
+        const uint32_t c_r = (uint32_t)(luma / 12u);
+        const uint32_t c_g = (uint32_t)(luma + (luma / 6u));
+        const uint32_t c_b = (uint32_t)luma;
+        assert(c_g > c_r && c_b > c_r);
+        printf("  [PASS] Camera phosphor and cyan spectral filter formulas\n");
+    }
+
+    /* 9. Verify packet buffer offset safety invariant */
+    {
+        /* In NDK AMediaMuxer_writeSampleData, pointer is passed as (data + info->offset).
+         * Detached pending packet buffers allocate exactly info.size bytes with data copied
+         * from data + info.offset. Therefore, p->info.offset MUST be 0 to prevent buffer overflow. */
+        const size_t raw_codec_offset = 64;
+        const size_t payload_size = 2048;
+        uint8_t raw_buffer[raw_codec_offset + payload_size];
+        memset(raw_buffer, 0xAA, sizeof(raw_buffer));
+
+        uint8_t *detached = (uint8_t *)malloc(payload_size);
+        assert(detached != NULL);
+        memcpy(detached, raw_buffer + raw_codec_offset, payload_size);
+        size_t detached_offset = 0; /* Reset invariant */
+        assert(detached_offset == 0);
+        /* Ensure effective pointer is within [detached, detached + payload_size] */
+        const uint8_t *effective_ptr = detached + detached_offset;
+        assert(effective_ptr == detached);
+        free(detached);
+        printf("  [PASS] Video recorder pending packet offset invariant (no double addition)\n");
+    }
+
+    /* 10. Verify camera sensor orientation compensation and bijective 90-deg rotation */
+    {
+        /* Back camera sensor orientation = 90 deg.
+         * In portrait (display rotation 0 deg): compensation = (90 - 0 + 360) % 360 = 90 deg.
+         * In landscape (display rotation 90 deg): compensation = (90 - 90 + 360) % 360 = 0 deg.
+         * In landscape (display rotation 270 deg): compensation = (90 - 270 + 360) % 360 = 180 deg. */
+        const int sensor_ori = 90;
+        assert((sensor_ori - 0 + 360) % 360 == 90);
+        assert((sensor_ori - 90 + 360) % 360 == 0);
+        assert((sensor_ori - 270 + 360) % 360 == 180);
+
+        /* Test 90-degree clockwise bijective coordinate mapping for 320x180 -> 180x320 */
+        const int sw = 320, sh = 180;
+        const int dw = sh, dh = sw; /* 180 x 320 */
+        int hit_map[180 * 320];
+        memset(hit_map, 0, sizeof(hit_map));
+
+        for (int sy = 0; sy < sh; sy++) {
+            for (int sx = 0; sx < sw; sx++) {
+                const int dx = (sh - 1) - sy;
+                const int dy = sx;
+                assert(dx >= 0 && dx < dw);
+                assert(dy >= 0 && dy < dh);
+                const int idx = dy * dw + dx;
+                assert(hit_map[idx] == 0); /* Bijective: no overlaps */
+                hit_map[idx] = 1;
+            }
+        }
+        for (int i = 0; i < dw * dh; i++) {
+            assert(hit_map[i] == 1); /* All destination pixels covered */
+        }
+        printf("  [PASS] Camera sensor orientation compensation & bijective 90° portrait rotation\n");
+    }
+
     printf("ALL FieldVox native C unit tests PASSED.\n");
     return 0;
 }

@@ -1,0 +1,55 @@
+#ifndef FIELDVOX_NATIVE_VIDEO_RECORDER_H
+#define FIELDVOX_NATIVE_VIDEO_RECORDER_H
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Initialize and start MP4 video recording using AMediaCodec (H.264 + AAC) and AMediaMuxer.
+ * @param output_mp4_path Absolute path to target .mp4 file.
+ * @param width Target video width (must be multiple of 16, e.g. 720 or 1280).
+ * @param height Target video height (must be multiple of 16, e.g. 1280 or 720).
+ * @param sample_rate Audio sample rate (e.g. 44100).
+ * @param channels Audio channels (1 = mono, 2 = stereo).
+ * @return true if encoder started successfully.
+ */
+bool fv_video_recorder_start(const char *output_mp4_path, int width, int height, int sample_rate, int channels);
+
+/**
+ * Feed PCM 16-bit audio samples into the AAC encoder.
+ */
+void fv_video_recorder_feed_audio(const int16_t *pcm, int frames);
+
+/**
+ * Feed an ARGB / RGBA frame from the canvas/viewfinder into the H.264 video encoder.
+ * Will scale to target dimensions and convert to NV12 with BT.709 colorimetry.
+ */
+void fv_video_recorder_feed_frame(const uint32_t *argb, int src_w, int src_h, int stride_px);
+
+/**
+ * Stop recording, drain encoders, finalize MP4 moov atom, and close file.
+ * @param out_saved_path Optional buffer to receive final file path.
+ * @param max_len Size of out_saved_path buffer.
+ */
+void fv_video_recorder_stop(char *out_saved_path, size_t max_len);
+
+/**
+ * Check if video recording is actively running.
+ */
+bool fv_video_recorder_is_active(void);
+
+/**
+ * Get elapsed recording time in milliseconds.
+ */
+uint32_t fv_video_recorder_get_duration_ms(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FIELDVOX_NATIVE_VIDEO_RECORDER_H */

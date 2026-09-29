@@ -40,6 +40,7 @@
 #include "fv_native_audio.h"
 #include "fv_native_camera.h"
 #include "fv_native_radio.h"
+#include "fv_native_video_recorder.h"
 #include "fv_station_blob_data.h"
 
 #define TAG "FieldVoxNative"
@@ -79,6 +80,7 @@ typedef enum {
     W_ESTES, W_CAMHUD, W_SENS_DOWN, W_SENS_UP,
     W_COOL_DOWN, W_COOL_UP,
     W_MARK_HIT, W_CAM_PREVIEW,
+    W_VIDEO_REC, W_CAM_TINT, W_CLOSE_DRAWER,
     W_COUNT
 } WidgetId;
 
@@ -131,6 +133,9 @@ typedef struct {
     bool echo_fx, reverb_fx, noise_fx, reverse_fx;
     bool sb11_dual, vocal_filter, rem_pod_active, spatial_pan;
     bool estes_mode, cam_hud_active, cam_hud_red;
+    FvCameraFilter cam_filter;
+    bool video_recording_active;
+    char video_artifact[256];
     bool recording_active, monitor_active;
     bool controls_visible;
     float threshold;         /* uT, Java default 1.65 */
@@ -211,7 +216,7 @@ static const char *cadence_label(int idx) {
 }
 
 static const char *direction_label(int direction) {
-    return direction > 0 ? "▶ FWD" : (direction < 0 ? "◀ REV" : "RND");
+    return direction > 0 ? "FWD" : (direction < 0 ? "REV" : "RND");
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -276,7 +281,7 @@ static void draw_round_button(Ui *ui, WidgetId id, float x, float y, float w, fl
 }
 
 /* Java LogoGlyphView: sensor ring, compass ticks, waveform core, antenna spine and field dots. */
-static void draw_logo(Ui *ui, float cx, float cy, float size) {
+static void __attribute__((unused)) draw_logo(Ui *ui, float cx, float cy, float size) {
     static const float amps[9] = {0.10f, -0.34f, 0.22f, -0.52f, 0.50f, -0.20f, 0.35f, -0.12f, 0.08f};
     FvCanvas *c = ui->c;
     const float r = size * 0.36f;
@@ -307,107 +312,383 @@ static void draw_logo(Ui *ui, float cx, float cy, float size) {
     fvg_circle(c, cx - r * 0.34f, cy + r * 0.48f, r * 0.04f, white, 0, 0);
 }
 
-/* Java WavePanelView: FFT response line over a scrolling spectrogram waterfall. */
-static void draw_wave_panel(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
+/* GhostTube-inspired floating neon sound visualizer (32-bar FFT spectrum with peak needles) */
+static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
     FvCanvas *c = ui->c;
-    const float sy = y - ui->scroll;
-    fvg_round_rect(c, x, sy, w, h, sp(ui, 4), 0xFF090D14, 0, 0);
-    const float label_w = sp(ui, 28);
-    const float osc_h = h * 0.32f;
-    const float wf_top = sy + osc_h + 4.0f;
-    const float wf_h = h - osc_h - 8.0f;
-    const float mid = sy + osc_h * 0.55f;
-    fvg_line(c, x + label_w, mid, x + w - 8.0f, mid, 1.0f, 0x226FE7FF);
-
-    const int points = FV_NATIVE_SPECTRUM_BINS;
-    const float step = (w - label_w - 12.0f) / (float)(points - 1);
-    float px = x + label_w, py = mid;
-    const float phase = (float)(now_ms / 50 % 1000);
-    for (int i = 0; i < points; i++) {
-        float v = s->spectrum[i];
-        if (!s->audio_running) v = 0.12f * sinf((float)i * 0.4f + phase * 0.2f);
-        const float nx = x + label_w + (float)i * step;
-        const float ny = mid - v * (osc_h * 0.44f);
-        if (i > 0) {
-            fvg_line(c, px, py, nx, ny, fmaxf(3.0f, sp(ui, 1.7f)), 0x5500E5FF);
-            fvg_line(c, px, py, nx, ny, fmaxf(1.5f, sp(ui, 0.7f)), 0xFF00E5FF);
-        }
-        px = nx;
-        py = ny;
-    }
-    const float label = sp(ui, 9);
-    fvg_text(c, FVG_FONT_MONO, label, x + 8.0f, sy + sp(ui, 13), "FFT", 0x886FE7FF, false);
-    if (wf_h > 8.0f) {
-        fvg_blit_scaled(c, s->waterfall, WF_WIDTH, WF_HEIGHT, x + label_w, wf_top, w - label_w - 8.0f, wf_h);
-        fvg_text(c, FVG_FONT_MONO, label, x + 8.0f, wf_top + label, "8k", 0x886FE7FF, false);
-        fvg_text(c, FVG_FONT_MONO, label, x + 8.0f, wf_top + wf_h * 0.5f + label * 0.35f, "4k", 0x886FE7FF, false);
-        fvg_text(c, FVG_FONT_MONO, label, x + 12.0f, wf_top + wf_h - 2.0f, "0", 0x886FE7FF, false);
-    }
-}
-
-/* Java EmfMeterView: header line plus a 10-segment LED bar. */
-static void draw_emf_meter(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
-    FvCanvas *c = ui->c;
-    const float sy = y - ui->scroll;
-    const bool cal = now_ms < s->cal_flash_until_ms;
-    const uint32_t stroke = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF1744 : (s->vibe_spike ? 0xFFFF9100 :
-                            (s->emf_delta >= 1.5f ? 0xFFFFD600 : 0xFF283548)));
-    fvg_round_rect(c, x, sy, w, h, sp(ui, 3.3f), 0xFF0C1017, stroke, fmaxf(1.0f, sp(ui, 1.5f)));
-
-    const char *status = cal ? "ZERO-CALIBRATED" : (s->emf_spike ? "SPIKE DETECTED" :
-                         (s->emf_delta >= 1.5f ? "ELEVATED" : (s->emf_delta >= 0.5f ? "FLUCTUATING" : "BASELINE")));
-    char header[160];
-    snprintf(header, sizeof(header), "EMF: %.1f µT (Δ%.1f) [%s]  •  VIBE: %.2f m/s²%s",
-             s->emf_magnitude, s->emf_delta, status, s->vibe_magnitude, s->vibe_spike ? " [SPIKE]" : "");
-    const uint32_t text = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF5252 : (s->vibe_spike ? 0xFFFFAB40 :
-                          (s->emf_delta >= 1.5f ? 0xFFFFEE58 : 0xFF6FE7FF)));
-    const float pad = sp(ui, 12);
-    const float size = fit_size(FVG_FONT_SANS, sp(ui, 11.5f), header, w - pad * 2.0f, true);
-    fvg_text(c, FVG_FONT_SANS, size, x + pad, sy + sp(ui, 17), header, text, true);
-
-    const int segs = 10;
-    const float seg_y = sy + sp(ui, 23);
-    float seg_h = h - sp(ui, 23) - sp(ui, 7);
-    if (seg_h < 5.0f) seg_h = 5.0f;
-    const float gap = sp(ui, 4);
-    const float seg_w = (w - pad * 2.0f - gap * (float)(segs - 1)) / (float)segs;
-    int active = (int)fminf((float)segs, fmaxf(1.0f, s->emf_delta / 2.5f * (float)segs));
-    for (int i = 0; i < segs; i++) {
-        uint32_t col = 0xFF161F2E;
-        if (i < active) col = i < 4 ? 0xFF00E676 : (i < 7 ? 0xFFFFD600 : (i < 9 ? 0xFFFF9100 : 0xFFFF1744));
-        fvg_round_rect(c, x + pad + (float)i * (seg_w + gap), seg_y, seg_w, seg_h, sp(ui, 1), col, 0, 0);
-    }
-}
-
-static void draw_camera(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h) {
-    FvCanvas *c = ui->c;
+    const float d = ui->d;
     const float sy = y - ui->scroll;
     place(ui, W_CAM_PREVIEW, x, y, w, h);
-    const bool red = s->cam_hud_red;
-    const uint32_t hud = red ? 0xFFFF1744 : 0xFF00FF66;
-    const bool frame = fv_camera_copy_luma(g_camera_luma);
-    fvg_round_rect(c, x, sy, w, h, sp(ui, 6), red ? 0xFF220505 : 0xFF021E10, 0, 0);
-    if (frame) {
-        for (int i = 0; i < FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT; i++) {
-            const uint32_t l = g_camera_luma[i];
-            g_camera_argb[i] = red ? (0xFF000000u | (l << 16) | ((l / 8u) << 8))
-                                   : (0xFF000000u | ((l / 10u) << 16) | (l << 8) | (l / 5u));
+
+    /* Translucent frosted glass backdrop */
+    fvg_round_rect(c, x, sy, w, h, 10.0f * d, 0x88050E18, 0x306FE7FF, fmaxf(1.0f, d));
+
+    const char *vlabel = "SOUND VISUALIZER • 48 kHz FFT SPECTRUM";
+    const float vs = fit_size(FVG_FONT_MONO, 8.5f * d, vlabel, w - 16.0f * d, false);
+    fvg_text_center(c, FVG_FONT_MONO, vs, x, sy + 3.0f * d, w, 14.0f * d, vlabel, 0x996FE7FF, false);
+
+    const int bars = 32;
+    const float pad_x = 8.0f * d;
+    const float bar_area_w = w - pad_x * 2.0f;
+    const float gap = 2.5f * d;
+    const float bar_w = (bar_area_w - gap * (float)(bars - 1)) / (float)bars;
+    const float base_y = sy + h - 10.0f * d;
+    const float max_bar_h = fmaxf(10.0f * d, h - 28.0f * d);
+
+    const float phase = (float)(now_ms / 60 % 1000);
+
+    for (int i = 0; i < bars; i++) {
+        float v = s->spectrum[i % FV_NATIVE_SPECTRUM_BINS];
+        if (!s->audio_running) {
+            v = 0.08f * (1.0f + sinf((float)i * 0.45f + phase * 0.15f));
         }
-        fvg_blit_scaled(c, g_camera_argb, FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT, x, sy, w, h);
+        if (v > 1.0f) v = 1.0f;
+        if (v < 0.02f) v = 0.02f;
+
+        const float bh = v * max_bar_h;
+        const float bx = x + pad_x + (float)i * (bar_w + gap);
+        const float by = base_y - bh;
+
+        /* Gradient color based on intensity: Cyan -> Green -> Amber -> Red/Pink */
+        uint32_t bar_col = 0xFF00E5FF;
+        if (v > 0.75f) {
+            bar_col = 0xFFFF1744;
+        } else if (v > 0.50f) {
+            bar_col = 0xFFFFD600;
+        } else if (v > 0.25f) {
+            bar_col = 0xFF00FF88;
+        }
+
+        /* Anti-aliased vertical bar */
+        fvg_round_rect(c, bx, by, bar_w, bh, 1.5f * d, bar_col, 0, 0);
+
+        /* Floating peak needle */
+        const float needle_y = by - 3.5f * d;
+        if (needle_y > sy + 16.0f * d) {
+            fvg_fill_rect(c, bx, needle_y, bar_w, 1.5f * d, (bar_col & 0x00FFFFFFu) | 0xDD000000u);
+        }
     }
-    fvg_round_rect(c, x, sy, w, h, sp(ui, 6), 0, hud, fmaxf(1.0f, sp(ui, 1.5f)));
-    const float cx = x + w * 0.5f, cy = sy + h * 0.5f, r = sp(ui, 14);
-    fvg_circle(c, cx, cy, r, 0, hud, fmaxf(1.0f, sp(ui, 1)));
-    fvg_line(c, cx - r * 2.2f, cy, cx - r * 0.6f, cy, fmaxf(1.0f, sp(ui, 1)), hud);
-    fvg_line(c, cx + r * 0.6f, cy, cx + r * 2.2f, cy, fmaxf(1.0f, sp(ui, 1)), hud);
-    fvg_line(c, cx, cy - r * 2.2f, cx, cy - r * 0.6f, fmaxf(1.0f, sp(ui, 1)), hud);
-    fvg_line(c, cx, cy + r * 0.6f, cx, cy + r * 2.2f, fmaxf(1.0f, sp(ui, 1)), hud);
-    char line[128];
-    snprintf(line, sizeof(line), "CAM HUD %s • EMF %.1f µT • %s", red ? "RED" : "PHOSPHOR",
-             s->emf_magnitude, frame ? "LIVE" : "WAITING FOR CAMERA");
-    fvg_text(c, FVG_FONT_MONO, sp(ui, 10), x + sp(ui, 8), sy + sp(ui, 16), line, hud, false);
-    fvg_text(c, FVG_FONT_MONO, sp(ui, 9), x + sp(ui, 8), sy + h - sp(ui, 8), "tap preview to switch tint",
-             (hud & 0x00FFFFFFu) | 0x99000000u, false);
+
+    /* Baseline glow line */
+    fvg_line(c, x + pad_x, base_y + 1.0f, x + w - pad_x, base_y + 1.0f, 1.0f, 0x446FE7FF);
+}
+
+static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w, int h, float d, long now) {
+    if (s->cam_filter != FV_CAM_FILTER_OFF) {
+        const bool frame = fv_camera_copy_luma(g_camera_luma);
+        if (frame) {
+            int cam_w = FV_CAMERA_WIDTH;
+            int cam_h = FV_CAMERA_HEIGHT;
+            const int rot_deg = fv_camera_get_display_compensation_degrees(s->activity);
+            static int s_view_logged = 0;
+            if (s_view_logged++ < 3) {
+                LOGI("viewfinder: w=%d, h=%d, rot_deg=%d", w, h, rot_deg);
+            }
+            fv_camera_luma_to_argb_rotated(g_camera_luma, FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT,
+                                          g_camera_argb, &cam_w, &cam_h, rot_deg, s->cam_filter);
+            fvg_blit_cover(c, g_camera_argb, cam_w, cam_h);
+        } else {
+            fvg_clear(c, 0xFF060B11);
+        }
+
+        /* Subtle viewfinder reticle */
+        const float rx = (float)w * 0.5f, ry = (float)h * 0.38f, r = 18.0f * d;
+        const uint32_t ret_col = 0x336FE7FF;
+        fvg_circle(c, rx, ry, r, 0, ret_col, fmaxf(1.0f, d));
+        fvg_line(c, rx - r * 1.8f, ry, rx - r * 0.6f, ry, fmaxf(1.0f, d), ret_col);
+        fvg_line(c, rx + r * 0.6f, ry, rx + r * 1.8f, ry, fmaxf(1.0f, d), ret_col);
+        fvg_line(c, rx, ry - r * 1.8f, rx, ry - r * 0.6f, fmaxf(1.0f, d), ret_col);
+        fvg_line(c, rx, ry + r * 0.6f, rx, ry + r * 1.8f, fmaxf(1.0f, d), ret_col);
+
+        /* Corner brackets */
+        const float bw = 24.0f * d, bh = 24.0f * d, m = 18.0f * d;
+        fvg_line(c, m, m, m + bw, m, d, ret_col);
+        fvg_line(c, m, m, m, m + bh, d, ret_col);
+        fvg_line(c, (float)w - m - bw, m, (float)w - m, m, d, ret_col);
+        fvg_line(c, (float)w - m, m, (float)w - m, m + bh, d, ret_col);
+    } else {
+        fvg_clear(c, 0xFF050910);
+        /* Atmospheric radar circles */
+        const float rx = (float)w * 0.5f, ry = (float)h * 0.38f;
+        for (int ri = 1; ri <= 3; ri++) {
+            fvg_circle(c, rx, ry, (float)ri * 45.0f * d, 0, 0x126FE7FF, d);
+        }
+        const float ang = (float)(now % 4000) / 4000.0f * 6.2831853f;
+        fvg_line(c, rx, ry, rx + cosf(ang) * 135.0f * d, ry + sinf(ang) * 135.0f * d, d, 0x226FE7FF);
+    }
+}
+
+static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
+    FvCanvas *c = ui->c;
+    const float d = ui->d;
+
+    /* Frosted glass top banner */
+    fvg_round_rect(c, x, y, w, h, 8.0f * d, 0xD808121A, 0x506FE7FF, fmaxf(1.0f, d));
+
+    /* 1. Left Title */
+    const char *title = "FIELDVOX LAB";
+    const float ts = fit_size(FVG_FONT_SANS, 14.0f * d, title, w * 0.28f, true);
+    fvg_text_glow(c, FVG_FONT_SANS, ts, x + 10.0f * d, y + h * 0.68f, title, 0xFF6FE7FF, 2.0f * d, true);
+    fvg_text(c, FVG_FONT_SANS, ts, x + 10.0f * d, y + h * 0.68f, title, 0xFFFFFFFF, true);
+
+    /* 2. Right: Recording indicator / filter badge */
+    const float rec_w = 90.0f * d, rec_h = h - 8.0f * d;
+    const float rec_x = x + w - rec_w - 6.0f * d;
+    const float rec_y = y + 4.0f * d;
+
+    if (s->video_recording_active) {
+        const uint32_t dur = fv_video_recorder_get_duration_ms();
+        const unsigned mins = (dur / 1000u) / 60u;
+        const unsigned secs = (dur / 1000u) % 60u;
+        char rec_text[32];
+        snprintf(rec_text, sizeof(rec_text), "REC %02u:%02u", mins, secs);
+
+        place(ui, W_VIDEO_REC, rec_x, rec_y, rec_w, rec_h);
+        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xEE330005, 0xFFFF1744, fmaxf(1.0f, d));
+        if ((now / 500L) % 2 == 0) {
+            fvg_circle(c, rec_x + 12.0f * d, rec_y + rec_h * 0.5f, 4.0f * d, 0xFFFF1744, 0, 0);
+        }
+        fvg_text_center(c, FVG_FONT_MONO, 10.0f * d, rec_x + 12.0f * d, rec_y, rec_w - 12.0f * d, rec_h,
+                        rec_text, 0xFFFFFFFF, true);
+    } else if (s->recording_active) {
+        place(ui, W_REC, rec_x, rec_y, rec_w, rec_h);
+        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xEE332005, 0xFFFF9100, fmaxf(1.0f, d));
+        fvg_text_center(c, FVG_FONT_MONO, 10.0f * d, rec_x, rec_y, rec_w, rec_h, "WAV REC", 0xFFFFE6A0, true);
+    } else {
+        place(ui, W_CAM_TINT, rec_x, rec_y, rec_w, rec_h);
+        fvg_round_rect(c, rec_x, rec_y, rec_w, rec_h, 6.0f * d, 0xD00A1A28, 0xFF6FE7FF, fmaxf(1.0f, d));
+        fvg_text_center(c, FVG_FONT_MONO, 9.5f * d, rec_x, rec_y, rec_w, rec_h,
+                        fv_camera_filter_name(s->cam_filter), 0xFF6FE7FF, true);
+    }
+
+    /* 3. Center Channel Badge */
+    char badge[96];
+    if (!s->sweep_active) {
+        snprintf(badge, sizeof(badge), "CH %03d/%03d • SWEEP STOPPED", s->channel_counter, CHANNEL_RING);
+    } else if (s->carrier_ready && s->carrier_station >= 0) {
+        snprintf(badge, sizeof(badge), "CH %03d/%03d • %s", s->channel_counter, CHANNEL_RING,
+                 station_at(s->carrier_station)->callsign);
+    } else {
+        snprintf(badge, sizeof(badge), "CH %03d/%03d • BUFFERING", s->channel_counter, CHANNEL_RING);
+    }
+
+    const float center_x = x + w * 0.28f + 6.0f * d;
+    const float center_w = rec_x - center_x - 6.0f * d;
+    const float bs = fit_size(FVG_FONT_SANS, 11.5f * d, badge, center_w - 8.0f * d, true);
+    fvg_text_center(c, FVG_FONT_SANS, bs, center_x, y, center_w, h, badge, 0xFFE0F7FF, true);
+}
+
+static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
+    FvCanvas *c = ui->c;
+    const float d = ui->d;
+    const float half_w = (w - 6.0f * d) * 0.5f;
+
+    /* Left Badge: EMF Meter */
+    const float lx = x;
+    const bool cal = now_ms < s->cal_flash_until_ms;
+    const uint32_t emf_stroke = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF1744 :
+                                (s->emf_delta >= 1.5f ? 0xFFFFD600 : 0x606FE7FF));
+    const uint32_t emf_bg = s->emf_spike ? 0xDD280509 : 0xC00A131C;
+    fvg_round_rect(c, lx, y, half_w, h, 6.0f * d, emf_bg, emf_stroke, fmaxf(1.0f, d));
+
+    char emf_str[64];
+    snprintf(emf_str, sizeof(emf_str), "EMF %.1f µT%s", s->emf_magnitude,
+             cal ? " [CAL]" : (s->emf_spike ? " [SPIKE!]" : ""));
+    const uint32_t emf_text_col = s->emf_spike ? 0xFFFF5252 : (cal ? 0xFF00E676 : 0xFFFFFFFF);
+    const float es = fit_size(FVG_FONT_SANS, 10.5f * d, emf_str, half_w * 0.65f, true);
+    fvg_text(c, FVG_FONT_SANS, es, lx + 8.0f * d, y + h * 0.65f, emf_str, emf_text_col, true);
+
+    /* 5-LED dynamic indicator inside the EMF badge */
+    const int leds = 5;
+    const float led_start_x = lx + half_w * 0.67f;
+    const float led_area_w = half_w - (half_w * 0.67f) - 6.0f * d;
+    const float led_gap = 2.0f * d;
+    const float led_w = (led_area_w - led_gap * (float)(leds - 1)) / (float)leds;
+    const float led_h = h - 10.0f * d;
+    const float led_y = y + 5.0f * d;
+    int active_leds = (int)fminf(5.0f, fmaxf(1.0f, s->emf_delta / 2.0f * 5.0f));
+    for (int i = 0; i < leds; i++) {
+        uint32_t lcol = 0x30182430;
+        if (i < active_leds) {
+            lcol = i < 2 ? 0xFF00E676 : (i < 4 ? 0xFFFFD600 : 0xFFFF1744);
+        }
+        fvg_round_rect(c, led_start_x + (float)i * (led_w + led_gap), led_y, led_w, led_h, 1.5f * d, lcol, 0, 0);
+    }
+
+    /* Right Badge: Environment Telemetry (Baro / Cold Spot / Compass / Rempod) */
+    const float rx = x + half_w + 6.0f * d;
+    char telem[96];
+    uint32_t tel_bg = 0xC00A131C;
+    uint32_t tel_stroke = 0x606FE7FF;
+    uint32_t tel_text = 0xFFD2F0FF;
+
+    if (s->baro_coldspot) {
+        tel_bg = 0xDD042036;
+        tel_stroke = 0xFF00E5FF;
+        tel_text = 0xFF00E5FF;
+        snprintf(telem, sizeof(telem), "COLD SPOT (%.1f hPa)", s->baro_current);
+    } else if (s->rem_pod_active && s->rem_pod_tier > 0) {
+        tel_bg = 0xDD300508;
+        tel_stroke = 0xFFFF1744;
+        tel_text = 0xFFFF5252;
+        snprintf(telem, sizeof(telem), "REM-POD TIER %d ALERT", s->rem_pod_tier);
+    } else if (s->vibe_spike) {
+        tel_bg = 0xDD301805;
+        tel_stroke = 0xFFFF9100;
+        tel_text = 0xFFFFAB40;
+        snprintf(telem, sizeof(telem), "VIBE SPIKE (%.2f m/s²)", s->vibe_magnitude);
+    } else {
+        snprintf(telem, sizeof(telem), "BARO %.1f hPa • DIR %.0f°", s->baro_current, s->compass_azimuth);
+    }
+
+    fvg_round_rect(c, rx, y, half_w, h, 6.0f * d, tel_bg, tel_stroke, fmaxf(1.0f, d));
+    const float ts = fit_size(FVG_FONT_SANS, 10.5f * d, telem, half_w - 12.0f * d, true);
+    fvg_text_center(c, FVG_FONT_SANS, ts, rx, y, half_w, h, telem, tel_text, true);
+}
+
+static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h) {
+    const float d = ui->d;
+    const float gap = 4.0f * d;
+    const float unit = (w - gap * 4.0f) / 5.0f;
+
+    /* 1. W_VIDEO_REC: Big Video Record Button */
+    draw_round_button(ui, W_VIDEO_REC, x, y, unit, h,
+                      s->video_recording_active ? "STOP" : "REC",
+                      s->video_recording_active, 0xFFFF1744);
+
+    /* 2. W_MARK_HIT: Mark Hit Button */
+    draw_round_button(ui, W_MARK_HIT, x + (unit + gap), y, unit, h, "MARK HIT", false, 0xFFFF9100);
+
+    /* 3. W_START: LIVE / ARM Sweeper */
+    draw_round_button(ui, W_START, x + (unit + gap) * 2.0f, y, unit, h,
+                      s->sweep_active ? "LIVE" : "ARM", s->sweep_active, 0xFF00E676);
+
+    /* 4. W_CAM_TINT: Camera Spectral Filter */
+    draw_round_button(ui, W_CAM_TINT, x + (unit + gap) * 3.0f, y, unit, h,
+                      fv_camera_filter_name(s->cam_filter), false, 0xFF00E5FF);
+
+    /* 5. W_CTRL: Drawer Toggle */
+    draw_round_button(ui, W_CTRL, x + (unit + gap) * 4.0f, y, unit, h,
+                      s->controls_visible ? "CLOSE" : "SETTINGS", s->controls_visible, 0xFFE040FB);
+}
+
+static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
+    FvCanvas *c = ui->c;
+    const float d = ui->d;
+
+    /* Semi-opaque backdrop shadow & card */
+    fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xF5081019, 0xFF6FE7FF, fmaxf(1.0f, d * 1.5f));
+
+    /* Drawer Header */
+    const float header_h = 28.0f * d;
+    const char *header = "DSP & INVESTIGATION SETTINGS";
+    fvg_text_center(c, FVG_FONT_SANS, 12.0f * d, x, y + 2.0f * d, w, header_h, header, 0xFF6FE7FF, true);
+
+    /* Close Button in Header */
+    const float close_w = 40.0f * d, close_h = 22.0f * d;
+    const float close_x = x + w - close_w - 6.0f * d, close_y = y + 4.0f * d;
+    draw_pill(ui, W_CLOSE_DRAWER, close_x, close_y, close_w, close_h, "X", PILL_IDLE);
+
+    float cur_y = y + header_h + 4.0f * d;
+    const float gap = 3.0f * d;
+    const float pill_h = (h - header_h - 32.0f * d) / 5.0f;
+
+    /* Row 1: Sweep Controls (Cadence, Direction, Pitch, Cal) */
+    const float p4_w = (w - gap * 3.0f - 16.0f * d) / 4.0f;
+    {
+        const bool cal = now < s->cal_flash_until_ms;
+        PillStyle cal_style = PILL_IDLE;
+        if (cal) cal_style.text = 0xFF00E676;
+        PillStyle pitch_style = PILL_IDLE;
+        const char *pitch_label = "PITCH 0";
+        if (s->pitch_semitones < 0) {
+            pitch_style = (PillStyle){0xFF0C1F2D, 0xFF6FE7FF, 0xFF6FE7FF};
+            pitch_label = "-2st";
+        } else if (s->pitch_semitones > 0) {
+            pitch_style = (PillStyle){0xFF2E0D1B, 0xFFFF80AB, 0xFFFF80AB};
+            pitch_label = "+2st";
+        }
+
+        float px = x + 8.0f * d;
+        draw_pill(ui, W_CADENCE, px, cur_y, p4_w, pill_h, cadence_label(s->cadence_idx), PILL_IDLE);
+        px += p4_w + gap;
+        draw_pill(ui, W_DIRECTION, px, cur_y, p4_w, pill_h, direction_label(s->direction), PILL_IDLE);
+        px += p4_w + gap;
+        draw_pill(ui, W_PITCH, px, cur_y, p4_w, pill_h, pitch_label, pitch_style);
+        px += p4_w + gap;
+        draw_pill(ui, W_CAL, px, cur_y, p4_w, pill_h, cal ? "CAL: OK" : "CAL ZERO", cal_style);
+        cur_y += pill_h + gap;
+    }
+
+    /* Row 2: FX Toggles */
+    {
+        float px = x + 8.0f * d;
+        draw_pill(ui, W_ECHO, px, cur_y, p4_w, pill_h, "ECHO", s->echo_fx ? PILL_ACTIVE : PILL_IDLE);
+        px += p4_w + gap;
+        draw_pill(ui, W_REVERB, px, cur_y, p4_w, pill_h, "REVERB", s->reverb_fx ? PILL_ACTIVE : PILL_IDLE);
+        px += p4_w + gap;
+        draw_pill(ui, W_NOISE, px, cur_y, p4_w, pill_h, "NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
+        px += p4_w + gap;
+        draw_pill(ui, W_REV, px, cur_y, p4_w, pill_h, "REV FX", s->reverse_fx ? PILL_ACTIVE : PILL_IDLE);
+        cur_y += pill_h + gap;
+    }
+
+    /* Row 3: Specialized Modes */
+    const float p5_w = (w - gap * 4.0f - 16.0f * d) / 5.0f;
+    {
+        float px = x + 8.0f * d;
+        draw_pill(ui, W_SB11, px, cur_y, p5_w, pill_h, "SB11", s->sb11_dual ? PILL_ACTIVE : PILL_IDLE);
+        px += p5_w + gap;
+        draw_pill(ui, W_VOCAL, px, cur_y, p5_w, pill_h, "VOCAL", s->vocal_filter ? PILL_ACTIVE : PILL_IDLE);
+        px += p5_w + gap;
+        draw_pill(ui, W_PAN, px, cur_y, p5_w, pill_h, "3D PAN", s->spatial_pan ? PILL_ACTIVE : PILL_IDLE);
+        px += p5_w + gap;
+        draw_pill(ui, W_REMPOD, px, cur_y, p5_w, pill_h, "REM-POD", s->rem_pod_active ? PILL_ACTIVE : PILL_IDLE);
+        px += p5_w + gap;
+        draw_pill(ui, W_ESTES, px, cur_y, p5_w, pill_h, "ESTES", PILL_IDLE);
+        cur_y += pill_h + gap;
+    }
+
+    /* Row 4: Sensitivity & Cooldown */
+    {
+        float px = x + 8.0f * d;
+        const float step_w = 44.0f * d;
+        const float val_w = (w - step_w * 4.0f - gap * 5.0f - 16.0f * d) * 0.5f;
+
+        draw_pill(ui, W_SENS_DOWN, px, cur_y, step_w, pill_h, "-", PILL_IDLE);
+        px += step_w + gap;
+
+        char s_str[48];
+        snprintf(s_str, sizeof(s_str), "Sens %.2fµT", s->threshold);
+        fvg_text_center(c, FVG_FONT_MONO, 10.0f * d, px, cur_y, val_w, pill_h, s_str, 0xFFFFFFFF, false);
+        px += val_w + gap;
+
+        draw_pill(ui, W_SENS_UP, px, cur_y, step_w, pill_h, "+", PILL_IDLE);
+        px += step_w + gap;
+
+        draw_pill(ui, W_COOL_DOWN, px, cur_y, step_w, pill_h, "-", PILL_IDLE);
+        px += step_w + gap;
+
+        char c_str[48];
+        snprintf(c_str, sizeof(c_str), "Cool %dms", s->cooldown_ms);
+        fvg_text_center(c, FVG_FONT_MONO, 10.0f * d, px, cur_y, val_w, pill_h, c_str, 0xFFFFFFFF, false);
+        px += val_w + gap;
+
+        draw_pill(ui, W_COOL_UP, px, cur_y, step_w, pill_h, "+", PILL_IDLE);
+        cur_y += pill_h + gap;
+    }
+
+    /* Row 5: Audio Session & Tools */
+    const float p3_w = (w - gap * 2.0f - 16.0f * d) / 3.0f;
+    {
+        float px = x + 8.0f * d;
+        draw_pill(ui, W_MIC, px, cur_y, p3_w, pill_h, s->monitor_active ? "MIC ON" : "MIC OFF",
+                  s->monitor_active ? PILL_ACTIVE : PILL_IDLE);
+        px += p3_w + gap;
+        draw_pill(ui, W_REC, px, cur_y, p3_w, pill_h, s->recording_active ? "WAV REC ON" : "SESS WAV",
+                  s->recording_active ? PILL_ACTIVE : PILL_IDLE);
+        px += p3_w + gap;
+        draw_pill(ui, W_SESS, px, cur_y, p3_w, pill_h, "STATS", PILL_IDLE);
+    }
 }
 
 static void draw_estes(FvCanvas *c, float d, const FieldVoxApp *s, int w, int h) {
@@ -434,7 +715,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     FvCanvas canvas;
     fvg_canvas_init(&canvas, (uint32_t *)buf->bits, w, h, buf->stride);
 
-    static FieldVoxApp s; /* render-thread snapshot; static to keep the waterfall off the stack */
+    static FieldVoxApp s;
     pthread_mutex_lock(&g_state_mutex);
     memcpy(&s, &g_app, sizeof(s));
     pthread_mutex_unlock(&g_state_mutex);
@@ -443,246 +724,84 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     const long now = get_time_ms();
     if (s.estes_mode) {
         draw_estes(&canvas, d, &s, w, h);
+        if (fv_video_recorder_is_active()) {
+            fv_video_recorder_feed_frame((const uint32_t *)buf->bits, buf->width, buf->height, buf->stride);
+        }
         return;
     }
 
     const bool landscape = w > h;
-    const float top_inset = (landscape ? 14.0f : 48.0f) * d;
-    const float side_inset = (landscape ? 44.0f : 0.0f) * d;
-    const float bottom_inset = (landscape ? 10.0f : 20.0f) * d;
+    const float top_inset = (landscape ? 14.0f : 58.0f) * d;
+    const float side_inset = (landscape ? 36.0f : 12.0f) * d;
+    const float bottom_inset = (landscape ? 10.0f : 32.0f) * d;
+
     WidgetRect rects[W_COUNT];
     memset(rects, 0, sizeof(rects));
-    Ui ui = {&canvas, d, s.scroll_y, side_inset + 12.0f * d, (float)w - 2.0f * (side_inset + 12.0f * d), rects};
+    Ui ui = {&canvas, d, 0.0f, side_inset, (float)w - 2.0f * side_inset, rects};
 
-    fvg_clear(&canvas, 0xFF000000);
+    /* 1. Camera Viewfinder Background */
+    draw_viewfinder_background(&canvas, &s, w, h, d, now);
 
-    /* Fixed-height blocks, in dp, following the Java LinearLayout. */
-    const float title_h = (landscape ? 22.0f : 36.0f) * d;
-    const float sub_h = (landscape ? 14.0f : 18.0f) * d;
-    const float logo_h = (landscape ? 24.0f : 72.0f) * d;
-    const float cam_h = s.cam_hud_active ? ui.w * 9.0f / 16.0f + 6.0f * d : 0.0f;
-    const float emf_h = (landscape ? 32.0f : 52.0f) * d;
-    const float badge_h = (landscape ? 22.0f : 28.0f) * d;
-    const float pill_h = (landscape ? 26.0f : 34.0f) * d;
-    const float round_h = (landscape ? 34.0f : 44.0f) * d;
-    const float status_h = (landscape ? 16.0f : 22.0f) * d;
-    const float ctrl_h = s.controls_visible ? (pill_h * 3.0f + 22.0f * d + 16.0f * d) : 0.0f;
-    const float mark_h = (landscape ? 38.0f : 54.0f) * d;
-    const float info_h = (landscape ? 20.0f : 40.0f) * d;
-    const float gaps = (landscape ? 3.0f : 5.0f) * d * 8.0f;
-    const float fixed = title_h + sub_h + (s.cam_hud_active ? cam_h : logo_h) + emf_h + badge_h + pill_h * 2.0f +
-                        round_h + status_h + ctrl_h + mark_h + info_h + gaps;
-    const float avail = (float)h - top_inset - bottom_inset;
-    float wave_h = avail - fixed;
-    const float wave_min = (landscape ? 48.0f : 114.0f) * d, wave_max = 460.0f * d;
-    if (wave_h < wave_min) wave_h = wave_min;
-    if (wave_h > wave_max) wave_h = wave_max;
+    /* 2. Top Status Header HUD */
+    const float header_h = (landscape ? 28.0f : 36.0f) * d;
+    draw_top_header(&ui, &s, ui.x0, top_inset, ui.w, header_h, now);
 
-    float y = top_inset;
-    const float x0 = ui.x0, cw = ui.w;
-
-    /* Title + subtitle */
+    /* 3. Status Line (Amber/Gold) */
+    const float status_y = top_inset + header_h + 3.0f * d;
+    const float status_h = (landscape ? 14.0f : 18.0f) * d;
     {
-        const char *title = "FIELDVOX LAB";
-        const float size = (landscape ? 22.0f : 28.0f) * d;
-        const float tw = fvg_text_width(FVG_FONT_SANS, size, title, true);
-        const float base = y + title_h * 0.78f - ui.scroll;
-        fvg_text_glow(&canvas, FVG_FONT_SANS, size, x0 + (cw - tw) * 0.5f, base, title, 0xFF6FE7FF, 3.3f * d, true);
-        fvg_text(&canvas, FVG_FONT_SANS, size, x0 + (cw - tw) * 0.5f, base, title, 0xFFFFFFFF, true);
-        y += title_h;
-        char sub[128];
-        snprintf(sub, sizeof(sub), "ITC Lab Suite • %u Live Stations • 2D FFT Waterfall • Geophone • DSP", (unsigned)FV_STATION_BLOB_COUNT);
-        const float ss = fit_size(FVG_FONT_SANS, (landscape ? 10.0f : 11.0f) * d, sub, cw, false);
-        fvg_text_center(&canvas, FVG_FONT_SANS, ss, x0, y - ui.scroll, cw, sub_h, sub, 0xFF6FE7FF, false);
-        y += sub_h;
-    }
-
-    /* Logo glyph, or the camera HUD in its place */
-    if (s.cam_hud_active) {
-        draw_camera(&ui, &s, x0, y + 3.0f * d, cw, cam_h - 6.0f * d);
-        y += cam_h;
-    } else {
-        draw_logo(&ui, x0 + cw * 0.5f, y + logo_h * 0.5f - ui.scroll, logo_h);
-        y += logo_h;
-    }
-
-    y += 2.0f * d;
-    draw_wave_panel(&ui, &s, x0, y, cw, wave_h, now);
-    y += wave_h + 5.0f * d;
-
-    draw_emf_meter(&ui, &s, x0, y, cw, emf_h, now);
-    y += emf_h + 5.0f * d;
-
-    /* Channel badge: dynamic station count display */
-    {
-        char badge[128];
-        if (!s.sweep_active) {
-            snprintf(badge, sizeof(badge), "CH %03d / %03d • SWEEP STOPPED", s.channel_counter, CHANNEL_RING);
-        } else if (s.carrier_ready && s.carrier_station >= 0) {
-            snprintf(badge, sizeof(badge), "CH %03d / %03d • %s", s.channel_counter, CHANNEL_RING,
-                     station_at(s.carrier_station)->callsign);
-        } else {
-            snprintf(badge, sizeof(badge), "CH %03d / %03d • CONNECTING STATIONS", s.channel_counter, CHANNEL_RING);
-        }
-        const float by = y - ui.scroll;
-        fvg_round_rect(&canvas, x0, by, cw, badge_h, 6.0f * d, 0xFF07121A, 0xFF6FE7FF, fmaxf(1.0f, d));
-        const float bs = fit_size(FVG_FONT_SANS, 12.0f * d, badge, cw - 16.0f * d, true);
-        const float tw = fvg_text_width(FVG_FONT_SANS, bs, badge, true);
-        const float base = by + badge_h * 0.5f + bs * 0.35f;
-        fvg_text_glow(&canvas, FVG_FONT_SANS, bs, x0 + (cw - tw) * 0.5f, base, badge, 0xFF6FE7FF, 2.0f * d, true);
-        fvg_text(&canvas, FVG_FONT_SANS, bs, x0 + (cw - tw) * 0.5f, base, badge, 0xFFE8F7FF, true);
-        y += badge_h + 5.0f * d;
-    }
-
-    /* Sweep bar: CAL ZERO | cadence | direction | PITCH */
-    const float gap = 2.0f * d;
-    const float pill_w = (cw - gap * 8.0f) / 4.0f;
-    {
-        const bool cal = now < s.cal_flash_until_ms;
-        PillStyle cal_style = PILL_IDLE;
-        if (cal) cal_style.text = 0xFF00E676;
-        PillStyle pitch_style = PILL_IDLE;
-        const char *pitch_label = "PITCH";
-        if (s.pitch_semitones < 0) {
-            pitch_style = (PillStyle){0xFF0C1F2D, 0xFF6FE7FF, 0xFF6FE7FF};
-            pitch_label = "-2st";
-        } else if (s.pitch_semitones > 0) {
-            pitch_style = (PillStyle){0xFF2E0D1B, 0xFFFF80AB, 0xFFFF80AB};
-            pitch_label = "+2st";
-        }
-        float px = x0 + gap;
-        draw_pill(&ui, W_CAL, px, y, pill_w, pill_h, cal ? "CAL: OK" : "CAL ZERO", cal_style);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_CADENCE, px, y, pill_w, pill_h, cadence_label(s.cadence_idx), PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_DIRECTION, px, y, pill_w, pill_h, direction_label(s.direction), PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_PITCH, px, y, pill_w, pill_h, pitch_label, pitch_style);
-        y += pill_h + 4.0f * d;
-    }
-
-    /* FX bar: ECHO | REVERB | NOISE | REV */
-    {
-        float px = x0 + gap;
-        draw_pill(&ui, W_ECHO, px, y, pill_w, pill_h, "ECHO", s.echo_fx ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_REVERB, px, y, pill_w, pill_h, "REVERB", s.reverb_fx ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_NOISE, px, y, pill_w, pill_h, "NOISE", s.noise_fx ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_REV, px, y, pill_w, pill_h, "REV", s.reverse_fx ? PILL_ACTIVE : PILL_IDLE);
-        y += pill_h + 6.0f * d;
-    }
-
-    /* Bottom row: Sess | Rec | LIVE/ARM (1.15x) | Mic | Ctrl */
-    {
-        const float weights[5] = {1.0f, 1.0f, 1.15f, 1.0f, 1.0f};
-        const float unit = (cw - gap * 10.0f) / 5.15f;
-        float px = x0 + gap;
-        const WidgetId ids[5] = {W_SESS, W_REC, W_START, W_MIC, W_CTRL};
-        const char *labels[5] = {"Sess", s.recording_active ? "REC" : "Rec", s.sweep_active ? "LIVE" : "ARM",
-                                 s.monitor_active ? "Mic On" : "Mic", "Ctrl"};
-        const bool active[5] = {false, s.recording_active, s.sweep_active, s.monitor_active, s.controls_visible};
-        const uint32_t colors[5] = {0xFF6FE7FF, 0xFFFF1744, 0xFF00E676, 0xFF00E676, 0xFF6FE7FF};
-        for (int i = 0; i < 5; i++) {
-            const float bw = unit * weights[i];
-            draw_round_button(&ui, ids[i], px, y, bw, round_h, labels[i], active[i], colors[i]);
-            px += bw + gap * 2.0f;
-        }
-        y += round_h + 6.0f * d;
-    }
-
-    /* Status line (Java exportStatus, amber) */
-    {
-        char line[160];
+        char status_line[160];
         if (now < s.status_until_ms) {
-            snprintf(line, sizeof(line), "%s", s.status_message);
+            snprintf(status_line, sizeof(status_line), "%s", s.status_message);
         } else if (!s.sweep_active) {
-            snprintf(line, sizeof(line), "Sweep armed • tap ARM to go live");
+            snprintf(status_line, sizeof(status_line), "Sweep armed • tap ARM to start live stations");
         } else if (s.carrier_ready) {
-            snprintf(line, sizeof(line), "Auto Live active • %d stations buffered", s.live_decks);
+            snprintf(status_line, sizeof(status_line), "Auto Live active • %d stations buffered • %s",
+                     s.live_decks, s.gate_open ? "gate OPEN" : "listening");
         } else {
-            snprintf(line, sizeof(line), "Auto Live • connecting to stations…");
+            snprintf(status_line, sizeof(status_line), "Auto Live • connecting to live streams…");
         }
-        const float ls = fit_size(FVG_FONT_SANS, 12.0f * d, line, cw, false);
-        fvg_text_center(&canvas, FVG_FONT_SANS, ls, x0, y - ui.scroll, cw, status_h, line, 0xFFFFE6A0, false);
-        y += status_h;
+        const float ss = fit_size(FVG_FONT_SANS, (landscape ? 9.5f : 11.0f) * d, status_line, ui.w, false);
+        fvg_text_center(&canvas, FVG_FONT_SANS, ss, ui.x0, status_y, ui.w, status_h, status_line, 0xFFFFE6A0, false);
     }
 
-    /* Ctrl panel (hidden by default, like Java's controlPanel) */
+    /* 4. Perimeter HUD Badges (EMF & Sensors) */
+    const float badge_y = status_y + status_h + 3.0f * d;
+    const float badge_h = (landscape ? 24.0f : 30.0f) * d;
+    draw_perimeter_badges(&ui, &s, ui.x0, badge_y, ui.w, badge_h, now);
+
+    /* 5. Bottom Action Bar position */
+    const float bottom_bar_h = (landscape ? 34.0f : 44.0f) * d;
+    const float bottom_bar_y = (float)h - bottom_inset - bottom_bar_h;
+
+    /* 6. Centered Floating Sound Visualizer (docked above bottom bar, leaving camera viewfinder visible) */
+    const float vis_h = (landscape ? 64.0f : 110.0f) * d;
+    const float vis_top = bottom_bar_y - vis_h - 10.0f * d;
+    draw_floating_visualizer(&ui, &s, ui.x0, vis_top, ui.w, vis_h, now);
+
+    /* 7. Bottom Action Bar (only rendered and clickable when drawer is closed) */
+    if (!s.controls_visible) {
+        draw_bottom_action_bar(&ui, &s, ui.x0, bottom_bar_y, ui.w, bottom_bar_h);
+    }
+
+    /* 8. Slide-Up Drawer Overlay (if toggled) */
     if (s.controls_visible) {
-        y += 4.0f * d;
-        float px = x0 + gap;
-        draw_pill(&ui, W_SB11, px, y, pill_w, pill_h, "SB11 DUAL", s.sb11_dual ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_VOCAL, px, y, pill_w, pill_h, "VOCAL", s.vocal_filter ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_REMPOD, px, y, pill_w, pill_h, "REM-POD", s.rem_pod_active ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_PAN, px, y, pill_w, pill_h, "3D PAN", s.spatial_pan ? PILL_ACTIVE : PILL_IDLE);
-        y += pill_h + 4.0f * d;
-
-        px = x0 + gap;
-        draw_pill(&ui, W_ESTES, px, y, pill_w, pill_h, "ESTES", PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_CAMHUD, px, y, pill_w, pill_h, "CAM HUD", s.cam_hud_active ? PILL_ACTIVE : PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_SENS_DOWN, px, y, pill_w, pill_h, "SENS −", PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_SENS_UP, px, y, pill_w, pill_h, "SENS +", PILL_IDLE);
-        y += pill_h + 4.0f * d;
-
-        px = x0 + gap;
-        char label[96];
-        snprintf(label, sizeof(label), "Sensitivity %.2f µT • Cooldown %d ms", s.threshold, s.cooldown_ms);
-        const float half = pill_w * 2.0f + gap * 2.0f;
-        const float ls = fit_size(FVG_FONT_SANS, 12.0f * d, label, half, false);
-        fvg_text_center(&canvas, FVG_FONT_SANS, ls, px, y - ui.scroll, half, pill_h, label, 0xFFFFFFFF, false);
-        px += half + gap * 2.0f;
-        draw_pill(&ui, W_COOL_DOWN, px, y, pill_w, pill_h, "COOL −", PILL_IDLE);
-        px += pill_w + gap * 2.0f;
-        draw_pill(&ui, W_COOL_UP, px, y, pill_w, pill_h, "COOL +", PILL_IDLE);
-        y += pill_h + 4.0f * d;
-
-        char baro[128];
-        snprintf(baro, sizeof(baro), "BARO %.1f hPa (Δ%.2f)%s • REM-POD tier %d • compass %.0f°",
-                 s.baro_current, s.baro_delta, s.baro_coldspot ? " COLD SPOT" : "", s.rem_pod_tier, s.compass_azimuth);
-        const float bs = fit_size(FVG_FONT_SANS, 11.0f * d, baro, cw, false);
-        fvg_text_center(&canvas, FVG_FONT_SANS, bs, x0, y - ui.scroll, cw, 22.0f * d, baro,
-                        s.baro_coldspot ? 0xFF00E5FF : 0xFF88A0B8, false);
-        y += 22.0f * d + 4.0f * d;
+        const float drawer_h = (landscape ? 240.0f : 290.0f) * d;
+        const float drawer_y = (float)h - bottom_inset - drawer_h;
+        draw_slide_up_drawer(&ui, &s, ui.x0, drawer_y, ui.w, drawer_h, now);
     }
 
-    /* MARK HIT: Java wide dark-red button, 54 dp */
-    y += 4.0f * d;
-    place(&ui, W_MARK_HIT, x0, y, cw, mark_h);
-    fvg_round_rect(&canvas, x0, y - ui.scroll, cw, mark_h, 4.0f * d, 0xFF5C1E1E, 0x55FF5252, fmaxf(1.0f, d));
-    fvg_text_center(&canvas, FVG_FONT_SANS, 18.0f * d, x0, y - ui.scroll, cw, mark_h, "MARK HIT", 0xFFFFFFFF, true);
-    y += mark_h + 6.0f * d;
-
-    /* Session info line (Java status TextView) */
-    {
-        char info[192];
-        const char *reason = s.gate_open ? fv_gate_reason_name(s.gate_reason) : "listening";
-        if (s.sweep_active && s.carrier_ready && s.carrier_station >= 0) {
-            snprintf(info, sizeof(info), "Carrier: %s%s%s • gate: %s • packets: %u",
-                     station_at(s.carrier_station)->name, s.sb11_dual && s.carrier_b_station >= 0 ? " + " : "",
-                     s.sb11_dual && s.carrier_b_station >= 0 ? station_at(s.carrier_b_station)->callsign : "",
-                     reason, s.packets_opened);
-        } else {
-            snprintf(info, sizeof(info), "Bounded station grains • no word bank • no TTS");
-        }
-        const float is = fit_size(FVG_FONT_SANS, 12.0f * d, info, cw, false);
-        fvg_text(&canvas, FVG_FONT_SANS, is, x0, y - ui.scroll + is, info, 0xFFD2F0FF, false);
-        y += info_h;
-    }
-
-    const float content_h = y + bottom_inset;
+    /* Save widget hit rects */
     pthread_mutex_lock(&g_state_mutex);
     memcpy(g_app.widgets, rects, sizeof(rects));
-    g_app.max_scroll = content_h > (float)h ? content_h - (float)h : 0.0f;
-    if (g_app.scroll_y > g_app.max_scroll) g_app.scroll_y = g_app.max_scroll;
+    g_app.max_scroll = 0.0f;
+    g_app.scroll_y = 0.0f;
     pthread_mutex_unlock(&g_state_mutex);
+
+    /* Feed video recorder frame if active */
+    if (fv_video_recorder_is_active()) {
+        fv_video_recorder_feed_frame((const uint32_t *)buf->bits, buf->width, buf->height, buf->stride);
+    }
 }
 
 static void *render_thread_func(void *arg) {
@@ -710,10 +829,16 @@ static void *render_thread_func(void *arg) {
  * ------------------------------------------------------------------------------------------- */
 
 static int count_saved_files(const char *suffix) {
-    if (!g_app.activity || !g_app.activity->internalDataPath) return 0;
+    if (!g_app.activity) return 0;
+    const char *base = g_app.activity->externalDataPath ? g_app.activity->externalDataPath : g_app.activity->internalDataPath;
+    if (!base) return 0;
     char dir[512];
-    snprintf(dir, sizeof(dir), "%s/fieldvox-hits", g_app.activity->internalDataPath);
+    snprintf(dir, sizeof(dir), "%s/fieldvox-recordings", base);
     DIR *dp = opendir(dir);
+    if (!dp && g_app.activity->internalDataPath) {
+        snprintf(dir, sizeof(dir), "%s/fieldvox-hits", g_app.activity->internalDataPath);
+        dp = opendir(dir);
+    }
     if (!dp) return 0;
     int count = 0;
     const size_t slen = strlen(suffix);
@@ -756,17 +881,18 @@ static void handle_widget(WidgetId id) {
         case W_NOISE: g_app.noise_fx = !g_app.noise_fx; break;
         case W_REV: g_app.reverse_fx = !g_app.reverse_fx; break;
         case W_SESS: {
+            const int mp4_count = count_saved_files(".mp4");
             const int total_wav = count_saved_files(".wav");
             const int preroll_hits = count_saved_files("-preroll.wav");
             const int session_wav = total_wav >= preroll_hits ? total_wav - preroll_hits : 0;
-            snprintf(msg, sizeof(msg), "Saved: %d session WAV, %d pre-roll hits (app storage)",
-                     session_wav, preroll_hits);
+            snprintf(msg, sizeof(msg), "Saved: %d MP4 Videos • %d Session WAV • %d Pre-Roll Hits",
+                     mp4_count, session_wav, preroll_hits);
             set_status_locked(msg);
             break;
         }
         case W_REC:
             g_app.recording_active = !g_app.recording_active;
-            set_status_locked(g_app.recording_active ? "Session recording started" : "Session recording saving…");
+            set_status_locked(g_app.recording_active ? "Session WAV recording started" : "Session WAV recording saving…");
             break;
         case W_START:
             g_app.sweep_active = !g_app.sweep_active;
@@ -792,10 +918,17 @@ static void handle_widget(WidgetId id) {
             g_app.vocal_filter = true;
             break;
         case W_CAMHUD:
-            g_app.cam_hud_active = !g_app.cam_hud_active;
-            if (g_app.cam_hud_active && !fv_android_has_permission(g_app.activity, "android.permission.CAMERA")) {
-                fv_android_request_permission(g_app.activity, "android.permission.CAMERA", 61);
-                set_status_locked("Camera permission requested");
+            if (g_app.cam_filter == FV_CAM_FILTER_OFF) {
+                g_app.cam_filter = FV_CAM_FILTER_PHOSPHOR;
+                g_app.cam_hud_active = true;
+                if (!fv_android_has_permission(g_app.activity, "android.permission.CAMERA")) {
+                    fv_android_request_permission(g_app.activity, "android.permission.CAMERA", 61);
+                }
+                set_status_locked("Camera night-vision ON");
+            } else {
+                g_app.cam_filter = FV_CAM_FILTER_OFF;
+                g_app.cam_hud_active = false;
+                set_status_locked("Camera night-vision OFF");
             }
             break;
         case W_SENS_DOWN:
@@ -816,7 +949,72 @@ static void handle_widget(WidgetId id) {
             atomic_fetch_add(&g_app.mark_hit_requests, 1u);
             set_status_locked("Capturing 3-second pre-roll hit…");
             break;
-        case W_CAM_PREVIEW: g_app.cam_hud_red = !g_app.cam_hud_red; break;
+        case W_CAM_PREVIEW: {
+            g_app.cam_filter = (FvCameraFilter)((g_app.cam_filter + 1) % FV_CAM_FILTER_COUNT);
+            g_app.cam_hud_active = (g_app.cam_filter != FV_CAM_FILTER_OFF);
+            char tmsg[64];
+            snprintf(tmsg, sizeof(tmsg), "Camera filter: %s", fv_camera_filter_name(g_app.cam_filter));
+            set_status_locked(tmsg);
+            break;
+        }
+        case W_VIDEO_REC: {
+            if (!fv_video_recorder_is_active()) {
+                if (!fv_android_has_permission(g_app.activity, "android.permission.CAMERA") ||
+                    !fv_android_has_permission(g_app.activity, "android.permission.RECORD_AUDIO")) {
+                    fv_android_request_runtime_permissions(g_app.activity);
+                }
+                char dir[512];
+                const char *base = g_app.activity->externalDataPath ? g_app.activity->externalDataPath : g_app.activity->internalDataPath;
+                snprintf(dir, sizeof(dir), "%s/fieldvox-recordings", base ? base : "/sdcard");
+                mkdir(dir, 0755);
+                char path[512];
+                snprintf(path, sizeof(path), "%s/session-%lld.mp4", dir, get_wall_time_ms());
+
+                bool land = false;
+                pthread_mutex_lock(&g_window_mutex);
+                ANativeWindow *win = g_app.window;
+                if (win) {
+                    ANativeWindow_acquire(win);
+                    land = ANativeWindow_getWidth(win) > ANativeWindow_getHeight(win);
+                    ANativeWindow_release(win);
+                }
+                pthread_mutex_unlock(&g_window_mutex);
+
+                const int vw = land ? 1280 : 720;
+                const int vh = land ? 720 : 1280;
+                if (fv_video_recorder_start(path, vw, vh, SAMPLE_RATE, 1)) {
+                    g_app.video_recording_active = true;
+                    snprintf(g_app.video_artifact, sizeof(g_app.video_artifact), "%s", path);
+                    set_status_locked("Video recording started (H.264 + AAC MP4)");
+                } else {
+                    set_status_locked("Video recording failed to start");
+                }
+            } else {
+                char saved_path[512];
+                fv_video_recorder_stop(saved_path, sizeof(saved_path));
+                g_app.video_recording_active = false;
+                char vmsg[256];
+                if (saved_path[0] != '\0') {
+                    snprintf(vmsg, sizeof(vmsg), "Video saved: %s", saved_path);
+                } else {
+                    snprintf(vmsg, sizeof(vmsg), "Video recording stopped");
+                }
+                set_status_locked(vmsg);
+            }
+            break;
+        }
+        case W_CAM_TINT: {
+            g_app.cam_filter = (FvCameraFilter)((g_app.cam_filter + 1) % FV_CAM_FILTER_COUNT);
+            g_app.cam_hud_active = (g_app.cam_filter != FV_CAM_FILTER_OFF);
+            char tmsg[64];
+            snprintf(tmsg, sizeof(tmsg), "Camera filter: %s", fv_camera_filter_name(g_app.cam_filter));
+            set_status_locked(tmsg);
+            break;
+        }
+        case W_CLOSE_DRAWER: {
+            g_app.controls_visible = false;
+            break;
+        }
         default: break;
     }
 }
@@ -834,16 +1032,28 @@ static void handle_tap(float x, float y_screen, int screen_w) {
         pthread_mutex_unlock(&g_state_mutex);
         return;
     }
-    const float y = y_screen + g_app.scroll_y;
-    for (int i = 0; i < W_COUNT; i++) {
+
+    bool hit = false;
+    for (int i = W_COUNT - 1; i >= 0; i--) {
         const WidgetRect *r = &g_app.widgets[i];
         if (!r->visible) continue;
-        if (x >= r->x && x <= r->x + r->w && y >= r->y && y <= r->y + r->h) {
+        if (x >= r->x && x <= r->x + r->w && y_screen >= r->y && y_screen <= r->y + r->h) {
             LOGI("tap widget %d", i);
             handle_widget((WidgetId)i);
+            hit = true;
             break;
         }
     }
+
+    if (!hit && g_app.controls_visible) {
+        const float d = g_app.density > 0.5f ? g_app.density : 3.0f;
+        const WidgetRect *close_r = &g_app.widgets[W_CLOSE_DRAWER];
+        const float drawer_top = close_r->visible ? (close_r->y - 6.0f * d) : 0.0f;
+        if (close_r->visible && y_screen < drawer_top) {
+            g_app.controls_visible = false;
+        }
+    }
+
     pthread_mutex_unlock(&g_state_mutex);
 }
 
@@ -1454,6 +1664,10 @@ static void *audio_thread_func(void *arg) {
         if (!recording && g_record_file) finish_recording();
         write_recording_block(mono, BUFFER_FRAMES);
 
+        if (fv_video_recorder_is_active()) {
+            fv_video_recorder_feed_audio(mono, BUFFER_FRAMES);
+        }
+
         float gl = 0.707f, gr = 0.707f;
         if (pan) zig_fv_calc_spatial_pan_gains(azimuth, &gl, &gr);
         for (int i = 0; i < BUFFER_FRAMES; i++) {
@@ -1499,7 +1713,7 @@ static void *camera_thread_func(void *arg) {
     (void)arg;
     while (atomic_load(&g_app.running)) {
         pthread_mutex_lock(&g_state_mutex);
-        const bool cam = g_app.cam_hud_active;
+        const bool cam = (g_app.cam_filter != FV_CAM_FILTER_OFF) || g_app.cam_hud_active;
         pthread_mutex_unlock(&g_state_mutex);
         if (atomic_load(&g_app.resumed) && cam && !fv_camera_is_active() &&
             fv_android_has_permission(g_app.activity, "android.permission.CAMERA")) {
@@ -1578,12 +1792,16 @@ static void onPause(ANativeActivity *activity) {
     pthread_mutex_lock(&g_state_mutex);
     g_app.monitor_active = false;
     g_app.recording_active = false;
+    if (g_app.video_recording_active) {
+        g_app.video_recording_active = false;
+        fv_video_recorder_stop(NULL, 0);
+    }
     pthread_mutex_unlock(&g_state_mutex);
 }
 
 static void onResume(ANativeActivity *activity) {
-    (void)activity;
     atomic_store(&g_app.resumed, true);
+    fv_android_request_runtime_permissions(activity);
 }
 
 static void onDestroy(ANativeActivity *activity) {
@@ -1591,6 +1809,12 @@ static void onDestroy(ANativeActivity *activity) {
     LOGI("ANativeActivity onDestroy");
     atomic_store(&g_app.running, false);
     atomic_store(&g_app.resumed, false);
+    pthread_mutex_lock(&g_state_mutex);
+    if (g_app.video_recording_active) {
+        g_app.video_recording_active = false;
+        fv_video_recorder_stop(NULL, 0);
+    }
+    pthread_mutex_unlock(&g_state_mutex);
     fv_camera_stop();
     if (g_app.render_thread_started) pthread_join(g_app.render_thread, NULL);
     if (g_app.sensor_thread_started) pthread_join(g_app.sensor_thread, NULL);
@@ -1622,6 +1846,8 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     g_app.direction = 1;
     g_app.threshold = 1.65f;
     g_app.cooldown_ms = 450;
+    g_app.cam_filter = FV_CAM_FILTER_PHOSPHOR;
+    g_app.cam_hud_active = true;
     for (int i = 0; i < WF_WIDTH * WF_HEIGHT; i++) g_app.waterfall[i] = 0xFF050914;
 
     if (!fvg_font_load(FVG_FONT_SANS, "/system/fonts/RobotoStatic-Regular.ttf") &&
@@ -1640,6 +1866,8 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     if (!fv_radio_start(activity->vm, (int)FV_STATION_BLOB_COUNT)) {
         LOGE("Live radio engine failed to start");
     }
+
+    fv_android_request_runtime_permissions(activity);
 
     activity->callbacks->onNativeWindowCreated = onNativeWindowCreated;
     activity->callbacks->onNativeWindowDestroyed = onNativeWindowDestroyed;
