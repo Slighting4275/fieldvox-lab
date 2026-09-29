@@ -140,6 +140,7 @@ public class MainActivity extends Activity {
     private static native boolean nativeRewriteWavHeader(String path, long pcmBytes);
     private native String nativeBuildManifestTsv(String dirPath);
     private static native String nativeSha256Hex(String text);
+    private native int nativeExportStationSlots(String dirPath);
 
     private int stage1UNativeLogicalCursor = 0;
     private int stage1ULastRingCount = 0;
@@ -451,16 +452,16 @@ public class MainActivity extends Activity {
             }
         }
         if (needsRefresh) {
-            final Context appContext = getApplicationContext();
+            final File dir = new File(getFilesDir(), "fieldvox-hits");
             new Thread(() -> {
                 try {
-                    JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
+                    nativeExportStationSlots(dir.getAbsolutePath());
                     runOnUiThread(() -> {
                         refreshLiveSourcesStatus();
                         stage1KShowChannelNumberOnly(stage1ULFastSweepCursor);
                     });
                 } catch (Throwable t) {
-                    Log.w("FieldVox", "Auto-discovery initial fetch deferred: " + t);
+                    Log.w("FieldVox", "Auto-discovery native export deferred: " + t);
                 }
             }, "fieldvox-auto-discover").start();
         }
@@ -1502,24 +1503,21 @@ public class MainActivity extends Activity {
 
         Log.i("FieldVox", "RADIO_BROWSER_DISCOVER requested");
 
-        final android.content.Context appContext = getApplicationContext();
+        final File dir = new File(getFilesDir(), "fieldvox-hits");
         new Thread(() -> {
             try {
-                org.json.JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
-                int slotCount = result.optInt("slot_count", 0);
-                String server = result.optString("server_selected", "");
-                int catalogCount = result.optInt("catalog_count", 0);
-                Log.i("FieldVox", "RADIO_BROWSER_CACHE_OK catalog=" + catalogCount + " slots=" + slotCount + " server=" + server);
+                int slotCount = nativeExportStationSlots(dir.getAbsolutePath());
+                Log.i("FieldVox", "RADIO_BROWSER_CACHE_OK catalog=" + slotCount + " slots=" + slotCount + " server=native_zig_packed_binary_blob");
                 runOnUiThread(() -> android.widget.Toast.makeText(
                         this,
-                        "Radio Browser sources cached: " + slotCount,
+                        "Native binary sources cached: " + slotCount,
                         android.widget.Toast.LENGTH_LONG
                 ).show());
             } catch (Throwable t) {
                 Log.w("FieldVox", "RADIO_BROWSER_CACHE_FAILED", t);
                 runOnUiThread(() -> android.widget.Toast.makeText(
                         this,
-                        "Radio Browser source cache failed",
+                        "Native binary source cache failed",
                         android.widget.Toast.LENGTH_LONG
                 ).show());
             }
@@ -1667,19 +1665,18 @@ public class MainActivity extends Activity {
                 .setMessage(buildLiveSourcesDialogText())
                 .setPositiveButton("OK", null)
                 .setNeutralButton("Refresh Online Stations", (dialog, which) -> {
-                    Toast.makeText(this, "Discovering online radio streams...", Toast.LENGTH_SHORT).show();
-                    final Context appContext = getApplicationContext();
+                    Toast.makeText(this, "Refreshing native binary station catalog...", Toast.LENGTH_SHORT).show();
+                    final File dir = new File(getFilesDir(), "fieldvox-hits");
                     new Thread(() -> {
                         try {
-                            JSONObject result = RadioBrowserDiscoveryCache.refresh(appContext, 1000);
-                            int count = result.optInt("slot_count", 0);
+                            int count = nativeExportStationSlots(dir.getAbsolutePath());
                             runOnUiThread(() -> {
                                 refreshLiveSourcesStatus();
                                 stage1KShowChannelNumberOnly(stage1ULFastSweepCursor);
-                                Toast.makeText(this, "Cached " + count + " active station slots", Toast.LENGTH_LONG).show();
+                                Toast.makeText(this, "Cached " + count + " native binary station slots", Toast.LENGTH_LONG).show();
                             });
                         } catch (Throwable t) {
-                            runOnUiThread(() -> Toast.makeText(this, "Discovery failed: " + t.getMessage(), Toast.LENGTH_LONG).show());
+                            runOnUiThread(() -> Toast.makeText(this, "Refresh failed: " + t.getMessage(), Toast.LENGTH_LONG).show());
                         }
                     }, "user-refresh-stations").start();
                 })

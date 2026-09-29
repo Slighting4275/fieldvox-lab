@@ -1,0 +1,19 @@
+# Codeberg / Forgejo Language & Linguist Overrides
+# Classify primary native programming languages
+*.c linguist-detectable=true
+*.h linguist-detectable=true
+*.cpp linguist-detectable=true
+*.zig linguist-detectable=true
+
+# Binary assets and blob streams
+*.fvblobs binary
+*.wav binary
+
+# Treat Android framework boilerplate as vendored so language statistics reflect native C, Zig, and Blobs
+*.java linguist-vendored=true
+*.java linguist-detectable=false
+*.jar linguist-vendored=true
+*.jar binary
+android/gradlew linguist-vendored=true
+android/gradlew.bat linguist-vendored=true
+android/gradle/wrapper/* linguist-vendored=true

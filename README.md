@@ -401,10 +401,10 @@ Integrated directly into `liveSpeakerMonitor()` during live 48kHz audio track pl
 ### 64–128 Channel Station Pool & Discovery Architecture
 
 - **Native C Seeding (`fv_source_audit.c`)**: Expanded `FVSA_SWEEP_SLOT_COUNT` from 4 to 64 diverse public, talk, and news feeds (NPR, BBC, CBC, RTE, DW, France Info, OPB, WBUR, KCRW, WNYC, etc.). Native JSON serialization capacity increased to 64KB.
-- **Dynamic Online Discovery (`RadioBrowserDiscoveryCache.java`)**:
-  - Queries `all.api.radio-browser.info` DNS round-robin.
-  - Targets 1,000-station catalog cache and 128-station session pool.
-  - `autoDiscoverSourcesIfNeeded()` automatically warms up the cache on launch or resume if local available slots fall below 32.
+- **Zig & Native C Packed Binary Blob (`station_blob_gen.zig`, `fv_station_blob_data.h`)**:
+  - Packed binary blob station table compiled with Zig CRC-32 verification and direct memory mapping.
+  - Native C session slot and catalog generator (`nativeExportStationSlots`) writes verified manifests, slots, and station caches directly to disk without Java overhead.
+  - Automatically exports 64 vetted, active spoken-word station feeds directly from native memory.
 
 ### Responsive Notch-Safe Display Architecture
 

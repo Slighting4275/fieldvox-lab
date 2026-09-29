@@ -60,14 +60,4 @@ public class FieldVoxRegressionTest {
         int count = MainActivity.countTriggerEvents(jsonlFile);
         Assert.assertEquals("Should count all 3 triggers (2 native type:trigger + 1 live event:trigger)", 3, count);
     }
-
-    @Test
-    public void testRadioBrowserCatalogThreshold() {
-        // Full target: requires at least 500 vetted stations
-        Assert.assertEquals(500, RadioBrowserDiscoveryCache.minimumAcceptableCatalogCount(1000));
-
-        // Smaller requested slot targets: threshold scales proportionally instead of hardcoding 500
-        Assert.assertEquals(50, RadioBrowserDiscoveryCache.minimumAcceptableCatalogCount(100));
-        Assert.assertEquals(32, RadioBrowserDiscoveryCache.minimumAcceptableCatalogCount(64));
-    }
 }

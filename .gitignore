@@ -22,6 +22,7 @@ tmp/
 source/fieldvox
 source/fv-blobdump
 source/fv-csvvox
+source/fv-unit-test
 
 android/*.log
 android/*sha256.txt

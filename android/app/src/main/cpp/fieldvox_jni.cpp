@@ -21,6 +21,7 @@
 #include <algorithm>
 
 #include "fv_core.h"
+#include "fv_station_blob_data.h"
 
 #define FV_LOG_TAG "FieldVoxNative"
 #define FV_LOGI(...) __android_log_print(ANDROID_LOG_INFO, FV_LOG_TAG, __VA_ARGS__)
@@ -1339,4 +1340,123 @@ Java_org_fieldvox_lab_RadioBrowserDiscoveryCache_nativeMinimumAcceptableCatalogC
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_fieldvox_lab_MainActivity_nativeSha256Hex(JNIEnv *env, jclass clazz, jstring j_text) {
     return Java_org_fieldvox_lab_RadioBrowserDiscoveryCache_nativeSha256Hex(env, clazz, j_text);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeExportStationSlots(JNIEnv *env, jobject, jstring j_dirPath) {
+    if (j_dirPath == nullptr) return -1;
+    const char *dir_path = env->GetStringUTFChars(j_dirPath, nullptr);
+    if (!dir_path) return -1;
+
+    std::string base_dir(dir_path);
+    env->ReleaseStringUTFChars(j_dirPath, dir_path);
+
+    mkdir(base_dir.c_str(), 0755);
+
+    const uint8_t *entries = FV_STATION_PLAN_BINARY_DATA + 16;
+    uint32_t count = FV_STATION_BLOB_COUNT;
+
+    // 1. Write source_slots.json
+    std::string slots_file = base_dir + "/source_slots.json";
+    FILE *f_slots = fopen(slots_file.c_str(), "w");
+    if (f_slots) {
+        std::ostringstream ss;
+        ss << "{\n  \"event_type\": \"source_slots\",\n  \"stage\": \"1Q-B\",\n";
+        ss << "  \"catalog_provider\": \"native_binary_blob_zig_v1\",\n";
+        ss << "  \"radio_browser_compatible\": true,\n";
+        ss << "  \"source_pool_policy\": \"native_binary_blob_ring_64_stations\",\n";
+        ss << "  \"catalog_count\": " << count << ",\n";
+        ss << "  \"slot_count\": " << count << ",\n";
+        ss << "  \"session_pool_target_count\": " << count << ",\n";
+        ss << "  \"server_selected\": \"native_zig_packed_binary_blob\",\n";
+        ss << "  \"raw_stream_urls_exported\": false,\n";
+        ss << "  \"playback_engine_changed\": false,\n";
+        ss << "  \"slots\": [\n";
+
+        for (uint32_t i = 0; i < count; i++) {
+            const FvBlobStationEntry *e = (const FvBlobStationEntry *)(entries + (i * sizeof(FvBlobStationEntry)));
+            std::string url(e->url);
+            std::string url_hash = fv_sha256_hex_str(url);
+
+            ss << "    {\n";
+            ss << "      \"slot_index\": " << i << ",\n";
+            ss << "      \"slot_id\": \"native_blob_slot_" << i << "\",\n";
+            ss << "      \"source_label\": \"" << e->name << "\",\n";
+            ss << "      \"callsign\": \"" << e->callsign << "\",\n";
+            ss << "      \"countrycode\": \"" << e->country << "\",\n";
+            ss << "      \"stream_url_sha256\": \"" << url_hash << "\",\n";
+            ss << "      \"raw_stream_url_exported\": false\n";
+            ss << "    }" << (i + 1 < count ? ",\n" : "\n");
+        }
+        ss << "  ]\n}\n";
+        std::string s = ss.str();
+        fwrite(s.data(), 1, s.size(), f_slots);
+        fclose(f_slots);
+    }
+
+    // 2. Write radio_browser_catalog.json
+    std::string cat_file = base_dir + "/radio_browser_catalog.json";
+    FILE *f_cat = fopen(cat_file.c_str(), "w");
+    if (f_cat) {
+        std::ostringstream ss;
+        ss << "{\n  \"event_type\": \"radio_browser_catalog\",\n  \"stage\": \"1Q-B\",\n";
+        ss << "  \"catalog_provider\": \"native_binary_blob_zig_v1\",\n";
+        ss << "  \"catalog_count\": " << count << ",\n";
+        ss << "  \"stations\": [\n";
+
+        for (uint32_t i = 0; i < count; i++) {
+            const FvBlobStationEntry *e = (const FvBlobStationEntry *)(entries + (i * sizeof(FvBlobStationEntry)));
+            std::string url(e->url);
+            std::string url_hash = fv_sha256_hex_str(url);
+
+            ss << "    {\n";
+            ss << "      \"catalog_index\": " << i << ",\n";
+            ss << "      \"source_label\": \"" << e->name << "\",\n";
+            ss << "      \"callsign\": \"" << e->callsign << "\",\n";
+            ss << "      \"countrycode\": \"" << e->country << "\",\n";
+            ss << "      \"stream_url_sha256\": \"" << url_hash << "\"\n";
+            ss << "    }" << (i + 1 < count ? ",\n" : "\n");
+        }
+        ss << "  ]\n}\n";
+        std::string s = ss.str();
+        fwrite(s.data(), 1, s.size(), f_cat);
+        fclose(f_cat);
+    }
+
+    // 3. Write radio_browser_discovery_manifest.json
+    std::string mf_file = base_dir + "/radio_browser_discovery_manifest.json";
+    FILE *f_mf = fopen(mf_file.c_str(), "w");
+    if (f_mf) {
+        std::ostringstream ss;
+        ss << "{\n  \"event_type\": \"radio_browser_discovery_manifest\",\n";
+        ss << "  \"stage\": \"1Q-B\",\n";
+        ss << "  \"catalog_provider\": \"native_binary_blob_zig_v1\",\n";
+        ss << "  \"server_selected\": \"native_zig_packed_binary_blob\",\n";
+        ss << "  \"vetted_catalog_count\": " << count << ",\n";
+        ss << "  \"session_pool_count\": " << count << ",\n";
+        ss << "  \"raw_stream_urls_exported\": false,\n";
+        ss << "  \"catalog_file\": \"radio_browser_catalog.json\",\n";
+        ss << "  \"source_slots_file\": \"source_slots.json\"\n}\n";
+        std::string s = ss.str();
+        fwrite(s.data(), 1, s.size(), f_mf);
+        fclose(f_mf);
+    }
+
+    // 4. Write radio_browser_station_cache_private.jsonl
+    std::string priv_file = base_dir + "/radio_browser_station_cache_private.jsonl";
+    FILE *f_priv = fopen(priv_file.c_str(), "w");
+    if (f_priv) {
+        for (uint32_t i = 0; i < count; i++) {
+            const FvBlobStationEntry *e = (const FvBlobStationEntry *)(entries + (i * sizeof(FvBlobStationEntry)));
+            std::ostringstream ss;
+            ss << "{\"event_type\":\"radio_browser_private_station\",\"catalog_index\":" << i;
+            ss << ",\"source_label\":\"" << e->name << "\",\"callsign\":\"" << e->callsign << "\"";
+            ss << ",\"countrycode\":\"" << e->country << "\",\"url\":\"" << e->url << "\"}\n";
+            std::string s = ss.str();
+            fwrite(s.data(), 1, s.size(), f_priv);
+        }
+        fclose(f_priv);
+    }
+
+    return (jint)count;
 }

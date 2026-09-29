@@ -8,15 +8,17 @@ ZIG ?= /usr/bin/zig
 MAIN_BIN := fieldvox
 DUMP_BIN := fv-blobdump
 CSV_BIN := fv-csvvox
+TEST_BIN := fv-unit-test
 
 MAIN_SRC := src/main.c src/fv_core.c
 DUMP_SRC := src/fv_blobdump.c src/fv_core.c
 CSV_SRC := src/fv_csvvox.c src/fv_core.c
+TEST_SRC := tests/test_native_units.c
 HDR := src/fv_core.h
 
 .PHONY: all clean run inspect dump extract csvtest audition test blobgen
 
-all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN)
+all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN)
 
 $(MAIN_BIN): $(MAIN_SRC) $(HDR)
 >$(CC) $(CFLAGS) -o $@ $(MAIN_SRC) $(LDFLAGS)
@@ -26,6 +28,9 @@ $(DUMP_BIN): $(DUMP_SRC) $(HDR)
 
 $(CSV_BIN): $(CSV_SRC) $(HDR)
 >$(CC) $(CFLAGS) -o $@ $(CSV_SRC) $(LDFLAGS)
+
+$(TEST_BIN): $(TEST_SRC)
+>$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
 
 run: all
 >./$(MAIN_BIN) --seconds 24 --threshold 1.80 --seed 0xBEEFBEEF
@@ -54,11 +59,12 @@ audition:
 >ffmpeg -hide_banner -y -f concat -safe 0 -i out/audition/list.txt -af "volume=2.5,alimiter=limit=0.95" -ar 48000 -ac 1 -c:a pcm_s16le out/audition-blobs.wav
 
 test: all
+>./$(TEST_BIN)
 >./tests/test_smoke.sh
 
 blobgen:
 >$(ZIG) run -lc src/station_blob_gen.zig
 
 clean:
->rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN)
+>rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN)
 >rm -rf out
