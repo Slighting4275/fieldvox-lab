@@ -46,4 +46,5 @@ target_link_libraries(fieldvox_stage1r_native
     android
     log
     aaudio
+    m
 )

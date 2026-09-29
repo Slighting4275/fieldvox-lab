@@ -1,6 +1,8 @@
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+#include <math.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
 
@@ -592,3 +594,118 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1SCNoteLegacyCarrierBlocked(JNIEnv
         (*env)->ReleaseStringUTFChars(env, method_name, m);
     }
 }
+
+// NATIVE AUDIO DSP ENGINE (C)
+// Replaces Java loops for sample boost, byte packing, echo, reverse, white noise, and peak/RMS tracking
+#define FV_DSP_ECHO_DELAY_SAMPLES (48000 * 150 / 1000) // 7200 samples (150ms @ 48kHz)
+static int16_t s_native_echo_buffer[FV_DSP_ECHO_DELAY_SAMPLES];
+static uint32_t s_native_echo_index = 0;
+static uint64_t s_native_noise_prng = 0x854351239ULL;
+
+JNIEXPORT void JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeResetAudioDsp(JNIEnv *env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    memset(s_native_echo_buffer, 0, sizeof(s_native_echo_buffer));
+    s_native_echo_index = 0;
+    s_native_noise_prng = 0x854351239ULL;
+}
+
+JNIEXPORT void JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
+        JNIEnv *env,
+        jobject thiz,
+        jshortArray j_samples,
+        jbyteArray j_pcm,
+        jshortArray j_monitor,
+        jint count,
+        jboolean reverse_enabled,
+        jboolean echo_enabled,
+        jboolean noise_enabled,
+        jfloat boost_factor,
+        jfloatArray j_metrics) {
+    (void)thiz;
+    if (!j_samples || count <= 0) return;
+
+    jshort *samples = (*env)->GetShortArrayElements(env, j_samples, NULL);
+    if (!samples) return;
+
+    jbyte *pcm = j_pcm ? (*env)->GetByteArrayElements(env, j_pcm, NULL) : NULL;
+    jshort *monitor = j_monitor ? (*env)->GetShortArrayElements(env, j_monitor, NULL) : NULL;
+
+    int32_t peak = 0;
+    uint64_t sum_squares = 0;
+
+    for (jint i = 0; i < count; i++) {
+        int16_t raw = samples[i];
+        int32_t av = raw < 0 ? -raw : raw;
+        if (av > peak) peak = av;
+        sum_squares += (uint64_t)((int64_t)raw * (int64_t)raw);
+
+        if (pcm) {
+            pcm[i * 2] = (jbyte)(raw & 0xff);
+            pcm[i * 2 + 1] = (jbyte)((raw >> 8) & 0xff);
+        }
+
+        if (monitor) {
+            float boosted = (float)raw * boost_factor;
+            if (boosted > 32767.0f) boosted = 32767.0f;
+            else if (boosted < -32768.0f) boosted = -32768.0f;
+            monitor[i] = (int16_t)boosted;
+        }
+    }
+
+    if (monitor) {
+        if (reverse_enabled) {
+            for (jint i = 0; i < count / 2; i++) {
+                int16_t tmp = monitor[i];
+                monitor[i] = monitor[count - 1 - i];
+                monitor[count - 1 - i] = tmp;
+            }
+        }
+
+        if (echo_enabled) {
+            for (jint i = 0; i < count; i++) {
+                int16_t delayed = s_native_echo_buffer[s_native_echo_index];
+                int32_t mixed = (int32_t)monitor[i] + (int32_t)(delayed * 0.42f);
+                if (mixed > 32767) mixed = 32767;
+                if (mixed < -32768) mixed = -32768;
+
+                int32_t feedback = (int32_t)monitor[i] + (int32_t)(delayed * 0.32f);
+                if (feedback > 32767) feedback = 32767;
+                if (feedback < -32768) feedback = -32768;
+
+                s_native_echo_buffer[s_native_echo_index] = (int16_t)feedback;
+                s_native_echo_index = (s_native_echo_index + 1) % FV_DSP_ECHO_DELAY_SAMPLES;
+                monitor[i] = (int16_t)mixed;
+            }
+        }
+
+        if (noise_enabled) {
+            for (jint i = 0; i < count; i++) {
+                s_native_noise_prng = s_native_noise_prng * 6364136223846793005ULL + 1442695040888963407ULL;
+                // noise in range [-700, 700]
+                int32_t noise = (int32_t)(((int64_t)(s_native_noise_prng >> 33) * 1400LL) / 2147483648LL) - 700;
+                int32_t mixed = (int32_t)monitor[i] + noise;
+                if (mixed > 32767) mixed = 32767;
+                if (mixed < -32768) mixed = -32768;
+                monitor[i] = (int16_t)mixed;
+            }
+        }
+    }
+
+    if (j_metrics) {
+        jfloat *metrics = (*env)->GetFloatArrayElements(env, j_metrics, NULL);
+        if (metrics) {
+            float rms = count > 0 ? (float)sqrt((double)sum_squares / (double)count) : 0.0f;
+            metrics[0] = (float)peak;
+            metrics[1] = rms;
+            (*env)->ReleaseFloatArrayElements(env, j_metrics, metrics, 0);
+        }
+    }
+
+    (*env)->ReleaseShortArrayElements(env, j_samples, samples, JNI_ABORT);
+    if (pcm) (*env)->ReleaseByteArrayElements(env, j_pcm, pcm, 0);
+    if (monitor) (*env)->ReleaseShortArrayElements(env, j_monitor, monitor, 0);
+}
+

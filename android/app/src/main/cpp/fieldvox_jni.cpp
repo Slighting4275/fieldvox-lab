@@ -900,3 +900,93 @@ Java_org_fieldvox_lab_MainActivity_nativeStatus(JNIEnv *env, jobject) {
     const std::string out = ss.str();
     return env->NewStringUTF(out.c_str());
 }
+
+static std::atomic<float> g_telemetry_mag_baseline{-1.0f};
+static std::atomic<float> g_telemetry_gyro_baseline{-1.0f};
+
+extern "C" JNIEXPORT void JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeResetSensorTelemetry(JNIEnv *, jobject) {
+    g_telemetry_mag_baseline.store(-1.0f, std::memory_order_relaxed);
+    g_telemetry_gyro_baseline.store(-1.0f, std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_org_fieldvox_lab_MainActivity_nativeUpdateSensorTelemetry(
+        JNIEnv *env,
+        jobject,
+        jint sensor_type,
+        jfloat x,
+        jfloat y,
+        jfloat z,
+        jfloat threshold_val,
+        jfloatArray j_out) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        return JNI_FALSE;
+    }
+
+    const float mag = fv_mag3(x, y, z);
+    if (!std::isfinite(mag)) {
+        return JNI_FALSE;
+    }
+
+    float delta = 0.0f;
+    float baseline = 0.0f;
+    bool is_spike = false;
+    int active_segs = 1;
+    int status_level = 0; // 0=BASELINE, 1=FLUCTUATING, 2=ELEVATED, 3=SPIKE DETECTED
+
+    if (sensor_type == 2) { // TYPE_MAGNETIC_FIELD
+        float prev_baseline = g_telemetry_mag_baseline.load(std::memory_order_relaxed);
+        if (prev_baseline < 0.0f) {
+            g_telemetry_mag_baseline.store(mag, std::memory_order_relaxed);
+            baseline = mag;
+            delta = 0.0f;
+        } else {
+            baseline = prev_baseline * 0.985f + mag * 0.015f;
+            g_telemetry_mag_baseline.store(baseline, std::memory_order_relaxed);
+            delta = std::fabs(mag - baseline);
+        }
+
+        const float spike_threshold = std::max(2.10f, threshold_val * 0.90f);
+        is_spike = delta >= spike_threshold;
+
+        // Calculate 10-segment LED count:
+        active_segs = static_cast<int>(std::min(10.0f, std::max(1.0f, (delta / 2.5f) * 10.0f)));
+
+        if (is_spike) {
+            status_level = 3;
+        } else if (delta >= 1.5f) {
+            status_level = 2;
+        } else if (delta >= 0.5f) {
+            status_level = 1;
+        } else {
+            status_level = 0;
+        }
+    } else if (sensor_type == 4) { // TYPE_GYROSCOPE
+        float prev_baseline = g_telemetry_gyro_baseline.load(std::memory_order_relaxed);
+        if (prev_baseline < 0.0f) {
+            g_telemetry_gyro_baseline.store(mag, std::memory_order_relaxed);
+            baseline = mag;
+            delta = 0.0f;
+        } else {
+            baseline = prev_baseline * 0.965f + mag * 0.035f;
+            g_telemetry_gyro_baseline.store(baseline, std::memory_order_relaxed);
+            delta = std::fabs(mag - baseline);
+        }
+        is_spike = delta >= 0.18f;
+    }
+
+    if (j_out != nullptr) {
+        jfloat out_buf[6];
+        out_buf[0] = mag;
+        out_buf[1] = delta;
+        out_buf[2] = baseline;
+        out_buf[3] = is_spike ? 1.0f : 0.0f;
+        out_buf[4] = static_cast<float>(active_segs);
+        out_buf[5] = static_cast<float>(status_level);
+        env->SetFloatArrayRegion(j_out, 0, 6, out_buf);
+    }
+
+    return is_spike ? JNI_TRUE : JNI_FALSE;
+}
+

@@ -3,6 +3,7 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
 LDFLAGS ?= -lm
+ZIG ?= /usr/bin/zig
 
 MAIN_BIN := fieldvox
 DUMP_BIN := fv-blobdump
@@ -13,7 +14,7 @@ DUMP_SRC := src/fv_blobdump.c src/fv_core.c
 CSV_SRC := src/fv_csvvox.c src/fv_core.c
 HDR := src/fv_core.h
 
-.PHONY: all clean run inspect dump extract csvtest audition test
+.PHONY: all clean run inspect dump extract csvtest audition test blobgen
 
 all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN)
 
@@ -54,6 +55,9 @@ audition:
 
 test: all
 >./tests/test_smoke.sh
+
+blobgen:
+>$(ZIG) run -lc src/station_blob_gen.zig
 
 clean:
 >rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN)

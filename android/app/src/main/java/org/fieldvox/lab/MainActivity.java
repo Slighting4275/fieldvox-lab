@@ -108,6 +108,33 @@ public class MainActivity extends Activity {
     private native int nativeStage1ULFastSweepPeriodMs();
     private native int nativeStage1UNAudioDwellPeriodMs();
 
+    // Native C / Zig replacements for Java DSP, Sensors, and Station Blob
+    private native void nativeResetAudioDsp();
+    private native void nativeProcessAudioDsp(
+            short[] samples,
+            byte[] pcm,
+            short[] monitor,
+            int count,
+            boolean reverseEnabled,
+            boolean echoEnabled,
+            boolean noiseEnabled,
+            float boostFactor,
+            float[] metrics);
+
+    private native void nativeResetSensorTelemetry();
+    private native boolean nativeUpdateSensorTelemetry(
+            int sensorType,
+            float x,
+            float y,
+            float z,
+            float threshold,
+            float[] outTelemetry);
+
+    private native int nativeGetStationCount();
+    private native String nativeGetStationLabel(int slot);
+    private native String nativeGetStationCallsign(int slot);
+    private native String nativeGetStationUrl(int slot);
+
     private int stage1UNativeLogicalCursor = 0;
     private int stage1ULastRingCount = 0;
     private String stage1ULastNativeStationJson = "";
@@ -194,9 +221,6 @@ public class MainActivity extends Activity {
     private Button audioNoiseButton;
     private Button audioRevButton;
 
-    private final short[] echoDelayBuffer = new short[LIVE_SAMPLE_RATE * 150 / 1000];
-    private int echoDelayIndex = 0;
-
     // FIELDVOX_STAGE1Q_C_VISIBLE_SOURCE_CATALOG
     private android.widget.Button liveSourcesButton;
     private android.widget.TextView liveSourcesStatusView;
@@ -246,39 +270,30 @@ public class MainActivity extends Activity {
     private SensorManager onlineCarrierSensorManager;
     private SensorEventListener onlineCarrierSensorListener;
 
-    private static final String[] ONLINE_CARRIER_URLS = new String[] {
-            "https://bonneville.cdnstream1.com/2643_48.aac",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/bounded-fieldAM.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/bounded-fieldFM_HIGH_MP3.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/bounded-fieldFM_LOW_MP3.mp3",
-            "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service",
-            "https://news-stream.iowapublicradio.org/NewsLow.mp3",
-            "https://news-stream.iowapublicradio.org/News.mp3",
-            "https://wpr-ice.streamguys1.com/wpr-ideas-mp3-64",
-            "https://streams.kqed.org/kqedradio",
-            "https://vprbbc.streamguys1.com/vprbbc24.mp3",
-            "https://playerservices.streamtheworld.com/api/livestream-redirect/CSPANRADIO.mp3",
-            "https://vpr.streamguys1.com/vpr64.mp3",
-            "https://vpr.streamguys1.com/vpr24.mp3",
-            "http://161.55.224.79:88"
-    };
+    private int getOnlineStationCount() {
+        try {
+            int cnt = nativeGetStationCount();
+            if (cnt > 0) return cnt;
+        } catch (Throwable ignored) {}
+        return 64;
+    }
 
-    private static final String[] ONLINE_CARRIER_LABELS = new String[] {
-            "Legacy carrier disabled",
-            "Legacy carrier disabled",
-            "Legacy carrier disabled",
-            "bounded-field Seattle News Low",
-            "BBC World Service",
-            "Iowa Public Radio News Low",
-            "Iowa Public Radio News",
-            "Wisconsin Public Radio News",
-            "KQED Radio News/Talk",
-            "Vermont Public BBC Relay",
-            "C-SPAN Radio Public Affairs",
-            "Vermont Public News/Talk 64",
-            "Vermont Public News/Talk 24",
-            "NOAA Puget Sound Marine Weather"
-    };
+    private String getOnlineStationUrl(int index) {
+        try {
+            String url = nativeGetStationUrl(index);
+            if (url != null && !url.isEmpty()) return url;
+        } catch (Throwable ignored) {}
+        return "";
+    }
+
+    private String getOnlineStationLabel(int index) {
+        try {
+            String label = nativeGetStationLabel(index);
+            if (label != null && !label.isEmpty()) return label;
+        } catch (Throwable ignored) {}
+        return "Station #" + (index + 1);
+    }
+
 
     private static final int LIVE_SAMPLE_RATE = 48000;
     private static final int LIVE_PERMISSION_REQUEST = 4101;
@@ -979,9 +994,8 @@ public class MainActivity extends Activity {
     }
 
     private String buildHitJsonLine(String hitId, long now, String label, String sessionStem, long offsetMs) {
-        int nextIndex = ONLINE_CARRIER_URLS.length <= 0 ? 0 : normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
-        int safeNextLabelIndex = ONLINE_CARRIER_LABELS.length <= 0 ? 0 : Math.max(0, Math.min(nextIndex, ONLINE_CARRIER_LABELS.length - 1));
-        String nextLabel = ONLINE_CARRIER_LABELS.length <= 0 ? "" : ONLINE_CARRIER_LABELS[safeNextLabelIndex];
+        int nextIndex = normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
+        String nextLabel = getOnlineStationLabel(nextIndex);
 
         return "{"
                 + "\"event\":\"hit_marker\","
@@ -1712,8 +1726,7 @@ public class MainActivity extends Activity {
                 && !stage1ULastNativeStationLabel.isEmpty()) {
             return stage1ULastNativeStationLabel;
         }
-        int i = Math.max(0, Math.min(onlineCarrierIndex, ONLINE_CARRIER_LABELS.length - 1));
-        return ONLINE_CARRIER_LABELS[i];
+        return getOnlineStationLabel(onlineCarrierIndex);
     }
 
     private synchronized void openOnlineCarrierGate(String reason, float delta) {
@@ -2006,22 +2019,18 @@ public class MainActivity extends Activity {
                 int type = event.sensor.getType();
 
                 if (type == Sensor.TYPE_MAGNETIC_FIELD && event.values.length >= 3) {
-                    float x = event.values[0];
-                    float y = event.values[1];
-                    float z = event.values[2];
-                    float mag = (float)Math.hypot(Math.hypot((double)x, (double)y), (double)z);
-                    if (!Float.isFinite(mag)) {
-                        return;
-                    }
-
-                    if (onlineCarrierMagBaseline < 0.0f) {
-                        onlineCarrierMagBaseline = mag;
-                        return;
-                    }
-
-                    onlineCarrierMagBaseline = onlineCarrierMagBaseline * 0.985f + mag * 0.015f;
-                    float delta = Math.abs(mag - onlineCarrierMagBaseline);
-                    boolean isSpike = delta >= Math.max(2.10f, threshold * 0.90f);
+                    float[] telemetry = new float[6];
+                    boolean isSpike = nativeUpdateSensorTelemetry(
+                            type,
+                            event.values[0],
+                            event.values[1],
+                            event.values[2],
+                            threshold,
+                            telemetry
+                    );
+                    float mag = telemetry[0];
+                    float delta = telemetry[1];
+                    onlineCarrierMagBaseline = telemetry[2];
 
                     if (emfMeterView != null) {
                         emfMeterView.updateEmf(mag, delta, isSpike);
@@ -2044,24 +2053,20 @@ public class MainActivity extends Activity {
                 }
 
                 if (type == Sensor.TYPE_GYROSCOPE && event.values.length >= 3) {
-                    float x = event.values[0];
-                    float y = event.values[1];
-                    float z = event.values[2];
-                    float rot = (float)Math.hypot(Math.hypot((double)x, (double)y), (double)z);
-                    if (!Float.isFinite(rot)) {
-                        return;
-                    }
-
-                    if (onlineCarrierGyroBaseline < 0.0f) {
-                        onlineCarrierGyroBaseline = rot;
-                        return;
-                    }
-
-                    onlineCarrierGyroBaseline = onlineCarrierGyroBaseline * 0.965f + rot * 0.035f;
-                    float delta = Math.abs(rot - onlineCarrierGyroBaseline);
+                    float[] telemetry = new float[6];
+                    boolean isSpike = nativeUpdateSensorTelemetry(
+                            type,
+                            event.values[0],
+                            event.values[1],
+                            event.values[2],
+                            threshold,
+                            telemetry
+                    );
+                    float delta = telemetry[1];
+                    onlineCarrierGyroBaseline = telemetry[2];
 
                     // Gyro is movement-sensitive; use it as a secondary trigger, not a spam source.
-                    if (delta >= 0.18f
+                    if (isSpike
                             && now >= onlineCarrierNextAllowedGateMs
                             && now - onlineCarrierLastGateMs >= Math.max(1900, cooldownMs + 1300)) {
                         openOnlineCarrierGate("gyroscope", delta);
@@ -2194,12 +2199,13 @@ public class MainActivity extends Activity {
     }
 
     private int normalizeOnlineCarrierIndex(int index) {
-        if (ONLINE_CARRIER_URLS.length <= 0) {
+        int count = getOnlineStationCount();
+        if (count <= 0) {
             return 0;
         }
-        int n = index % ONLINE_CARRIER_URLS.length;
+        int n = index % count;
         if (n < 0) {
-            n += ONLINE_CARRIER_URLS.length;
+            n += count;
         }
         return n;
     }
@@ -2586,7 +2592,7 @@ public class MainActivity extends Activity {
         if (stage1SCBlockLegacyCarrier("advanceOnlineCarrierSweep")) {
             return;
         }
-        if (!onlineCarrierActive || ONLINE_CARRIER_URLS.length <= 0) {
+        if (!onlineCarrierActive || getOnlineStationCount() <= 0) {
             return;
         }
 
@@ -2595,7 +2601,7 @@ public class MainActivity extends Activity {
 
         String msg = "BOUNDED FIELD SWEEP: "
                 + onlineCarrierLabel()
-                + " -> " + ONLINE_CARRIER_LABELS[next]
+                + " -> " + getOnlineStationLabel(next)
                 + "\nReason: " + reason
                 + " sweep_count=" + onlineCarrierSweepCount
                 + "\nPreparing next online stream during silence.";
@@ -2615,7 +2621,7 @@ public class MainActivity extends Activity {
 
         stopOnlineCarrierPlayerOnly();
 
-        if (ONLINE_CARRIER_URLS.length <= 0) {
+        if (getOnlineStationCount() <= 0) {
             onlineCarrierActive = false;
             exportStatus.setText(R.string.no_stream_sources);
             return;
@@ -2649,9 +2655,9 @@ public class MainActivity extends Activity {
             }
             String selectedUrl = stage1UNativeUrl != null
                     ? stage1UNativeUrl
-                    : ONLINE_CARRIER_URLS[index];
+                    : getOnlineStationUrl(index);
             if (stage1ULastNativeStationLabel.isEmpty()) {
-                stage1ULastNativeStationLabel = ONLINE_CARRIER_LABELS[index];
+                stage1ULastNativeStationLabel = getOnlineStationLabel(index);
             }
             if (stage1ULastStreamUrlSha256.isEmpty()) {
                 stage1ULastStreamUrlSha256 = sha256Text(selectedUrl);
@@ -2700,16 +2706,16 @@ public class MainActivity extends Activity {
 
                 int next = normalizeOnlineCarrierIndex(onlineCarrierIndex + 1);
                 Log.e("FieldVox", "Timeout-safe sweep MediaPlayer error what=" + what + " extra=" + extra
-                        + " source=" + onlineCarrierLabel() + " trying_next=" + ONLINE_CARRIER_LABELS[next]);
+                        + " source=" + onlineCarrierLabel() + " trying_next=" + getOnlineStationLabel(next));
 
                 handler.postDelayed(() -> prepareOnlineCarrierAtIndex(next), 450L);
                 return true;
             });
 
             Log.i("FieldVox", "BOUNDED FIELD CARRIER: "
-                    + ONLINE_CARRIER_LABELS[index]
+                    + getOnlineStationLabel(index)
                     + " url_sha256=" + stage1ULastStreamUrlSha256);
-            exportStatus.setText(getString(R.string.bounded_field_carrier, ONLINE_CARRIER_LABELS[index]));
+            exportStatus.setText(getString(R.string.bounded_field_carrier, getOnlineStationLabel(index)));
 
             mp.prepareAsync();
 
@@ -2726,11 +2732,11 @@ public class MainActivity extends Activity {
                     return;
                 }
 
-                String label = ONLINE_CARRIER_LABELS[prepareIndex];
+                String label = getOnlineStationLabel(prepareIndex);
                 int next = normalizeOnlineCarrierIndex(prepareIndex + 1);
 
                 Log.w("FieldVox", "Carrier prepare timeout: " + label
-                        + " -> skipping to " + ONLINE_CARRIER_LABELS[next]
+                        + " -> skipping to " + getOnlineStationLabel(next)
                         + " so queued proximity gates do not stall");
 
                 try {
@@ -2750,8 +2756,8 @@ public class MainActivity extends Activity {
             int next = normalizeOnlineCarrierIndex(index + 1);
 
             Log.e("FieldVox", "Timeout-safe sweep prepare exception source="
-                    + ONLINE_CARRIER_LABELS[index]
-                    + " next=" + ONLINE_CARRIER_LABELS[next]
+                    + getOnlineStationLabel(index)
+                    + " next=" + getOnlineStationLabel(next)
                     + " error=" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
 
             handler.postDelayed(() -> prepareOnlineCarrierAtIndex(next), 450L);
@@ -3102,53 +3108,27 @@ public class MainActivity extends Activity {
                         throw new IOException("WAV reached the 4 GiB RIFF size limit.");
                     }
 
-                    long sumSquares = 0L;
-                    int peak = 0;
-
-                    for (int i = 0; i < n; i++) {
-                        int v = samples[i];
-                        int av = Math.abs(v);
-                        if (av > peak) {
-                            peak = av;
-                        }
-                        sumSquares += (long)v * (long)v;
-                        pcm[i * 2] = (byte)(v & 0xff);
-                        pcm[i * 2 + 1] = (byte)((v >> 8) & 0xff);
-                        monitorSamples[i] = boostedSample(samples[i]);
-                    }
+                    float[] dspMetrics = new float[2];
+                    float boostFactor = liveOutputGain;
+                    nativeProcessAudioDsp(
+                            samples,
+                            pcm,
+                            speakerMonitorEnabled ? monitorSamples : null,
+                            n,
+                            userReverseAudioEnabled,
+                            userEchoFxEnabled,
+                            userWhiteNoiseEnabled,
+                            boostFactor,
+                            dspMetrics
+                    );
+                    int peak = (int)dspMetrics[0];
+                    double rms = dspMetrics[1];
 
                     wavOut.write(pcm, 0, n * 2);
                     flushPendingHitMarkers(jsonOut);
                     pcmBytes += (long)n * 2L;
 
                     if (speakerMonitorEnabled) {
-                        if (userReverseAudioEnabled) {
-                            for (int i = 0; i < n / 2; i++) {
-                                short tmp = monitorSamples[i];
-                                monitorSamples[i] = monitorSamples[n - 1 - i];
-                                monitorSamples[n - 1 - i] = tmp;
-                            }
-                        }
-
-                        if (userEchoFxEnabled && echoDelayBuffer != null && echoDelayBuffer.length > 0) {
-                            for (int i = 0; i < n; i++) {
-                                short delayed = echoDelayBuffer[echoDelayIndex];
-                                int mixed = monitorSamples[i] + (int)(delayed * 0.42f);
-                                mixed = Math.max(-32768, Math.min(32767, mixed));
-                                echoDelayBuffer[echoDelayIndex] = (short)Math.max(-32768, Math.min(32767, monitorSamples[i] + (int)(delayed * 0.32f)));
-                                echoDelayIndex = (echoDelayIndex + 1) % echoDelayBuffer.length;
-                                monitorSamples[i] = (short)mixed;
-                            }
-                        }
-
-                        if (userWhiteNoiseEnabled) {
-                            for (int i = 0; i < n; i++) {
-                                int noise = (int)((Math.random() - 0.5) * 1400.0);
-                                int mixed = monitorSamples[i] + noise;
-                                monitorSamples[i] = (short)Math.max(-32768, Math.min(32767, mixed));
-                            }
-                        }
-
                         int written = writeAllSamples(track, monitorSamples, n);
                         if (written < 0) {
                             speakerMonitorEnabled = false;
@@ -3159,8 +3139,6 @@ public class MainActivity extends Activity {
                             });
                         }
                     }
-
-                    double rms = Math.sqrt((double)sumSquares / (double)n);
                     if (rms > liveNoiseFloor) {
                         liveNoiseFloor = liveNoiseFloor * 0.95 + rms * 0.05;
                     } else {
