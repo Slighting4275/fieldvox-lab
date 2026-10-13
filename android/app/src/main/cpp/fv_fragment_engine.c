@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
 #include "fv_fragment_engine.h"
 #include "fv_environment_reverb.h"
 #include "third_party/sonic/sonic.h"
 #include <math.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,7 +16,7 @@
 #define FEED_FRAMES (FV_FRAGMENT_RATE * 4u)
 #define ECHO_EVENTS (FV_FRAGMENT_VOICES * 4u)
 
-typedef struct { int16_t *pcm; size_t frames; int station; unsigned uses; } Clip;
+typedef struct { int16_t *pcm; size_t frames; int station, fd; unsigned uses; } Clip;
 typedef struct { int16_t *pcm; size_t count; int station; } Deck;
 typedef struct { size_t frames; unsigned references; int16_t pcm[]; } Audio;
 typedef struct {
@@ -43,6 +46,8 @@ struct FvFragmentEngine {
     int grain_ms;
     float seek_fraction;
     FvEnvironmentReverb *reverb;
+    FvFragmentSpeaker speaker;
+    void *speaker_context;
 };
 static int16_t saturate(float value) {
     if (value > 32767.0f) return 32767;
@@ -94,7 +99,7 @@ void fv_fragment_reset_playback(FvFragmentEngine *e) {
 void fv_fragment_destroy(FvFragmentEngine *e) {
     if (!e) return;
     fv_fragment_reset_playback(e);
-    for (size_t i=0;i<e->cache_count;i++) free(e->cache[i].pcm);
+    for (size_t i=0;i<e->cache_count;i++) { free(e->cache[i].pcm); if (e->cache[i].fd>=0) close(e->cache[i].fd); }
     for (unsigned i=0;i<FV_FRAGMENT_DECKS;i++) free(e->decks[i].pcm);
     fv_environment_reverb_destroy(e->reverb); free(e);
 }
@@ -107,15 +112,23 @@ void fv_fragment_set_settings(FvFragmentEngine *e,FvFragmentSettings settings) {
     if (settings.reverb != e->settings.reverb) fv_environment_reverb_set_mix(e->reverb,settings.reverb);
     e->settings=settings;
 }
+void fv_fragment_set_speaker(FvFragmentEngine *e,FvFragmentSpeaker speaker,void *context) {
+    if (e) { e->speaker=speaker; e->speaker_context=context; }
+}
 bool fv_fragment_cache_add(FvFragmentEngine *e,const int16_t *pcm,size_t frames,int station) {
+    return fv_fragment_cache_add_source(e,pcm,frames,station,-1);
+}
+bool fv_fragment_cache_add_source(FvFragmentEngine *e,const int16_t *pcm,size_t frames,int station,int source_fd) {
     if (!e || !pcm || !frames || frames>FV_FRAGMENT_CLIP_FRAMES) return false;
     int16_t *copy=malloc(frames*sizeof(*copy)); if (!copy) return false;
+    const int fd=source_fd>=0 ? fcntl(source_fd,F_DUPFD_CLOEXEC,0) : -1;
+    if (source_fd>=0 && fd<0) { free(copy); return false; }
     memcpy(copy,pcm,frames*sizeof(*copy));
     if (e->cache_count==FV_FRAGMENT_CACHE_MAX) {
-        free(e->cache[0].pcm);
+        free(e->cache[0].pcm); if (e->cache[0].fd>=0) close(e->cache[0].fd);
         memmove(e->cache,e->cache+1,(FV_FRAGMENT_CACHE_MAX-1u)*sizeof(e->cache[0])); e->cache_count--;
     }
-    e->cache[e->cache_count++]=(Clip){.pcm=copy,.frames=frames,.station=station}; return true;
+    e->cache[e->cache_count++]=(Clip){.pcm=copy,.frames=frames,.station=station,.fd=fd}; return true;
 }
 size_t fv_fragment_cache_count(const FvFragmentEngine *e) { return e ? e->cache_count : 0u; }
 const int16_t *fv_fragment_cache_latest(const FvFragmentEngine *e,size_t *frames,int *station) {
@@ -158,7 +171,7 @@ static int free_slot(FvFragmentEngine *e,uint64_t clock) {
     return slot;
 }
 static bool admit(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,const int16_t *pcm,
-                   size_t frames,int station,uint64_t clock,bool cached) {
+                   size_t frames,int station,uint64_t clock,bool cached,int source_fd) {
     if (!valid_trigger(t,clock) || !pcm || !frames || frames>FV_FRAGMENT_CLIP_FRAMES) return false;
     const int slot=free_slot(e,clock); if (slot<0) return false;
     size_t seek=(size_t)((double)unit(t->seek_offset)*(double)frames);
@@ -167,6 +180,7 @@ static bool admit(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,const int16_t
     Audio *audio=malloc(sizeof(*audio)+MAX_RENDER*sizeof(*audio->pcm)); if (!audio) return false;
     audio->frames=fv_fragment_transform(pcm+seek,duration,t->pitch_factor,t->speed_factor,audio->pcm,MAX_RENDER);
     if (!audio->frames) { free(audio); return false; }
+    if (e->speaker && !e->speaker(e->speaker_context,source_fd,pcm,frames,t,e->settings)) { free(audio); return false; }
     audio->references=1;
     e->voices[slot]=(Voice){.audio=audio,.start=clock,.release=clock+audio->frames+(uint64_t)(432000.0f*e->settings.reverb),
         .volume=1.0f,.send=e->settings.reverb,.station=station,.cached=cached,.primary=true};
@@ -189,7 +203,7 @@ static void mark_trigger(FvFragmentEngine *e,int station,uint64_t clock) {
 bool fv_fragment_trigger_pcm(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,const int16_t *pcm,
                              size_t frames,int station,uint64_t clock,bool speech) {
     if (!e || !valid_trigger(t,clock) || !eligible(e,station,clock,speech)) return false;
-    if (!admit(e,t,pcm,frames,station,clock,false)) return false;
+    if (!admit(e,t,pcm,frames,station,clock,false,-1)) return false;
     mark_trigger(e,station,clock); return true;
 }
 bool fv_fragment_begin_live(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,int station,uint64_t clock,bool speech) {
@@ -197,11 +211,14 @@ bool fv_fragment_begin_live(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,int
     mark_trigger(e,station,clock); e->live_trigger=*t; e->live_station=station; e->live_pending=true; return true;
 }
 bool fv_fragment_finish_live(FvFragmentEngine *e,const int16_t *pcm,size_t frames,uint64_t clock,bool speech) {
+    return fv_fragment_finish_live_source(e,pcm,frames,-1,clock,speech);
+}
+bool fv_fragment_finish_live_source(FvFragmentEngine *e,const int16_t *pcm,size_t frames,int source_fd,uint64_t clock,bool speech) {
     if (!e || !e->live_pending) return false;
     e->live_pending=false;
     if (!pcm || !frames || frames>FV_FRAGMENT_CLIP_FRAMES) return false;
-    fv_fragment_cache_add(e,pcm,frames,e->live_station);
-    return !speech && !e->settings.paused && admit(e,&e->live_trigger,pcm,frames,e->live_station,clock,false);
+    fv_fragment_cache_add_source(e,pcm,frames,e->live_station,source_fd);
+    return !speech && !e->settings.paused && admit(e,&e->live_trigger,pcm,frames,e->live_station,clock,false,source_fd);
 }
 bool fv_fragment_live_pending(const FvFragmentEngine *e) { return e && e->live_pending; }
 bool fv_fragment_trigger(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,bool local_only,uint64_t clock,bool speech) {
@@ -212,10 +229,13 @@ bool fv_fragment_trigger(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,bool l
             fv_fragment_trigger_pcm(e,t,d->pcm,d->count,d->station,clock,speech);
     }
     if (!e->cache_count || !eligible(e,-1,clock,speech)) return false;
-    Clip *c=&e->cache[(size_t)(unsigned)t->channel_hop%e->cache_count];
+    size_t index=(size_t)(unsigned)t->channel_hop;
+    if (index>e->cache_count) index%=e->cache_count;
+    if (index==e->cache_count) return false;
+    Clip *c=&e->cache[index];
     if (c->uses>=5u) return false;
     c->uses++; mark_trigger(e,-1,clock);
-    return admit(e,t,c->pcm,c->frames,c->station,clock,true);
+    return admit(e,t,c->pcm,c->frames,c->station,clock,true,c->fd);
 }
 static void dispatch_echoes(FvFragmentEngine *e,uint64_t clock) {
     for (unsigned i=0;i<ECHO_EVENTS;i++) {
@@ -229,11 +249,15 @@ static void dispatch_echoes(FvFragmentEngine *e,uint64_t clock) {
     }
 }
 void fv_fragment_render(FvFragmentEngine *e,int16_t *clean,int16_t *processed,size_t frames,uint64_t clock,FvFragmentStatus *status) {
+    fv_fragment_render_aux(e,clean,processed,NULL,frames,clock,status);
+}
+void fv_fragment_render_aux(FvFragmentEngine *e,int16_t *clean,int16_t *processed,int16_t *aux,size_t frames,uint64_t clock,FvFragmentStatus *status) {
     if (!e || !clean || !processed || frames>UINT64_MAX-clock) return;
     FvFragmentStatus s={.station=e->last_station,.cached=e->last_cached,.cache_count=(unsigned)e->cache_count,
         .admitted=e->admitted,.pitch=e->pitch,.speed=e->speed,.grain_ms=e->grain_ms,.seek_fraction=e->seek_fraction};
     if (e->settings.paused) {
         memset(clean,0,frames*sizeof(*clean)); memset(processed,0,frames*sizeof(*processed));
+        if (aux) memset(aux,0,frames*sizeof(*aux));
         if (status) *status=s;
         return;
     }
@@ -259,6 +283,7 @@ void fv_fragment_render(FvFragmentEngine *e,int16_t *clean,int16_t *processed,si
                 noise=(((float)(e->rng&65535u)/65535.0f)*0.4f-0.2f)*32767.0f*0.02f;
             }
             base[i]=dry+noise;
+            if (aux) aux[off+i]=saturate(noise);
         }
         fv_environment_reverb_process(e->reverb,sends,wet,n);
         for (size_t i=0;i<n;i++) processed[off+i]=saturate(base[i]+wet[i]);

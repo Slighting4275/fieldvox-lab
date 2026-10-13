@@ -3,6 +3,9 @@
 #include "../../android/app/src/main/cpp/fv_fragment_store.h"
 #include "../../android/app/src/main/cpp/fv_vox_controls.h"
 #include <assert.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <dirent.h>
 #include <math.h>
 #include <stdio.h>
@@ -89,18 +92,55 @@ static void test_bank_and_live(void) {
     for (size_t i=0;i<1024;i++) assert(output[i]==0);
     fv_fragment_destroy(e);
 }
+typedef struct { unsigned calls; int fd; size_t frames; bool accept; } Speaker;
+static bool test_speaker(void *context,int fd,const int16_t *pcm,size_t frames,
+    const FvVoxDecimalTrigger *trigger,FvFragmentSettings settings) {
+    Speaker *s=context; s->calls++; s->fd=fd; s->frames=frames;
+    assert(pcm && frames>0 && trigger->passed && settings.reverb>=0.0f && settings.reverb<=1.0f);
+    if (fd>=0) { char bytes[6]; assert(pread(fd,bytes,sizeof(bytes),0)==6); assert(memcmp(bytes,"source",6)==0); }
+    return s->accept;
+}
+static void test_speaker_sources(void) {
+    FvFragmentEngine *e=fv_fragment_create(); assert(e);
+    fv_fragment_set_settings(e,(FvFragmentSettings){.sweep_ms=200});
+    FILE *f=tmpfile(); assert(f); assert(fwrite("source",1,6,f)==6); assert(fflush(f)==0);
+    assert(fv_fragment_cache_add_source(e,source,48000,7,fileno(f)));
+    assert(fclose(f)==0);
+    Speaker speaker={.accept=true,.fd=-1}; fv_fragment_set_speaker(e,test_speaker,&speaker);
+    FvVoxDecimalTrigger t=normal(); t.prefer_live=false; t.seek_offset=0.6f;
+    /* A selected index equal to cache size is rejected, rather than wrapped. */
+    t.channel_hop=1; assert(!fv_fragment_trigger(e,&t,true,0,false));
+    t.channel_hop=0; assert(fv_fragment_trigger(e,&t,true,0,false));
+    assert(speaker.calls==1u && speaker.frames==48000u && speaker.fd>=0);
+    const int owned=speaker.fd;
+    fv_fragment_destroy(e);
+    char fd_path[64]; snprintf(fd_path,sizeof(fd_path),"/proc/self/fd/%d",owned);
+    struct stat st; errno=0; assert(stat(fd_path,&st)==-1 && errno==ENOENT);
+    e=fv_fragment_create(); assert(e); speaker.accept=false;
+    fv_fragment_set_speaker(e,test_speaker,&speaker);
+    assert(!fv_fragment_trigger_pcm(e,&t,source,48000,7,0,false));
+    FvFragmentStatus status; fv_fragment_render(e,clean,output,1024,0,&status);
+    assert(!status.playing && status.admitted==0u);
+    fv_fragment_destroy(e);
+}
 static void test_store(void) {
     char dir[512]; const char *temp=getenv("TMPDIR");
     snprintf(dir,sizeof(dir),"%s/fieldvox-fragments-XXXXXX",temp ? temp : "/tmp"); assert(mkdtemp(dir));
     FvFragmentEngine *e=fv_fragment_create(); assert(e);
     assert(fv_fragment_store_start(dir,e));
-    assert(fv_fragment_store_submit(source,19200,42));
+    FILE *original=tmpfile(); assert(original); assert(fwrite("source",1,6,original)==6); assert(fflush(original)==0);
+    assert(fv_fragment_store_submit_source(source,19200,42,fileno(original)));
+    assert(fclose(original)==0);
     fv_fragment_store_stop(); fv_fragment_destroy(e);
     e=fv_fragment_create(); assert(e);
     assert(fv_fragment_store_start(dir,e));
     assert(fv_fragment_cache_count(e)==1u);
+    Speaker speaker={.accept=true,.fd=-1}; fv_fragment_set_speaker(e,test_speaker,&speaker);
+    FvVoxDecimalTrigger trigger=normal();
+    assert(fv_fragment_trigger(e,&trigger,true,0,false));
+    assert(speaker.calls==1u && speaker.fd>=0);
     fv_fragment_store_stop(); fv_fragment_destroy(e);
-    char cache[544]; snprintf(cache,sizeof(cache),"%s/fieldvox-grain-cache",dir);
+    char cache[544]; snprintf(cache,sizeof(cache),"%s/fieldvox-grain-cache-v2",dir);
     DIR *d=opendir(cache); assert(d); struct dirent *entry;
     while ((entry=readdir(d))) if (entry->d_name[0]!='.') {
         char path[832]; snprintf(path,sizeof(path),"%s/%s",cache,entry->d_name); assert(unlink(path)==0);
@@ -182,10 +222,10 @@ static void test_request_selection_and_timing(void) {
     fv_fragment_destroy(e);
 }
 static void test_language_group_and_reverb(void) {
-    char languages[24][4]; for(unsigned i=0;i<24;i++) memcpy(languages[i],i<12 ? "en\0" : "es\0",4);
+    char languages[24][8]; for(unsigned i=0;i<24;i++) snprintf(languages[i],8,"%s",i<12 ? "en_us" : "en_uk");
     unsigned a[10],b[10];
-    assert(fv_station_group(languages,24,"en",123,a)==10u);
-    assert(fv_station_group(languages,24,"en",456,b)==10u);
+    assert(fv_station_group(languages,24,"en-US",123,a)==10u);
+    assert(fv_station_group(languages,24,"en-US",456,b)==10u);
     assert(memcmp(a,b,sizeof(a))!=0);
     for(unsigned i=0;i<10;i++) { assert(a[i]<12u); for(unsigned j=0;j<i;j++) assert(a[i]!=a[j]); }
     FvEnvironmentReverb *r=fv_environment_reverb_create(); assert(r);
@@ -203,7 +243,7 @@ static void test_language_group_and_reverb(void) {
     fv_environment_reverb_destroy(r);
 }
 int main(void) {
-    test_pitch_and_tempo(); test_scheduling(); test_bank_and_live(); test_store(); test_speech_band();
+    test_speaker_sources(); test_pitch_and_tempo(); test_scheduling(); test_bank_and_live(); test_store(); test_speech_band();
     test_pause_silences_static_and_tails();
     test_request_selection_and_timing(); test_language_group_and_reverb();
     puts("Fragment engine: pitch/tempo, four echoes, station/global cooldown, speech suppression, cache limits/reuse, live feed, persistent offline reload and stopped-playback silence passed.");

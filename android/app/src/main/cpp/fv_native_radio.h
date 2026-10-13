@@ -11,7 +11,7 @@ bool fv_radio_start(JavaVM *vm,const char *app_directory,const char *language,in
 void fv_radio_set_enabled(bool enabled);
 int fv_radio_selected_station(int channel);
 bool fv_radio_request(int channel,const FvVoxDecimalTrigger *trigger);
-/* Transfers PCM ownership to the audio thread, including a NULL result on failure. */
-bool fv_radio_take_result(int16_t **pcm,size_t *frames,int *station,FvVoxDecimalTrigger *trigger);
+/* Transfers PCM and source descriptor ownership to the audio thread, including a NULL result on failure. */
+bool fv_radio_take_result(int16_t **pcm,size_t *frames,int *station,FvVoxDecimalTrigger *trigger,int *source_fd);
 bool fv_radio_busy(void);
 #endif

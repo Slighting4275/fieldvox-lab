@@ -1,15 +1,15 @@
 # FieldVox Lab
 
-FieldVox Lab is an experimental Android workstation for sensor-triggered radio audio, offline fragment playback, camera monitoring, and session recording. Its application runtime is written in **C23**, using Android's `NativeActivity`, Camera2 NDK, AAudio, and native media codecs. There are no project Java, Kotlin, or C++ runtime sources.
+FieldVox Lab is an experimental Android workstation for sensor-triggered radio audio, offline fragment playback, camera monitoring, and session recording. Its application runtime is written in **C23**, using Android's `NativeActivity`, Camera2 NDK, AAudio, native media codecs, and Android media/effect APIs called through C JNI. There are no project Java, Kotlin, or C++ runtime sources.
 
 ## New audio features
 
-- **LIVE and LOCAL playback.** LIVE requests short online radio clips from a shuffled group of ten stations selected by language. Sensor digits choose a live request or a cached clip. Failed requests retain their cooldown instead of silently walking to another station. LOCAL plays cached radio clips without network connections, or fragments from a saved PCM WAV selected in the library.
-- **Independent pitch and speed.** Fragments use pitch ratios of 0.6×, 1.0×, or 1.2× and playback speeds of 0.7×, 1.0×, or 1.2×. Android’s open-source Sonic C engine changes tempo independently of pitch, using sinc resampling and proper short-fragment flushing.
-- **Ten playback slots.** Each admitted fragment gets its own immutable audio buffer. Echoes acquire a slot when their scheduled time arrives. Main slots remain reserved through the configured reverb tail; a full pool rejects additional fragments rather than replacing a playing voice.
+- **LIVE and LOCAL playback.** LIVE requests short online radio clips from a shuffled group of ten US English sources. The group includes US-profile talk sources and a shared English source; profile membership is not restricted by the broadcaster’s country. Sensor digits choose a live request or a cached clip. Failed requests retain their cooldown instead of silently walking to another station. LOCAL plays cached radio clips without network connections, or fragments from a saved PCM WAV selected in the library.
+- **Independent pitch and speed.** Fragments use pitch ratios of 0.6×, 1.0×, or 1.2× and playback speeds of 0.7×, 1.0×, or 1.2×. The default speaker path uses Android `MediaPlayer` with separate `PlaybackParams` pitch and speed settings on the whole compressed source, avoiding the former short-grain transform and mono downmix before playback.
+- **Ten playback slots.** A C23 JNI backend owns ten Android players and four preparation workers, with an independent stop timer. Echoes acquire a slot when their scheduled time arrives. Main slots remain reserved through the configured reverb tail; a full pool rejects additional fragments rather than replacing a playing voice.
 - **Four finite echo repeats.** Repeats play at gains of 0.06, 0.018, 0.0054, and 0.00162. The Echo slider sets the interval between repeats to 200 ms × its level.
-- **Native reverb.** The Android open-source LVREV C core replaces the former comb-filter approximation, with 50 ms pre-delay and environmental diffusion, density, and damping controls. Its supported decay is capped at seven seconds; voice reservation still follows the requested nine-second × mix tail. This does not establish identical output to every device’s platform effect.
-- **Persistent offline cache.** LIVE downloads up to 50,000 compressed bytes with bounded network timeouts, decodes the completed clip, and saves PCM in a dedicated cache. Clip duration depends on the broadcaster’s bitrate, with a 30-second safety cap. Memory and disk caches each hold up to 100 clips, evict the oldest clips, and limit each cached clip to five retrievals per run. Cache eviction does not delete session recordings or marked hits.
+- **Platform environmental reverb.** Primary voices use a shared session-0 `EnvironmentalReverb`, 50 ms reverb delay, full density, diffusion scaled by mix, and a requested decay of 9,000 ms × mix. Echo voices remain dry. Device effects can reject settings: the Pixel test accepted 4,500 and 6,750 ms but rejected 9,000 ms, retaining the previous decay. Slot reservation still follows the requested tail.
+- **Persistent offline cache.** LIVE downloads up to 50,000 compressed bytes with bounded network timeouts, retains the original compressed source for playback, and saves it alongside a mono PCM companion for native analysis and recordings. Clip duration depends on the broadcaster’s bitrate, with a 30-second safety cap. Memory and disk caches each hold up to 100 clips, evict the oldest clips, and limit each cached clip to five retrievals per run. Cache eviction does not delete session recordings or marked hits.
 - **Sensor-derived fragment selection.** Magnetometer magnitudes and accelerometer/gyroscope squared magnitudes supply decimal digits for gating, pitch, speed, source choice, seek position, and source lengths of 400–760 ms. Distortion adjusts pitch/speed selection thresholds instead of applying clipping.
 - **Playback cooldowns.** Live requests start a reverb-dependent cooldown of 2–10 seconds before downloading. A five-second cooldown limits repeated live requests to the same station. Cached playback selects one clip without substituting another exhausted slot.
 - **Speaking mute.** An optional microphone detector uses a Hann-windowed packed-real FFT to measure energy in the 80–300 Hz band, suppresses new fragments during detection and for two seconds afterward, and fades speaker monitoring. This is a frequency-band detector, not speech recognition.
@@ -29,9 +29,11 @@ Audio comes from broadcast streams or selected WAV files. FieldVox does not use 
 - Slide-up audio controls, advanced sensor controls, haptic feedback, torch control, and an in-app field guide.
 - Optional voice-band filtering, reversed audio, sensor-driven REM tones, compass-based stereo panning, and an Estes blackout mode with tap-to-mark logging.
 
-The embedded 512-entry station catalog is generated in C23 and verified with CRC32 at startup. Availability depends on the broadcaster and network.
+The embedded 289-entry station catalog is generated in C23 and verified with CRC32 at startup. US English has 17 eligible entries, shuffled down to ten per process. The catalog is a bundled snapshot; it is not synchronized with another application’s server updates. Availability depends on the broadcaster and network.
 
 ## Recording and library
+
+Speaker playback and recordings use different paths. Default radio voices play through Android’s player/effect chain. WAV/MP4 captures, hit files, and visualizers use a parallel mono C reconstruction with Sonic/LVREV; they are **not an exact capture of platform speaker output**. VOCAL, reverse, REM tones, and 3D panning select the native speaker path so those PCM tools remain audible. The native path also provides a fallback if platform player initialization or primary playback fails.
 
 **MARK HIT** saves up to three seconds of available pre-roll as two aligned 48 kHz, 16-bit mono WAV files and a JSON timeline:
 
@@ -51,7 +53,9 @@ Recordings, hit captures, and the radio clip cache use separate app-private dire
 | --- | --- |
 | Session recordings | `files/fieldvox-recordings/` |
 | Marked hits and JSON timelines | `files/fieldvox-hits/` |
-| Automatically cached radio clips | `files/fieldvox-grain-cache/` |
+| Automatically cached radio clips | `files/fieldvox-grain-cache-v2/` |
+
+The current cache stores paired `.wav` and `.wav.audio` files, counted as one clip. Eviction also removes the paired original. The previous cache directory is left intact during updates; its station numbers are not reused with the new catalog.
 
 ## Main controls
 
@@ -77,7 +81,7 @@ Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speakin
 
 ## Download the APK
 
-[Download FieldVox Lab 0.4.0-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `6`.
+[Download FieldVox Lab 0.5.0-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `7`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 
@@ -110,14 +114,14 @@ Run the host C23 unit, recording, fragment-engine, and simulator smoke tests:
 make -C source test
 ```
 
-The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, persistence, and invalid inputs. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
+The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, paired-source persistence, descriptor ownership, backend rejection, regional language selection, and invalid inputs. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
 
 Inspect a connected device and follow runtime diagnostics:
 
 ```bash
 adb devices -l
 adb shell pidof org.fieldvox.lab
-adb logcat -v time -s FieldVoxNative FieldVoxRadio FieldVoxCamera FieldVoxVideoRec
+adb logcat -v time -s FieldVoxNative FieldVoxRadio FieldVoxVoices FieldVoxCamera FieldVoxVideoRec
 adb shell run-as org.fieldvox.lab ls -lh files/fieldvox-recordings
 adb shell run-as org.fieldvox.lab ls -lh files/fieldvox-hits
 ```
@@ -129,7 +133,8 @@ Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's ac
 | Module | Responsibility |
 | --- | --- |
 | `fieldvox_native_activity.c` | Activity lifecycle, controls, camera HUD, sensors, audio integration, and recording. |
-| `fv_native_radio.c` | Bounded on-demand HTTP clip fetches, cancellation and native decoding. |
+| `fv_native_radio.c` | Bounded on-demand HTTP clip fetches, compressed-source ownership, cancellation and native decoding. |
+| `fv_platform_voices.c` | C JNI Android players, pitch/speed, platform reverb, finite echo scheduling and playback deadlines. |
 | `fv_fragment_engine.c` | Fragment selection, independent pitch/tempo, voice slots, finite echoes, reverb, and static. |
 | `fv_station_policy.c` | Language filtering and shuffled ten-station groups. |
 | `fv_environment_reverb.c` | Android LVREV C reverb integration. |
@@ -141,7 +146,7 @@ Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's ac
 | `fv_native_camera.c`, `fv_native_video_recorder.c` | Native camera capture and H.264/AAC MP4 recording. |
 | `source/` | Host simulator, station generator, utilities, and regression tests. |
 
-All native application translation units, including vendored Sonic and LVREV sources, compile as C23. The vendored components retain their Apache-2.0 notices and upstream identities under `android/app/src/main/cpp/third_party/`. The production audio path uses the fragment engine; older continuous DSP helpers remain available for legacy tests. No Zig compiler or runtime is required.
+All native application translation units, including vendored Sonic and LVREV sources, compile as C23. The vendored components retain their Apache-2.0 notices and upstream identities under `android/app/src/main/cpp/third_party/`. The fragment engine controls admissions and native recording reconstruction; the default speaker backend uses Android players and environmental reverb through C JNI. Older continuous DSP helpers remain available for legacy tests. No Zig compiler or runtime is required.
 
 ## Permissions and storage
 

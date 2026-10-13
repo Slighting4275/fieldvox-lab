@@ -27,6 +27,16 @@ typedef struct {
     float seek_fraction;
 } FvFragmentStatus;
 
+/* Optional speaker backend receives the whole source, never a truncated grain.
+ * Source descriptors and PCM are borrowed during the callback only. */
+typedef bool (*FvFragmentSpeaker)(void *context, int source_fd, const int16_t *pcm,
+    size_t frames, const FvVoxDecimalTrigger *trigger, FvFragmentSettings settings);
+void fv_fragment_set_speaker(FvFragmentEngine *engine, FvFragmentSpeaker speaker, void *context);
+bool fv_fragment_cache_add_source(FvFragmentEngine *engine, const int16_t *pcm, size_t frames, int station, int source_fd);
+bool fv_fragment_finish_live_source(FvFragmentEngine *engine, const int16_t *pcm, size_t frames,
+    int source_fd, uint64_t clock, bool speech);
+void fv_fragment_render_aux(FvFragmentEngine *engine, int16_t *clean, int16_t *processed, int16_t *aux,
+    size_t frames, uint64_t clock, FvFragmentStatus *status);
 /* One owner (the audio thread). PCM is always copied, never borrowed. */
 FvFragmentEngine *fv_fragment_create(void);
 void fv_fragment_destroy(FvFragmentEngine *engine);
@@ -49,7 +59,7 @@ bool fv_fragment_finish_live(FvFragmentEngine *engine, const int16_t *pcm, size_
 bool fv_fragment_live_pending(const FvFragmentEngine *engine);
 void fv_fragment_render(FvFragmentEngine *engine, int16_t *clean, int16_t *processed,
                         size_t frames, uint64_t clock, FvFragmentStatus *status);
-/* Deterministic, independent pitch/tempo conversion used by production voices. */
+/* Deterministic, independent pitch/tempo conversion used by native monitoring and recording. */
 size_t fv_fragment_transform(const int16_t *source, size_t frames, float pitch, float speed,
                              int16_t *output, size_t capacity);
 #endif

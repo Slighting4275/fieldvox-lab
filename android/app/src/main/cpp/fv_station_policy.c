@@ -12,17 +12,17 @@ static bool matches(const char *station, const char *language) {
     if (strcmp(language, "pl") == 0) return strcmp(station, "cs") == 0;
     return false;
 }
-size_t fv_station_group(const char (*languages)[4], size_t count, const char *language,
+size_t fv_station_group(const char (*languages)[8], size_t count, const char *language,
                         uint32_t seed, unsigned group[FV_STATION_GROUP_SIZE]) {
     if (!languages || !language || !group || !count || count > 512u) return 0;
-    char lang[4] = {0};
-    for (size_t i = 0; i < 3u && language[i] && language[i] != '-' && language[i] != '_'; i++) {
+    char lang[8] = {0};
+    for (size_t i = 0; i < 7u && language[i]; i++) {
         const unsigned char c = (unsigned char)language[i];
-        lang[i] = (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+        lang[i] = c == '-' ? '_' : (char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
     }
     unsigned candidates[512]={0}; size_t n = 0, german = 0;
     for (size_t i = 0; i < count; i++) {
-        char station[4]; memcpy(station, languages[i], 4); station[3] = 0;
+        char station[8]; memcpy(station, languages[i], 8); station[7] = 0;
         if (matches(station, lang) || (strcmp(lang, "nl") == 0 && strcmp(station, "de") == 0 && german++ < 3u))
             candidates[n++] = (unsigned)i;
     }

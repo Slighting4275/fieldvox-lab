@@ -28,7 +28,7 @@ $(DUMP_BIN): $(DUMP_SRC) $(HDR)
 $(CSV_BIN): $(CSV_SRC) $(HDR)
 >$(CC) $(CFLAGS) -o $@ $(CSV_SRC) $(LDFLAGS)
 
-$(TEST_BIN): $(TEST_SRC)
+$(TEST_BIN): $(TEST_SRC) $(wildcard ../android/app/src/main/cpp/*.h)
 >$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
 
 fv-recording-test: tests/test_recordings.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_recording_data.h

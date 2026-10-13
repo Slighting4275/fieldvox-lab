@@ -13,7 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef struct { int16_t *pcm; size_t frames; int station; } Job;
+typedef struct { int16_t *pcm; size_t frames; int station, fd; } Job;
 static struct {
     pthread_mutex_t mutex;
     pthread_cond_t changed;
@@ -26,6 +26,52 @@ static struct {
 } store = {.mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
 static void le32(uint8_t *p, uint32_t value) {
     for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(value >> (8u * i));
+}
+/* Pair a compressed original with the WAV used by native recording/analysis.
+ * pread keeps shared descriptor offsets unchanged while voices read the source. */
+static bool save_original(int source, const char *wav) {
+    char final[660], temp[680];
+    int n=snprintf(final,sizeof(final),"%s.audio",wav);
+    if (n<0 || (size_t)n>=sizeof(final)) return false;
+    n=snprintf(temp,sizeof(temp),"%s.tmp-XXXXXX",final);
+    if (n<0 || (size_t)n>=sizeof(temp)) return false;
+    const int fd=mkstemp(temp); if (fd<0) return false;
+    bool ok=true; off_t off=0; uint8_t bytes[4096];
+    for (;;) {
+        const ssize_t got=pread(source,bytes,sizeof(bytes),off);
+        if (got<0 && errno==EINTR) continue;
+        if (got<0) { ok=false; break; }
+        if (!got) break;
+        size_t written=0;
+        while (written<(size_t)got) {
+            const ssize_t count=write(fd,bytes+written,(size_t)got-written);
+            if (count<0 && errno==EINTR) continue;
+            if (count<=0) { ok=false; break; }
+            written+=(size_t)count;
+        }
+        if (!ok) break;
+        off+=got;
+    }
+    if (fsync(fd)!=0) ok=false;
+    if (close(fd)!=0) ok=false;
+    if (ok) ok=rename(temp,final)==0;
+    if (!ok) unlink(temp);
+    return ok;
+}
+static void prune_originals(void) {
+    DIR *dir=opendir(store.directory); if (!dir) return;
+    struct dirent *entry;
+    while ((entry=readdir(dir))) {
+        const size_t len=strlen(entry->d_name);
+        if (len<15u || strncmp(entry->d_name,"clip-",5)!=0 || strcmp(entry->d_name+len-10u,".wav.audio")!=0) continue;
+        char original[800],wav[800];
+        const int n=snprintf(original,sizeof(original),"%s/%s",store.directory,entry->d_name);
+        if (n<6 || (size_t)n>=sizeof(original)) continue;
+        memcpy(wav,original,(size_t)n+1u); wav[n-6]=0;
+        struct stat st;
+        if (stat(wav,&st)!=0 && errno==ENOENT) unlink(original);
+    }
+    closedir(dir);
 }
 static bool save_job(const Job *job) {
     struct timespec time;
@@ -61,7 +107,11 @@ static bool save_job(const Job *job) {
     if (fclose(f) != 0) ok = false;
     if (ok) ok = rename(temp, final) == 0;
     if (!ok) unlink(temp);
-    if (ok) fv_local_bank_enforce_cache_cap(store.directory, FV_FRAGMENT_CACHE_MAX);
+    if (ok) {
+        if (job->fd>=0) save_original(job->fd,final);
+        fv_local_bank_enforce_cache_cap(store.directory, FV_FRAGMENT_CACHE_MAX);
+        prune_originals();
+    }
     return ok;
 }
 static void *store_worker(void *unused) {
@@ -73,7 +123,7 @@ static void *store_worker(void *unused) {
         Job job = store.jobs[store.head];
         store.head = (store.head + 1u) % 8u; store.count--;
         pthread_mutex_unlock(&store.mutex);
-        save_job(&job); free(job.pcm);
+        save_job(&job); free(job.pcm); if (job.fd>=0) close(job.fd);
     }
     return NULL;
 }
@@ -83,21 +133,32 @@ static int only_clips(const struct dirent *entry) {
 }
 bool fv_fragment_store_start(const char *app_directory, FvFragmentEngine *engine) {
     if (store.started || !app_directory || !engine) return false;
-    const int n = snprintf(store.directory, sizeof(store.directory), "%s/fieldvox-grain-cache", app_directory);
+    const int n = snprintf(store.directory, sizeof(store.directory), "%s/fieldvox-grain-cache-v2", app_directory);
     if (n < 0 || (size_t)n >= sizeof(store.directory)) return false;
     if (mkdir(store.directory, 0700) != 0 && errno != EEXIST) return false;
     fv_local_bank_enforce_cache_cap(store.directory, FV_FRAGMENT_CACHE_MAX);
+    prune_originals();
     struct dirent **entries = NULL;
     const int count = scandir(store.directory, &entries, only_clips, alphasort);
     if (count > 0) {
         for (int i = 0; i < count; i++) {
             char path[800]; int station = -1;
-            unsigned long long stamp = 0;
-            if (sscanf(entries[i]->d_name, "clip-%llu-%d", &stamp, &station) != 2) station = -1;
+            const char *separator=strchr(entries[i]->d_name+5,'-');
+            if (separator) {
+                char *end=NULL; errno=0;
+                const long value=strtol(separator+1,&end,10);
+                if (errno==0 && end!=separator+1 && *end=='-' && value>=-1 && value<512) station=(int)value;
+            }
             const int len = snprintf(path, sizeof(path), "%s/%s", store.directory, entries[i]->d_name);
             int16_t *pcm = NULL; size_t frames = 0;
             if (len > 0 && (size_t)len < sizeof(path) && fv_wav_load_mono_48k(path, &pcm, &frames)) {
-                if (frames <= FV_FRAGMENT_CLIP_FRAMES) fv_fragment_cache_add(engine, pcm, frames, station);
+                if (frames <= FV_FRAGMENT_CLIP_FRAMES) {
+                    char original[820]; snprintf(original,sizeof(original),"%s.audio",path);
+                    int fd=open(original,O_RDONLY|O_CLOEXEC);
+                    if (fd<0) fd=open(path,O_RDONLY|O_CLOEXEC);
+                    fv_fragment_cache_add_source(engine,pcm,frames,station,fd);
+                    if (fd>=0) close(fd);
+                }
                 free(pcm);
             }
             free(entries[i]);
@@ -110,14 +171,19 @@ bool fv_fragment_store_start(const char *app_directory, FvFragmentEngine *engine
     return store.started;
 }
 bool fv_fragment_store_submit(const int16_t *pcm, size_t frames, int station) {
+    return fv_fragment_store_submit_source(pcm,frames,station,-1);
+}
+bool fv_fragment_store_submit_source(const int16_t *pcm, size_t frames, int station, int source_fd) {
     if (!pcm || !frames || frames > FV_FRAGMENT_CLIP_FRAMES) return false;
     int16_t *copy = malloc(frames * sizeof(*copy)); if (!copy) return false;
+    const int fd=source_fd>=0 ? fcntl(source_fd,F_DUPFD_CLOEXEC,0) : -1;
+    if (source_fd>=0 && fd<0) { free(copy); return false; }
     memcpy(copy, pcm, frames * sizeof(*copy));
     pthread_mutex_lock(&store.mutex);
-    if (!store.started || !store.running || store.count == 8u) { pthread_mutex_unlock(&store.mutex); free(copy); return false; }
+    if (!store.started || !store.running || store.count == 8u) { pthread_mutex_unlock(&store.mutex); free(copy); if (fd>=0) close(fd); return false; }
     /* Ownership transfers to the queue; store_worker frees PCM after saving. */
     Job *slot = &store.jobs[(store.head + store.count) % 8u];
-    slot->pcm = copy; slot->frames = frames; slot->station = station;
+    slot->pcm = copy; slot->frames = frames; slot->station = station; slot->fd=fd;
     store.count++; pthread_cond_signal(&store.changed); pthread_mutex_unlock(&store.mutex);
     return true;
 }

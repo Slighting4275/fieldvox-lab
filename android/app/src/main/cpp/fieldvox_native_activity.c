@@ -40,6 +40,7 @@
 #include "fv_local_bank.h"
 #include "fv_fragment_engine.h"
 #include "fv_fragment_store.h"
+#include "fv_platform_voices.h"
 
 #define TAG "FieldVoxNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -48,7 +49,7 @@
 
 #define SAMPLE_RATE 48000
 #define BUFFER_FRAMES 1024
-#define CHANNEL_RING ((int)FV_STATION_BLOB_COUNT) /* visible logical channel counter, bounded to 512 verified live stations */
+#define CHANNEL_RING ((int)FV_STATION_BLOB_COUNT) /* visible logical channel counter, bounded to the embedded station catalog */
 #define DWELL_ADVANCE_MS 6000L     /* Java stage1UNAudioDwellPeriodMs */
 #define MIC_MONITOR_GAIN 3.0f      /* Java liveOutputGain */
 #define WF_WIDTH 120
@@ -2015,9 +2016,12 @@ static void *audio_thread_func(void *arg) {
     FvFragmentEngine *fragments = fv_fragment_create();
     if (!fragments) { LOGE("Fragment engine allocation failed"); return NULL; }
     if (!fv_fragment_store_start(g_app.activity->internalDataPath, fragments)) LOGW("Radio cache persistence unavailable");
+    FvPlatformVoices *platform=fv_platform_voices_create(g_app.activity->vm);
+    if (!platform) LOGW("Platform voices unavailable; native PCM speaker fallback");
     AAudioStream *stream = open_audio_stream(AAUDIO_DIRECTION_OUTPUT, 2);
     if (!stream) {
         LOGE("AAudio output stream failed");
+        fv_platform_voices_destroy(platform);
         fv_fragment_store_stop(); fv_fragment_destroy(fragments);
         return NULL;
     }
@@ -2028,6 +2032,7 @@ static void *audio_thread_func(void *arg) {
 
     int16_t mono[BUFFER_FRAMES];
     int16_t clean[BUFFER_FRAMES];
+    int16_t aux[BUFFER_FRAMES];
     int16_t mic[BUFFER_FRAMES];
     int16_t stereo[BUFFER_FRAMES * 2];
     uint64_t clock = 0;
@@ -2111,17 +2116,22 @@ static void *audio_thread_func(void *arg) {
         if (!voice_duck) ducker = (FvVoxDucker){0};
         const bool ducked = voice_duck && fv_vox_detect_voice(&ducker, microphone_frames ? mic : NULL,
                                                             microphone_frames, clock, SAMPLE_RATE);
+        /* Optional PCM tools select the native speaker path. Recordings always
+         * retain the native reconstruction; platform playback is not loopback. */
+        const bool platform_speaker=fv_platform_voices_healthy(platform) && !vocal && !reverse && !pan && !rem_pod;
+        fv_platform_voices_control(platform,platform_speaker && sweep,muted || ducked || playback || !resumed,(float)reverb_level/100.0f);
+        fv_fragment_set_speaker(fragments,platform_speaker ? fv_platform_voices_submit : NULL,platform);
         bool admitted = false;
         bool request_started = false;
-        int16_t *downloaded = NULL; size_t downloaded_frames = 0; int downloaded_station = -1;
+        int16_t *downloaded = NULL; size_t downloaded_frames = 0; int downloaded_station = -1, downloaded_fd = -1;
         FvVoxDecimalTrigger downloaded_trigger = {0};
-        if (fv_radio_take_result(&downloaded, &downloaded_frames, &downloaded_station, &downloaded_trigger)) {
+        if (fv_radio_take_result(&downloaded, &downloaded_frames, &downloaded_station, &downloaded_trigger, &downloaded_fd)) {
             if (sweep && !local_only && fv_fragment_live_pending(fragments)) {
-                if (downloaded && downloaded_frames) fv_fragment_store_submit(downloaded, downloaded_frames, downloaded_station);
-                admitted = fv_fragment_finish_live(fragments, downloaded, downloaded_frames, clock, ducked);
+                if (downloaded && downloaded_frames) fv_fragment_store_submit_source(downloaded, downloaded_frames, downloaded_station, downloaded_fd);
+                admitted = fv_fragment_finish_live_source(fragments, downloaded, downloaded_frames, downloaded_fd, clock, ducked);
                 fragment = downloaded_trigger;
             }
-            free(downloaded);
+            free(downloaded); if (downloaded_fd>=0) close(downloaded_fd);
         }
         bool auto_request = false;
         if (sweep && auto_gate && !requested && !admitted && !fv_fragment_live_pending(fragments) && clock >= next_auto) {
@@ -2154,12 +2164,13 @@ static void *audio_thread_func(void *arg) {
             if (admitted || request_started) fragment_reason = auto_request ? FV_GATE_AUTO_SCAN : request_reason;
         }
         FvFragmentStatus fragment_status = {0};
-        fv_fragment_render(fragments, clean, mono, BUFFER_FRAMES, clock, &fragment_status);
+        fv_fragment_render_aux(fragments, clean, mono, aux, BUFFER_FRAMES, clock, &fragment_status);
         for (int i = 0; monitor && i < microphone_frames; i++) {
             const float input_sample = (float)mic[i]*MIC_MONITOR_GAIN;
             const float dry = (float)clean[i]+input_sample, wet = (float)mono[i]+input_sample;
             clean[i] = (int16_t)fmaxf(-32768.0f,fminf(32767.0f,dry));
             mono[i] = (int16_t)fmaxf(-32768.0f,fminf(32767.0f,wet));
+            aux[i] = (int16_t)fmaxf(-32768.0f,fminf(32767.0f,(float)aux[i]+input_sample));
         }
         /* Optional investigation tools remain available; the Distortion slider
          * now selects pitch/speed bins, rather than adding unrelated clipping. */
@@ -2270,10 +2281,11 @@ static void *audio_thread_func(void *arg) {
 
         float gl = 0.707f, gr = 0.707f;
         if (pan) fv_calc_spatial_pan_gains(azimuth, &gl, &gr);
+        const bool platform_monitor=platform_speaker && fv_platform_voices_healthy(platform);
         for (int i = 0; i < BUFFER_FRAMES; i++) {
             const float target_gain = ducked ? 0.0f : 1.0f;
             duck_gain += (target_gain-duck_gain)*(ducked ? 0.01f : 0.0005f);
-            const float v = muted || playback || !resumed ? 0.0f : (float)mono[i]*duck_gain;
+            const float v = muted || playback || !resumed ? 0.0f : (float)(platform_monitor ? aux[i] : mono[i])*duck_gain;
             const float l = v * gl, r = v * gr;
             stereo[i * 2] = (int16_t)(l > 32767.0f ? 32767.0f : (l < -32767.0f ? -32767.0f : l));
             stereo[i * 2 + 1] = (int16_t)(r > 32767.0f ? 32767.0f : (r < -32767.0f ? -32767.0f : r));
@@ -2295,6 +2307,7 @@ static void *audio_thread_func(void *arg) {
     }
 
     fv_radio_set_enabled(false);
+    fv_platform_voices_destroy(platform);
     fv_fragment_store_stop();
     fv_fragment_destroy(fragments);
     finish_recording();
@@ -2517,14 +2530,8 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     const int valid_blob = fv_verify_blob_checksum(FV_STATION_PLAN_BINARY_DATA, sizeof(FV_STATION_PLAN_BINARY_DATA));
     LOGI("Verified C23 Binary Station Blob: %s (%u stations)", valid_blob ? "VALID" : "INVALID",
          (unsigned)FV_STATION_BLOB_COUNT);
-    char radio_language[4] = "en";
-    AConfiguration *radio_config = AConfiguration_new();
-    if (radio_config) {
-        AConfiguration_fromAssetManager(radio_config, activity->assetManager);
-        AConfiguration_getLanguage(radio_config, radio_language);
-        if (!radio_language[0]) memcpy(radio_language, "en", 3);
-        AConfiguration_delete(radio_config);
-    }
+    /* Explicit station profile; regional English groups have different voices. */
+    const char *radio_language = "en_us";
     if (!fv_radio_start(activity->vm, activity->internalDataPath, radio_language, (int)FV_STATION_BLOB_COUNT)) {
         LOGE("Live radio engine failed to start");
     }

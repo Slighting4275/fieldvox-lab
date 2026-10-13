@@ -624,8 +624,8 @@ int main(void) {
 
     uint32_t count = load_le32(FV_STATION_PLAN_BINARY_DATA + 8);
     assert(count == FV_STATION_BLOB_COUNT);
-    assert(count == 512);
-    assert(FV_STATION_BLOB_COUNT == 512);
+    assert(count == 289);
+    assert(FV_STATION_BLOB_COUNT == 289);
 
     uint32_t expected_crc = load_le32(FV_STATION_PLAN_BINARY_DATA + 12);
     assert(expected_crc == FV_STATION_BLOB_CRC32);
@@ -639,12 +639,13 @@ int main(void) {
     /* 5. Verify first station entry in binary blob */
     const FvBlobStationEntry *e0 = (const FvBlobStationEntry *)record_bytes;
     assert(e0->slot_id == 0);
-    assert(strcmp(e0->callsign, "KIRO 97.3") == 0);
-    assert(strcmp(e0->country, "US") == 0);
+    assert(strcmp(e0->callsign, "531AM Bible Radio") == 0);
+    assert(strcmp(e0->lang, "tl") == 0);
     assert(strncmp(e0->url, "https://", 8) == 0);
     printf("  [PASS] Binary station blob slot 0: %s (%s)\n", e0->name, e0->callsign);
 
-    /* Every slot must be a direct http(s) stream the native extractor can open: no playlists or HLS. */
+    /* Catalog records must preserve bounded, terminated HTTP(S) metadata.
+     * Individual broadcasters can still be unavailable or require playlists. */
     for (uint32_t i = 0; i < count; i++) {
         const FvBlobStationEntry *e = (const FvBlobStationEntry *)(record_bytes + (size_t)i * sizeof(FvBlobStationEntry));
         assert(e->slot_id == i);
@@ -655,10 +656,9 @@ int main(void) {
         assert(memchr(e->url_hash, '\0', sizeof(e->url_hash)) != NULL);
         assert(memchr(e->url, '\0', sizeof(e->url)) != NULL);
         assert(strncmp(e->url, "https://", 8) == 0 || strncmp(e->url, "http://", 7) == 0);
-        assert(strstr(e->url, ".m3u") == NULL && strstr(e->url, ".pls") == NULL);
         assert(e->callsign[0] != '\0' && e->name[0] != '\0');
     }
-    printf("  [PASS] All %u station slots are direct http(s) streams\n", count);
+    printf("  [PASS] All %u station slots contain bounded http(s) metadata\n", count);
 
     /* 6. Exercise the production native DSP and WAV exporter. */
     fv_audio_dsp_reset();

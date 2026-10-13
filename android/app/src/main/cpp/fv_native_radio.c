@@ -26,12 +26,12 @@ static struct {
     bool started,enabled,queued,busy,ready;
     unsigned generation,job_generation,group[FV_STATION_GROUP_SIZE];
     size_t group_count;
-    int station,result_station;
+    int station,result_station,result_fd;
     FvVoxDecimalTrigger trigger,result_trigger;
     int16_t *pcm;
     size_t frames;
     char directory[512];
-} radio={.mutex=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
+} radio={.mutex=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER,.result_fd=-1};
 static long now_ms(void) {
     struct timespec ts; if(clock_gettime(CLOCK_MONOTONIC,&ts)!=0) return 0;
     return ts.tv_sec*1000L+ts.tv_nsec/1000000L;
@@ -223,13 +223,14 @@ static void *worker(void *unused) {
             if(fetched && closed) pcm=decode(path,generation,&frames);
         }
         if(file) fclose(file);
+        const int source_fd=pcm ? open(path,O_RDONLY|O_CLOEXEC) : -1;
         if(fd>=0) unlink(path);
         LOGI("clip result: station=%d frames=%zu duration=%.3fs",station,frames,(double)frames/48000.0);
         pthread_mutex_lock(&radio.mutex);
         radio.busy=false;
         if(radio.enabled && radio.generation==generation) {
-            radio.pcm=pcm;radio.frames=frames;radio.result_station=station;radio.result_trigger=trigger;radio.ready=true;
-        } else free(pcm);
+            radio.pcm=pcm;radio.result_fd=source_fd;radio.frames=frames;radio.result_station=station;radio.result_trigger=trigger;radio.ready=true;
+        } else { free(pcm); if(source_fd>=0) close(source_fd); }
         pthread_mutex_unlock(&radio.mutex);
     }
     return NULL;
@@ -240,8 +241,8 @@ bool fv_radio_start(JavaVM *vm,const char *app_directory,const char *language,in
     if(radio.started) { pthread_mutex_unlock(&radio.mutex);return true; }
     const int n=snprintf(radio.directory,sizeof(radio.directory),"%s",app_directory);
     if(n<0 || (size_t)n>=sizeof(radio.directory)) { pthread_mutex_unlock(&radio.mutex);return false; }
-    char languages[FV_STATION_BLOB_COUNT][4];
-    for(int i=0;i<station_count;i++) memcpy(languages[i],entry_at(i)->lang,4);
+    char languages[FV_STATION_BLOB_COUNT][8];
+    for(int i=0;i<station_count;i++) memcpy(languages[i],entry_at(i)->lang,8);
     radio.group_count=fv_station_group(languages,(size_t)station_count,language,(uint32_t)now_ms(),radio.group);
     radio.vm=vm;pthread_t thread;pthread_attr_t attr;pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
@@ -256,6 +257,7 @@ void fv_radio_set_enabled(bool enabled) {
     if(radio.enabled!=enabled) {
         radio.enabled=enabled;radio.generation++;
         free(radio.pcm);radio.pcm=NULL;radio.frames=0;radio.ready=false;
+        if(radio.result_fd>=0) close(radio.result_fd);radio.result_fd=-1;
     }
     pthread_mutex_unlock(&radio.mutex);
 }
@@ -274,11 +276,11 @@ bool fv_radio_request(int channel,const FvVoxDecimalTrigger *trigger) {
     }
     pthread_mutex_unlock(&radio.mutex);return ok;
 }
-bool fv_radio_take_result(int16_t **pcm,size_t *frames,int *station,FvVoxDecimalTrigger *trigger) {
-    if(!pcm || !frames || !station || !trigger) return false;
+bool fv_radio_take_result(int16_t **pcm,size_t *frames,int *station,FvVoxDecimalTrigger *trigger,int *source_fd) {
+    if(!pcm || !frames || !station || !trigger || !source_fd) return false;
     pthread_mutex_lock(&radio.mutex);const bool ready=radio.ready;
     if(ready) {
-        *pcm=radio.pcm;*frames=radio.frames;*station=radio.result_station;*trigger=radio.result_trigger;
+        *pcm=radio.pcm;*source_fd=radio.result_fd;radio.result_fd=-1;*frames=radio.frames;*station=radio.result_station;*trigger=radio.result_trigger;
         radio.pcm=NULL;radio.frames=0;radio.ready=false;
     }
     pthread_mutex_unlock(&radio.mutex);return ready;

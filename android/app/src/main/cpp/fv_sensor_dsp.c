@@ -70,9 +70,12 @@ static uint32_t get_u32(const uint8_t *p) {
 }
 
 int32_t fv_verify_blob_checksum(const uint8_t *blob, size_t size) {
-    if (!blob || size < 16 || get_u32(blob) != 0x50425646u || get_u32(blob + 4) != 1u) return 0;
+    if (!blob || size < 16 || get_u32(blob) != 0x50425646u) return 0;
+    const uint32_t version = get_u32(blob + 4);
+    const size_t record = version == 1u ? 300u : (version == 2u ? 304u : 0u);
+    if (!record) return 0;
     const uint32_t count = get_u32(blob + 8);
-    if (!count || count > 4096 || size != 16u + (size_t)count * 300u) return 0;
+    if (!count || count > 4096 || size != 16u + (size_t)count * record) return 0;
     uint32_t crc = UINT32_MAX;
     for (size_t i = 16; i < size; i++) {
         crc ^= blob[i];
@@ -174,13 +177,13 @@ bool fv_vox_eval_decimal_trigger_ex(double x, double y, double z, bool is_magnet
     /* Digit [6:7]: Grain length: (d * 0.1 * 0.4 + 0.4) sec => 400..760 ms */
     const int d6 = frac[6] - '0';
     const float duration_sec = ((float)d6 * 0.1f * 0.4f) + 0.4f;
-    out_trigger->grain_duration_ms = (int)(duration_sec * 1000.0f + 0.5f);
+    out_trigger->grain_duration_ms = (int)(duration_sec * 1000.0f);
 
     /*
      * FieldVox Speed-compensated grain duration:
      * playback_duration_ms = grain_duration_ms / playback_speed
      */
-    out_trigger->playback_duration_ms = (int)((float)out_trigger->grain_duration_ms / out_trigger->speed_factor + 0.5f);
+    out_trigger->playback_duration_ms = (int)((float)out_trigger->grain_duration_ms / out_trigger->speed_factor);
 
     /*
      * Digit [7:8]: Live vs local cache decision

@@ -28,6 +28,7 @@ add_library(
     fv_recording_data.c
     fv_local_player.c
     fv_native_radio.c
+    fv_platform_voices.c
     fv_core.c
     fv_source_audit.c
     fv_stage1r_native_audio.c
