@@ -780,23 +780,7 @@ int main(void) {
         printf("  [PASS] Native RGBA_8888 to BT.709 NV12 colorimetry mapping (Red/Blue channels verified)\n");
     }
 
-    /* 8. Verify camera night-vision filter color transfer */
-    {
-        const uint8_t luma = 180;
-        /* Phosphor green: dominant green */
-        const uint32_t p_r = (uint32_t)(luma / 10u);
-        const uint32_t p_g = (uint32_t)luma;
-        const uint32_t p_b = (uint32_t)(luma / 5u);
-        assert(p_g > p_r && p_g > p_b);
-        assert(p_r == 18 && p_g == 180 && p_b == 36);
-
-        /* Cyan spectral: cyan dominance */
-        const uint32_t c_r = (uint32_t)(luma / 12u);
-        const uint32_t c_g = (uint32_t)(luma + (luma / 6u));
-        const uint32_t c_b = (uint32_t)luma;
-        assert(c_g > c_r && c_b > c_r);
-        printf("  [PASS] Camera phosphor and cyan spectral filter formulas\n");
-    }
+    /* Camera filter tests call the production functions in test_camera_effects.c. */
 
     /* 9. Verify packet buffer offset safety invariant */
     {

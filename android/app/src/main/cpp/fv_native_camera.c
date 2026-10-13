@@ -1,4 +1,5 @@
 #include "fv_native_camera.h"
+#include "fv_recording_data.h"
 
 #include <android/log.h>
 #include <camera/NdkCameraManager.h>
@@ -32,7 +33,7 @@ typedef struct {
     ACaptureSessionOutput *output;
     AImageReader *reader;
     ANativeWindow *reader_window;
-    uint8_t luma[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
+    uint32_t argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
     bool frame_ready;
     bool active;
     bool failed;
@@ -544,30 +545,33 @@ static void fv_camera_image_available(void *context, AImageReader *reader) {
         return;
     }
 
-    uint8_t *data = NULL;
-    int data_len = 0;
-    int32_t row_stride = 0;
-    int32_t pixel_stride = 1;
-    if (AImage_getPlaneData(latest_image, 0, &data, &data_len) == AMEDIA_OK && data &&
-        AImage_getPlaneRowStride(latest_image, 0, &row_stride) == AMEDIA_OK &&
-        row_stride >= FV_CAMERA_WIDTH) {
-        AImage_getPlanePixelStride(latest_image, 0, &pixel_stride);
-        if (pixel_stride <= 0) pixel_stride = 1;
-
-        const size_t needed = (size_t)(FV_CAMERA_HEIGHT - 1) * (size_t)row_stride + (size_t)FV_CAMERA_WIDTH * (size_t)pixel_stride;
-        if (data_len >= (int)needed) {
-            pthread_mutex_lock(&s_camera.mutex);
-            for (int y = 0; y < FV_CAMERA_HEIGHT; y++) {
-                const uint8_t *src = data + (size_t)y * (size_t)row_stride;
-                uint8_t *dst = s_camera.luma + y * FV_CAMERA_WIDTH;
-                for (int x = 0; x < FV_CAMERA_WIDTH; x++) {
-                    dst[x] = src[x * pixel_stride];
-                }
-            }
-            s_camera.frame_ready = true;
-            s_camera.last_frame_ms = current_camera_time_ms();
-            pthread_mutex_unlock(&s_camera.mutex);
+    const uint8_t *planes[3] = {0};
+    size_t lengths[3] = {0};
+    int strides[3] = {0}, pixels[3] = {0};
+    int32_t width=0, height=0;
+    AImageCropRect crop;
+    bool valid=AImage_getWidth(latest_image,&width)==AMEDIA_OK &&
+        AImage_getHeight(latest_image,&height)==AMEDIA_OK &&
+        AImage_getCropRect(latest_image,&crop)==AMEDIA_OK;
+    for (int i=0; valid && i<3; i++) {
+        uint8_t *data=NULL;
+        int length=0;
+        int32_t stride=0, pixel=0;
+        valid=AImage_getPlaneData(latest_image,i,&data,&length)==AMEDIA_OK && data && length>0 &&
+            AImage_getPlaneRowStride(latest_image,i,&stride)==AMEDIA_OK &&
+            AImage_getPlanePixelStride(latest_image,i,&pixel)==AMEDIA_OK;
+        planes[i]=data; lengths[i]=length>0 ? (size_t)length : 0;
+        strides[i]=stride; pixels[i]=pixel;
+    }
+    if (valid) {
+        pthread_mutex_lock(&s_camera.mutex);
+        /* Preserve chroma; the shared converter validates padding and interleaved planes. */
+        if (fv_yuv420_to_argb(s_camera.argb,FV_CAMERA_WIDTH,FV_CAMERA_HEIGHT,width,height,
+                             crop.left,crop.top,crop.right,crop.bottom,planes,lengths,strides,pixels)) {
+            s_camera.frame_ready=true;
+            s_camera.last_frame_ms=current_camera_time_ms();
         }
+        pthread_mutex_unlock(&s_camera.mutex);
     }
     AImage_delete(latest_image);
     fv_camera_end_image_callback();
@@ -810,11 +814,11 @@ void fv_camera_stop(void) {
     pthread_mutex_unlock(&s_camera_control_mutex);
 }
 
-bool fv_camera_copy_luma(uint8_t out_luma[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT]) {
-    if (!out_luma) return false;
+bool fv_camera_copy_argb(uint32_t out_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT]) {
+    if (!out_argb) return false;
     pthread_mutex_lock(&s_camera.mutex);
-    const bool ready = s_camera.frame_ready;
-    if (ready) memcpy(out_luma, s_camera.luma, sizeof(s_camera.luma));
+    const bool ready = s_camera.frame_ready && s_camera.active && !s_camera.failed;
+    if (ready) memcpy(out_argb, s_camera.argb, sizeof(s_camera.argb));
     pthread_mutex_unlock(&s_camera.mutex);
     return ready;
 }
@@ -867,60 +871,6 @@ bool fv_camera_is_torch_on(void) {
     const bool on = s_camera.torch_on;
     pthread_mutex_unlock(&s_camera.mutex);
     return on;
-}
-
-const char *fv_camera_filter_name(FvCameraFilter filter) {
-    switch (filter) {
-        case FV_CAM_FILTER_PHOSPHOR: return "PHOSPHOR";
-        case FV_CAM_FILTER_THERMAL:  return "THERMAL";
-        case FV_CAM_FILTER_CYAN:     return "CYAN";
-        case FV_CAM_FILTER_OFF:      return "STEALTH";
-        default:                     return "OFF";
-    }
-}
-
-static inline uint32_t clamp_u32(int32_t val, int32_t min_val, int32_t max_val) {
-    if (val < min_val) return (uint32_t)min_val;
-    if (val > max_val) return (uint32_t)max_val;
-    return (uint32_t)val;
-}
-
-void fv_camera_luma_to_argb(const uint8_t *luma, uint32_t *out_argb, int count, FvCameraFilter filter) {
-    if (!luma || !out_argb || count <= 0) return;
-
-    if (filter == FV_CAM_FILTER_OFF) {
-        memset(out_argb, 0, (size_t)count * sizeof(uint32_t));
-        return;
-    }
-
-    for (int i = 0; i < count; i++) {
-        const uint32_t l = (uint32_t)luma[i];
-        uint32_t r = 0, g = 0, b = 0;
-
-        switch (filter) {
-            case FV_CAM_FILTER_PHOSPHOR:
-                r = l / 10u;
-                g = l;
-                b = l / 5u;
-                break;
-            case FV_CAM_FILTER_THERMAL:
-                r = clamp_u32((int32_t)(l * 2u), 0, 255);
-                g = (l > 80u) ? clamp_u32((int32_t)((l - 80u) * 2u), 0, 255) : 0u;
-                b = (l > 170u) ? clamp_u32((int32_t)((l - 170u) * 3u), 0, 255) : (l / 16u);
-                break;
-            case FV_CAM_FILTER_CYAN:
-                r = l / 12u;
-                g = clamp_u32((int32_t)(l + (l / 6u)), 0, 255);
-                b = l;
-                break;
-            case FV_CAM_FILTER_OFF:
-            default:
-                r = g = b = 0;
-                break;
-        }
-
-        out_argb[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
-    }
 }
 
 int fv_camera_get_sensor_orientation(void) {
@@ -978,86 +928,4 @@ int fv_camera_get_display_compensation_degrees(ANativeActivity *activity) {
     const int sensor_ori = fv_camera_get_sensor_orientation();
     const int disp_rot = fv_android_get_display_rotation_degrees(activity);
     return (sensor_ori - disp_rot + 360) % 360;
-}
-
-void fv_camera_luma_to_argb_rotated(const uint8_t *luma, int src_w, int src_h,
-                                   uint32_t *out_argb, int *out_w, int *out_h,
-                                   int rot_deg, FvCameraFilter filter) {
-    if (!luma || !out_argb || src_w <= 0 || src_h <= 0) return;
-
-    rot_deg = (rot_deg % 360 + 360) % 360;
-    const bool swap_dims = (rot_deg == 90 || rot_deg == 270);
-    const int dw = swap_dims ? src_h : src_w;
-    const int dh = swap_dims ? src_w : src_h;
-
-    if (out_w) *out_w = dw;
-    if (out_h) *out_h = dh;
-
-    if (filter == FV_CAM_FILTER_OFF) {
-        memset(out_argb, 0, (size_t)dw * (size_t)dh * sizeof(uint32_t));
-        return;
-    }
-
-    /* Dynamic range AGC for paranormal night-vision: boosts low-light shadows up to 5x */
-    uint32_t max_l = 10;
-    const int total_pixels = src_w * src_h;
-    for (int i = 0; i < total_pixels; i += 16) {
-        if (luma[i] > max_l) max_l = luma[i];
-    }
-    const float gain = fminf(5.0f, 220.0f / (float)max_l);
-
-    for (int sy = 0; sy < src_h; sy++) {
-        const uint8_t *luma_row = luma + sy * src_w;
-        for (int sx = 0; sx < src_w; sx++) {
-            const uint32_t l = clamp_u32((int32_t)((float)luma_row[sx] * gain), 0, 255);
-            uint32_t r = 0, g = 0, b = 0;
-
-            switch (filter) {
-                case FV_CAM_FILTER_PHOSPHOR:
-                    r = l / 10u;
-                    g = l;
-                    b = l / 5u;
-                    break;
-                case FV_CAM_FILTER_THERMAL:
-                    r = clamp_u32((int32_t)(l * 2u), 0, 255);
-                    g = (l > 80u) ? clamp_u32((int32_t)((l - 80u) * 2u), 0, 255) : 0u;
-                    b = (l > 170u) ? clamp_u32((int32_t)((l - 170u) * 3u), 0, 255) : (l / 16u);
-                    break;
-                case FV_CAM_FILTER_CYAN:
-                    r = l / 12u;
-                    g = clamp_u32((int32_t)(l + (l / 6u)), 0, 255);
-                    b = l;
-                    break;
-                case FV_CAM_FILTER_OFF:
-                default:
-                    r = g = b = 0;
-                    break;
-            }
-
-            const uint32_t color = 0xFF000000u | (r << 16) | (g << 8) | b;
-
-            int dx, dy;
-            switch (rot_deg) {
-                case 90:
-                    dx = (src_h - 1) - sy;
-                    dy = sx;
-                    break;
-                case 180:
-                    dx = (src_w - 1) - sx;
-                    dy = (src_h - 1) - sy;
-                    break;
-                case 270:
-                    dx = sy;
-                    dy = (src_w - 1) - sx;
-                    break;
-                case 0:
-                default:
-                    dx = sx;
-                    dy = sy;
-                    break;
-            }
-
-            out_argb[dy * dw + dx] = color;
-        }
-    }
 }

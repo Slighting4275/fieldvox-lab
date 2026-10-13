@@ -23,8 +23,8 @@ Audio comes from broadcast streams or selected WAV files. FieldVox does not use 
 
 - **Platform typography.** C23 JNI uses Android’s system sans-serif typefaces with real regular, medium, and bold weights. Controls/status labels use 12 sp, small values 8 sp, the controls title 14 sp, and library filenames 16 sp with 11 sp details. Android converts sp using the device’s font settings, including nonlinear scaling. Long filenames are elided at the declared size while retaining their file type and capture suffix; a bounded glyph cache prevents text from disappearing as sizes change.
 - **Screen stays awake in the foreground.** Camera monitoring, controls, recording, and library replay remain visible without the normal display timeout. Leaving the app restores normal timeout behavior; the power button can still lock the phone. Estes mode retains its intentional dark display.
-- Camera2 NDK viewfinder with orientation correction, low-light luma boost, and a stalled-frame watchdog.
-- PHOSPHOR, THERMAL, CYAN, and STEALTH display filters. These are visual treatments of ordinary camera images; THERMAL is a false-color display, not a temperature measurement.
+- **Camera swipes.** Swipe left on the clear camera preview for the next filter, or right for the previous one. Both directions wrap through NORMAL, GREEN, PURPLE, DEPTH, HEAT, and INVERTED. Horizontal travel must exceed 100 physical pixels and recent horizontal velocity must exceed 100 pixels/second; horizontal travel must dominate vertical travel. Recording, disabled/stalled cameras, open overlays, sliders, buttons, canceled gestures, and multiple fingers suppress camera swipes. The LENS button also advances the same cycle; the advanced camera switch controls STEALTH separately.
+- **Full-color camera processing in C23.** Camera2 NDK preserves validated YUV chroma, converts to RGB, and applies the selected filter before orientation correction and display. Green/Purple use RGB color matrices with a 4× boost when the torch is on. Depth uses a bilinearly sampled nine-tap neighborhood, its declared divisor of 100, stepped grayscale and 1.6× brightness. Heat interpolates blue/yellow/red from RGB intensity; Inverted reverses each color channel. Depth and Heat are visual effects, not depth or temperature measurements. The camera retains its stalled-frame watchdog.
 - Magnetometer, accelerometer, gyroscope, proximity, and barometer telemetry, where supported by the device.
 - Spectrum, PCM waveform, and spectral history views with selectable trace colors.
 - Slide-up audio controls, advanced sensor controls, haptic feedback, torch control, and an in-app field guide.
@@ -82,7 +82,7 @@ Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speakin
 
 ## Download the APK
 
-[Download FieldVox Lab 0.5.1-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `8`.
+[Download FieldVox Lab 0.5.2-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `9`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 
@@ -109,13 +109,13 @@ Add `--offline` to the Gradle command when its dependencies are already cached. 
 
 ## Verification
 
-Run the host C23 unit, recording, fragment-engine, typography, and simulator smoke tests:
+Run the host C23 unit, recording, fragment-engine, typography, camera, and simulator smoke tests:
 
 ```bash
 make -C source test
 ```
 
-The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, paired-source persistence, descriptor ownership, backend rejection, regional language selection, and invalid inputs. Typography tests use the installed sans font reported by `fc-match`; set `TYPOGRAPHY_FONT=/path/to/font.ttf` when needed. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
+The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, paired-source persistence, descriptor ownership, backend rejection, regional language selection, and invalid inputs. Typography tests use the installed sans font reported by `fc-match`; set `TYPOGRAPHY_FONT=/path/to/font.ttf` when needed. Camera tests exercise production RGB filter functions, chroma preservation, rotation, bounds, both swipe directions, thresholds, hold/cancel handling and wraparound. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
 
 Inspect a connected device and follow runtime diagnostics:
 
@@ -146,6 +146,7 @@ Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's ac
 | `fv_hit_capture.c` | Paired pre-roll audio and source/effect timelines. |
 | `fv_local_bank.c`, `fv_local_player.c` | Selected-WAV fragments and in-app recording replay. |
 | `fv_native_camera.c`, `fv_native_video_recorder.c` | Native camera capture and H.264/AAC MP4 recording. |
+| `fv_camera_effects.c` | Six RGB camera filters, bounded rotation and recent-sample swipe velocity/admission. |
 | `source/` | Host simulator, station generator, utilities, and regression tests. |
 
 All native application translation units, including vendored Sonic and LVREV sources, compile as C23. The vendored components retain their Apache-2.0 notices and upstream identities under `android/app/src/main/cpp/third_party/`. The fragment engine controls admissions and native recording reconstruction; the default speaker backend uses Android players and environmental reverb through C JNI. Older continuous DSP helpers remain available for legacy tests. No Zig compiler or runtime is required.

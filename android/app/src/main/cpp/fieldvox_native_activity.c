@@ -216,7 +216,7 @@ static FILE *g_record_file;
 static uint32_t g_record_frames;
 static uint32_t g_record_checkpoint_frames;
 static char g_last_artifact[256]; /* audio thread only */
-static uint8_t g_camera_luma[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
+static uint32_t g_camera_source[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
 static uint32_t g_camera_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
 
 static long get_time_ms(void) {
@@ -393,7 +393,7 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
 
 static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w, int h, float d, long now) {
     if (s->cam_filter != FV_CAM_FILTER_OFF) {
-        const bool frame = fv_camera_copy_luma(g_camera_luma);
+        const bool frame = fv_camera_copy_argb(g_camera_source);
         if (frame) {
             int cam_w = FV_CAMERA_WIDTH;
             int cam_h = FV_CAMERA_HEIGHT;
@@ -402,9 +402,11 @@ static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w,
             if (s_view_logged++ < 3) {
                 LOGI("viewfinder: w=%d, h=%d, rot_deg=%d", w, h, rot_deg);
             }
-            fv_camera_luma_to_argb_rotated(g_camera_luma, FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT,
-                                          g_camera_argb, &cam_w, &cam_h, rot_deg, s->cam_filter);
-            fvg_blit_cover(c, g_camera_argb, cam_w, cam_h);
+            if (fv_camera_filter_frame(g_camera_source,FV_CAMERA_WIDTH,FV_CAMERA_HEIGHT,
+                                      g_camera_argb,(size_t)FV_CAMERA_WIDTH*(size_t)FV_CAMERA_HEIGHT,rot_deg,
+                                      s->cam_filter,fv_camera_is_torch_on(),&cam_w,&cam_h)) {
+                fvg_blit_cover(c,g_camera_argb,cam_w,cam_h);
+            }
         } else {
             fvg_clear(c, 0xFF060B11);
         }
@@ -814,21 +816,25 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
         cur_y += pill_h + gap;
     }
 
-    /* Row 5: Audio Session & Recording Tools */
+    /* Row 5: Camera switch, audio session and recording tools. */
     {
+        const float tools_w=(w-gap*4.0f-16.0f*d)/5.0f;
         float px = x + 8.0f * d;
-        draw_pill(ui, W_MIC, px, cur_y, p4_w, pill_h, s->monitor_active ? "MIC ON" : "MIC OFF",
+        draw_pill(ui,W_CAMHUD,px,cur_y,tools_w,pill_h,s->cam_filter==FV_CAM_FILTER_OFF ? "CAM OFF" : "CAM ON",
+                  s->cam_filter==FV_CAM_FILTER_OFF ? PILL_IDLE : PILL_ACTIVE);
+        px+=tools_w+gap;
+        draw_pill(ui, W_MIC, px, cur_y, tools_w, pill_h, s->monitor_active ? "MIC ON" : "MIC OFF",
                   s->monitor_active ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_REC, px, cur_y, p4_w, pill_h, s->recording_active ? "WAV ON" : "SESS WAV",
+        px += tools_w + gap;
+        draw_pill(ui, W_REC, px, cur_y, tools_w, pill_h, s->recording_active ? "WAV ON" : "SESS WAV",
                   s->recording_active ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
+        px += tools_w + gap;
         PillStyle rec_st = PILL_IDLE;
         if (s->video_recording_active) rec_st = (PillStyle){0xDD3A050B, 0xFFFF1744, 0xFFFF5252};
-        draw_pill(ui, W_VIDEO_REC, px, cur_y, p4_w, pill_h,
+        draw_pill(ui, W_VIDEO_REC, px, cur_y, tools_w, pill_h,
                   s->video_recording_active ? "VID STOP" : "VID MP4", rec_st);
-        px += p4_w + gap;
-        draw_pill(ui, W_SESS, px, cur_y, p4_w, pill_h, "EVIDENCE", PILL_IDLE);
+        px += tools_w + gap;
+        draw_pill(ui, W_SESS, px, cur_y, tools_w, pill_h, "EVIDENCE", PILL_IDLE);
     }
 }
 
@@ -847,7 +853,7 @@ static void draw_help_overlay(Ui *ui, float screen_h) {
         "REC: start or stop an H.264/AAC evidence video",
         "MARK HIT: save clean + processed WAVs and source timeline",
         "LIBRARY: open saved WAV/MP4 captures in your system viewer",
-        "LENS: cycle PHOSPHOR, THERMAL, CYAN and STEALTH",
+        "Swipe left/right on camera: next/previous lens filter",
         "TORCH: light the scene without stopping camera or recording",
         "Tap EMF to zero sensors; tap the right badge for REM-POD",
         "CONTROLS: drag echo, reverb, distortion and fragment sliders",
@@ -1270,17 +1276,21 @@ static void handle_widget(WidgetId id) {
             g_app.vocal_filter = true;
             break;
         case W_CAMHUD:
+            if (g_app.recording_active || g_app.video_recording_active) {
+                set_status_locked("Stop recording before switching the camera preview");
+                break;
+            }
             if (g_app.cam_filter == FV_CAM_FILTER_OFF) {
-                g_app.cam_filter = FV_CAM_FILTER_PHOSPHOR;
+                g_app.cam_filter = FV_CAM_FILTER_NORMAL;
                 g_app.cam_hud_active = true;
                 if (!fv_android_has_permission(g_app.activity, "android.permission.CAMERA")) {
                     fv_android_request_permission(g_app.activity, "android.permission.CAMERA", 61);
                 }
-                set_status_locked("Camera night-vision ON");
+                set_status_locked("Camera preview ON");
             } else {
                 g_app.cam_filter = FV_CAM_FILTER_OFF;
                 g_app.cam_hud_active = false;
-                set_status_locked("Camera night-vision OFF");
+                set_status_locked("Camera preview OFF");
             }
             break;
         case W_SENS_DOWN:
@@ -1304,7 +1314,7 @@ static void handle_widget(WidgetId id) {
         case W_TORCH:
             g_app.torch_active = !g_app.torch_active;
             if (g_app.torch_active) {
-                if (g_app.cam_filter == FV_CAM_FILTER_OFF) g_app.cam_filter = FV_CAM_FILTER_PHOSPHOR;
+                if (g_app.cam_filter == FV_CAM_FILTER_OFF) g_app.cam_filter = FV_CAM_FILTER_NORMAL;
                 g_app.cam_hud_active = true;
                 set_status_locked("Torch requested • camera remains live");
             } else {
@@ -1388,11 +1398,16 @@ static void handle_widget(WidgetId id) {
             break;
         }
         case W_CAM_TINT: {
-            g_app.cam_filter = (FvCameraFilter)((g_app.cam_filter + 1) % FV_CAM_FILTER_COUNT);
-            g_app.cam_hud_active = (g_app.cam_filter != FV_CAM_FILTER_OFF);
+            if (g_app.recording_active || g_app.video_recording_active) {
+                set_status_locked("Stop recording before changing the camera filter");
+                break;
+            }
+            g_app.cam_filter = fv_camera_filter_step(g_app.cam_filter,1);
+            g_app.cam_hud_active = true;
             char tmsg[64];
             snprintf(tmsg, sizeof(tmsg), "Camera filter: %s", fv_camera_filter_name(g_app.cam_filter));
             set_status_locked(tmsg);
+            LOGI("Camera filter: %d %s (button)",(int)g_app.cam_filter,fv_camera_filter_name(g_app.cam_filter));
             break;
         }
         case W_CLOSE_DRAWER: {
@@ -1563,6 +1578,21 @@ static void update_slider_locked(int id, float x) {
     else if (id==W_GRAIN_LEVEL) g_app.grain_ms=65+(value*935+50)/100;
 }
 
+/* Caller holds g_state_mutex. Camera swipes never take gestures from overlays. */
+static bool camera_swipe_eligible_locked(void) {
+    return atomic_load(&g_app.resumed) && g_app.cam_filter!=FV_CAM_FILTER_OFF &&
+        !g_app.recording_active && !g_app.video_recording_active && !g_app.estes_mode &&
+        !g_app.controls_visible && !g_app.help_visible && !g_app.evidence_visible &&
+        !g_app.playback_visible && fv_camera_is_healthy(2000);
+}
+static bool camera_swipe_start_locked(float x, float y) {
+    if (!camera_swipe_eligible_locked()) return false;
+    for (int i=0; i<W_COUNT; i++) {
+        const WidgetRect *r=&g_app.widgets[i];
+        if (r->visible && x>=r->x && x<=r->x+r->w && y>=r->y && y<=r->y+r->h) return false;
+    }
+    return true;
+}
 static void *input_thread_func(void *arg) {
     (void)arg;
     ALooper *looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
@@ -1574,6 +1604,7 @@ static void *input_thread_func(void *arg) {
     float down_x = 0, down_y = 0, down_scroll = 0;
     bool tracking = false, dragging = false;
     int active_slider = -1;
+    FvCameraGesture camera_gesture={0};
     while (atomic_load(&g_app.running)) {
         const int ident = ALooper_pollOnce(50, NULL, NULL, NULL);
         if (ident != 2) continue;
@@ -1606,10 +1637,14 @@ static void *input_thread_func(void *arg) {
                     dragging = false;
                     active_slider = hit_slider_locked(ex, ey);
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
+                    fv_camera_gesture_begin(&camera_gesture,ex,ey,AMotionEvent_getEventTime(event),
+                                             active_slider<0 && camera_swipe_start_locked(ex,ey));
                 } else if (action == AMOTION_EVENT_ACTION_MOVE && tracking) {
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
+                    fv_camera_gesture_move(&camera_gesture,ex,AMotionEvent_getEventTime(event));
                     if (!dragging && fabsf(ey - down_y) > slop) dragging = true;
-                    if (dragging && !g_app.estes_mode) {
+                    const bool horizontal=camera_gesture.active && fabsf(ex-down_x)>fabsf(ey-down_y);
+                    if (dragging && !g_app.estes_mode && !horizontal) {
                         float s = down_scroll - (ey - down_y);
                         g_app.scroll_y = s < 0.0f ? 0.0f : (s > g_app.max_scroll ? g_app.max_scroll : s);
                     }
@@ -1617,16 +1652,28 @@ static void *input_thread_func(void *arg) {
                     tracking = false;
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
                     if (active_slider==W_PLAY_SEEK) fv_local_player_scrub_end();
-                    if (active_slider<0 && !dragging && fabsf(ex - down_x) <= slop) {
+                    const int swipe=fv_camera_gesture_end(&camera_gesture,ex,ey,AMotionEvent_getEventTime(event),
+                                                          camera_swipe_eligible_locked());
+                    if (swipe) {
+                        g_app.cam_filter=fv_camera_filter_step(g_app.cam_filter,swipe);
+                        g_app.cam_hud_active=true;
+                        char message[64];
+                        snprintf(message,sizeof(message),"Camera filter: %s",fv_camera_filter_name(g_app.cam_filter));
+                        set_status_locked(message);
+                        LOGI("Camera filter: %d %s (%s swipe)",(int)g_app.cam_filter,
+                             fv_camera_filter_name(g_app.cam_filter),swipe>0 ? "left" : "right");
+                    } else if (active_slider<0 && !dragging && fabsf(ex - down_x) <= slop) {
                         tap = true;
                         tap_x = ex;
                         tap_y = ey;
                     }
                     active_slider = -1;
-                } else if (action == AMOTION_EVENT_ACTION_CANCEL) {
+                } else if (action == AMOTION_EVENT_ACTION_CANCEL || action == AMOTION_EVENT_ACTION_POINTER_DOWN ||
+                           action == AMOTION_EVENT_ACTION_POINTER_UP) {
                     if (active_slider==W_PLAY_SEEK) fv_local_player_scrub_end();
                     tracking = false;
                     active_slider = -1;
+                    fv_camera_gesture_cancel(&camera_gesture);
                 }
                 pthread_mutex_unlock(&g_state_mutex);
                 handled = 1;
@@ -2527,7 +2574,7 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     g_app.direction = 1;
     g_app.threshold = 1.65f;
     g_app.cooldown_ms = 450;
-    g_app.cam_filter = FV_CAM_FILTER_PHOSPHOR;
+    g_app.cam_filter = FV_CAM_FILTER_NORMAL;
     g_app.cam_hud_active = true;
     for (int i = 0; i < WF_WIDTH * WF_HEIGHT; i++) g_app.waterfall[i] = 0xFF000000;
 

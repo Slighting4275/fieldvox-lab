@@ -20,6 +20,7 @@ add_library(
     SHARED
     fieldvox_native_activity.c
     fv_native_camera.c
+    fv_camera_effects.c
     fv_native_video_recorder.c
     fv_gfx.c
     fv_android_text.c
