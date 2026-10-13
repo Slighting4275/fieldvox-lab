@@ -74,6 +74,19 @@ Recordings, hit captures, and the radio clip cache use separate app-private dire
 
 Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speaking mute is off by default. Auxiliary sensor presets are separate from the decimal magnetometer/accelerometer gate and the audio engine's admission cooldowns.
 
+## Download the APK
+
+[Download FieldVox Lab 0.3.0-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `3`.
+
+The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
+
+Verify a checkout's packaged APK from the repository root:
+
+```bash
+cd apk
+sha256sum -c SHA256SUMS
+```
+
 ## Build and install
 
 Requirements: a C23-capable host compiler, Android SDK platform/build tools 37, NDK `30.0.16248370`, CMake `4.1.2`, a compatible JDK, and ADB. Minimum Android version is Android 11 (API 30). Builds target `arm64-v8a` and `x86_64`.
