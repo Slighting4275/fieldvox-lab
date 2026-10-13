@@ -57,7 +57,7 @@ Recordings, hit captures, and the radio clip cache use separate app-private dire
 
 | Control | Purpose |
 | --- | --- |
-| `RUNNING / STOPPED` | Start or stop fragment playback. |
+| `RUNNING / STOPPED` | Start or stop fragment playback, static bursts, and effect tails. Cached clips and selected effect levels are retained. |
 | `LIVE / LOCAL` | Choose online radio with cached fallback or offline playback. |
 | `AUTO / SENSOR` | Enable timer-plus-sensor requests or sensor-only requests. |
 | `ECHO`, `REVERB`, `DISTORTION` | Adjust repeat spacing, reverb mix, and sensor pitch/speed selection. |
@@ -77,7 +77,7 @@ Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speakin
 
 ## Download the APK
 
-[Download FieldVox Lab 0.3.1-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `4`.
+[Download FieldVox Lab 0.3.2-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `5`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 

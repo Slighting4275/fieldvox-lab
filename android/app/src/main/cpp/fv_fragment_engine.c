@@ -135,6 +135,7 @@ void fv_fragment_set_settings(FvFragmentEngine *e, FvFragmentSettings settings) 
     settings.echo = unit(settings.echo); settings.reverb = unit(settings.reverb);
     if (settings.sweep_ms < 100u) settings.sweep_ms = 100u;
     if (settings.sweep_ms > 1000u) settings.sweep_ms = 1000u;
+    if (settings.paused && !e->settings.paused) fv_fragment_reset_playback(e);
     if (settings.reverb != e->settings.reverb) {
         const float t60 = fmaxf(0.001f, settings.reverb * 9.0f);
         for (unsigned i = 0; i < COMBS; i++) e->feedback[i] = expf(-6.9077553f * (float)delays[i] / ((float)FV_FRAGMENT_RATE * t60));
@@ -179,7 +180,7 @@ bool fv_fragment_feed(FvFragmentEngine *e, int deck, int station, const int16_t 
     return added;
 }
 static bool eligible(FvFragmentEngine *e, int station, uint64_t clock, bool speech) {
-    if (speech) return false;
+    if (speech || e->settings.paused) return false;
     const uint64_t cooldown = (uint64_t)((2000.0 + 8000.0 * (double)e->settings.reverb) * 48.0);
     if (e->triggered && clock - e->last_trigger < cooldown) return false;
     return station < 0 || station >= 512 || !e->station_seen[station] || clock - e->station_trigger[station] >= 5u * FV_FRAGMENT_RATE;
@@ -226,7 +227,7 @@ bool fv_fragment_trigger_pcm(FvFragmentEngine *e, const FvVoxDecimalTrigger *t,
 }
 bool fv_fragment_trigger(FvFragmentEngine *e, const FvVoxDecimalTrigger *t,
                          bool local_only, uint64_t clock, bool speech) {
-    if (!e || !t || speech) return false;
+    if (!e || !t || speech || e->settings.paused) return false;
     if (!local_only && t->prefer_live) {
         const unsigned first = (unsigned)t->channel_hop % FV_FRAGMENT_DECKS;
         for (unsigned n = 0; n < FV_FRAGMENT_DECKS; n++) {
@@ -275,6 +276,12 @@ void fv_fragment_render(FvFragmentEngine *e, int16_t *clean, int16_t *processed,
     if (!e || !clean || !processed) return;
     FvFragmentStatus s = {.station = e->last_station, .cached = e->last_cached, .cache_count = (unsigned)e->cache_count, .admitted = e->admitted,
         .pitch = e->pitch, .speed = e->speed, .grain_ms = e->grain_ms, .seek_fraction = e->seek_fraction};
+    if (e->settings.paused) {
+        memset(clean, 0, frames * sizeof(*clean));
+        memset(processed, 0, frames * sizeof(*processed));
+        if (status) *status = s;
+        return;
+    }
     for (size_t i = 0; i < frames; i++) {
         const uint64_t now = clock + i;
         float dry = 0.0f, original = 0.0f, send = 0.0f;

@@ -2033,7 +2033,6 @@ static void *audio_thread_func(void *arg) {
     int16_t stereo[BUFFER_FRAMES * 2];
     static int16_t deck_buf[FV_RADIO_DECKS][BUFFER_FRAMES];
     uint64_t clock = 0;
-    bool was_sweep = false;
     uint64_t next_auto = 0;
     FvGateReason fragment_reason = FV_GATE_MAGNETOMETER;
     FvVoxDucker ducker = {0};
@@ -2077,9 +2076,7 @@ static void *audio_thread_func(void *arg) {
 
         fv_fragment_set_settings(fragments, (FvFragmentSettings){
             .echo = (float)echo_level/100.0f, .reverb = (float)reverb_level/100.0f,
-            .noise = noise, .sweep_ms = (unsigned)grain_ms});
-        if (!sweep && was_sweep) fv_fragment_reset_playback(fragments);
-        was_sweep = sweep;
+            .noise = noise, .paused = !sweep, .sweep_ms = (unsigned)grain_ms});
         fv_radio_set_enabled(sweep && !local_only);
         int live = 0;
         for (int dk = 0; dk < FV_RADIO_DECKS; dk++) {

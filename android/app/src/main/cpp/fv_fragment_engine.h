@@ -15,6 +15,7 @@ typedef struct FvFragmentEngine FvFragmentEngine;
 typedef struct {
     float echo, reverb;
     bool noise;
+    bool paused; /* Suspends fragment playback, static, and effect tails. */
     unsigned sweep_ms;
 } FvFragmentSettings;
 typedef struct {

@@ -105,6 +105,30 @@ static void test_store(void) {
     }
     closedir(d); assert(rmdir(cache)==0); assert(rmdir(dir)==0);
 }
+static void test_pause_silences_static_and_tails(void) {
+    FvFragmentEngine *e=fv_fragment_create(); assert(e);
+    FvFragmentSettings settings={.echo=0.75f,.reverb=0.5f,.noise=true,.sweep_ms=200};
+    fv_fragment_set_settings(e,settings);
+    for (size_t i=0;i<19200;i++) source[i]=10000;
+    assert(fv_fragment_cache_add(e,source,19200,7));
+    FvVoxDecimalTrigger t=normal();
+    assert(fv_fragment_trigger(e,&t,true,0,false));
+    FvFragmentStatus status;
+    fv_fragment_render(e,clean,output,1024,0,&status);
+    assert(status.playing && status.voices==5 && output[100]!=0);
+    settings.paused=true; fv_fragment_set_settings(e,settings);
+    assert(!fv_fragment_trigger(e,&t,true,10u*48000u,false));
+    fv_fragment_render(e,clean,output,48000,1024,&status);
+    for (size_t i=0;i<48000;i++) assert(clean[i]==0 && output[i]==0);
+    assert(!status.playing && status.voices==0 && status.cache_count==1);
+    settings.paused=false; fv_fragment_set_settings(e,settings);
+    fv_fragment_render(e,clean,output,1024,10u*48000u,&status);
+    bool static_audible=false;
+    for (size_t i=0;i<1024;i++) { assert(clean[i]==0); static_audible|=output[i]!=0; }
+    assert(static_audible && !status.playing && status.voices==0);
+    assert(fv_fragment_trigger(e,&t,true,10u*48000u,false));
+    fv_fragment_destroy(e);
+}
 static void test_speech_band(void) {
     int16_t mic[1024]; FvVoxDucker state={0};
     for (unsigned i=0;i<1024;i++) mic[i]=(int16_t)(16000.0*sin(2.0*pi*1000.0*(double)i/48000.0));
@@ -116,6 +140,7 @@ static void test_speech_band(void) {
 }
 int main(void) {
     test_pitch_and_tempo(); test_scheduling(); test_bank_and_live(); test_store(); test_speech_band();
-    puts("Fragment engine: pitch/tempo, four echoes, station/global cooldown, speech suppression, cache limits/reuse, live feed and persistent offline reload passed.");
+    test_pause_silences_static_and_tails();
+    puts("Fragment engine: pitch/tempo, four echoes, station/global cooldown, speech suppression, cache limits/reuse, live feed, persistent offline reload and stopped-playback silence passed.");
     return 0;
 }
