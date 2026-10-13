@@ -11,8 +11,8 @@ android {
         applicationId = "org.fieldvox.lab"
         minSdk = 30
         targetSdk = 37
-        versionCode = 7
-        versionName = "0.5.0-native"
+        versionCode = 8
+        versionName = "0.5.1-native"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

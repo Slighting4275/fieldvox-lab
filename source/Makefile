@@ -8,6 +8,7 @@ MAIN_BIN := fieldvox
 DUMP_BIN := fv-blobdump
 CSV_BIN := fv-csvvox
 TEST_BIN := fv-unit-test
+TYPOGRAPHY_FONT ?= $(shell fc-match -f "%{file}" sans 2>/dev/null)
 
 MAIN_SRC := src/main.c src/fv_core.c
 DUMP_SRC := src/fv_blobdump.c src/fv_core.c
@@ -17,7 +18,7 @@ HDR := src/fv_core.h
 
 .PHONY: all clean run inspect dump extract csvtest audition test blobgen
 
-all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN) fv-recording-test fv-fragment-test
+all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN) fv-recording-test fv-fragment-test fv-typography-test
 
 $(MAIN_BIN): $(MAIN_SRC) $(HDR)
 >$(CC) $(CFLAGS) -o $@ $(MAIN_SRC) $(LDFLAGS)
@@ -64,6 +65,7 @@ test: all
 >./$(TEST_BIN)
 >./fv-recording-test
 >./fv-fragment-test
+>./fv-typography-test "$(TYPOGRAPHY_FONT)"
 >./tests/test_smoke.sh
 
 FRAGMENT_SRC := tests/test_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_store.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_station_policy.c ../android/app/src/main/cpp/fv_environment_reverb.c
@@ -80,6 +82,9 @@ vpath %.c $(sort $(dir $(ALGORITHM_SRC)))
 fv-fragment-test: $(FRAGMENT_SRC) $(ALGORITHM_SRC) $(ALGORITHM_OBJ) $(wildcard ../android/app/src/main/cpp/*.h)
 >$(CC) $(CFLAGS) $(ALGORITHM_FLAGS) -o $@ $(FRAGMENT_SRC) $(ALGORITHM_OBJ) $(LDFLAGS) -pthread
 
+fv-typography-test: tests/test_typography.c ../android/app/src/main/cpp/fv_gfx.c ../android/app/src/main/cpp/fv_gfx.h ../android/app/src/main/cpp/fv_android_text.c ../android/app/src/main/cpp/fv_android_text.h ../android/app/src/main/cpp/third_party/stb_truetype.h
+>$(CC) -std=c23 -O2 -g -Wall -Wextra -Wpedantic -Wno-unused-function -o $@ tests/test_typography.c ../android/app/src/main/cpp/fv_gfx.c ../android/app/src/main/cpp/fv_android_text.c -lm
+
 fv-station-blob-gen: src/station_blob_gen.c src/station_catalog.h
 >$(CC) $(CFLAGS) -o $@ src/station_blob_gen.c
 
@@ -88,6 +93,6 @@ blobgen: fv-station-blob-gen
 
 clean:
 >rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN) fv-recording-test fv-station-blob-gen
->rm -f fv-fragment-test
+>rm -f fv-fragment-test fv-typography-test
 >rm -rf .audio-build
 >rm -rf out

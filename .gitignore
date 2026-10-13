@@ -41,3 +41,5 @@ source/fv-fragment-test
 .bug-check/
 
 source/.audio-build/
+
+source/fv-typography-test

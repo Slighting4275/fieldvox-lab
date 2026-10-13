@@ -3,6 +3,7 @@
  */
 
 #include "fv_gfx.h"
+#include "fv_android_text.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -265,17 +266,27 @@ typedef struct {
 typedef struct {
     bool used;
     int font;
-    int size_q;
+    uint32_t size_key;
     uint32_t cp;
     int w, h, xoff, yoff;
     float advance;
     unsigned char *bmp;
+    uint64_t last_used;
 } FvGlyph;
 
 #define GLYPH_CACHE_SIZE 4096
 
 static FvFont g_fonts[FVG_FONT_COUNT];
 static FvGlyph g_glyphs[GLYPH_CACHE_SIZE];
+static uint64_t glyph_age;
+typedef struct { bool used; int font; uint32_t size_key; uint32_t left,right; float value; } FvKern;
+static FvKern g_kerns[2048];
+void fvg_text_shutdown(void) {
+    fv_android_text_shutdown();
+    for (int i=0;i<GLYPH_CACHE_SIZE;i++) free(g_glyphs[i].bmp);
+    memset(g_glyphs,0,sizeof(g_glyphs)); memset(g_kerns,0,sizeof(g_kerns)); glyph_age=0;
+    for (int i=0;i<FVG_FONT_COUNT;i++) { free(g_fonts[i].data); g_fonts[i]=(FvFont){0}; }
+}
 
 bool fvg_font_load(int font, const char *path) {
     if (font < 0 || font >= FVG_FONT_COUNT || !path) return false;
@@ -304,7 +315,7 @@ bool fvg_font_load(int font, const char *path) {
 }
 
 bool fvg_font_ready(int font) {
-    return font >= 0 && font < FVG_FONT_COUNT && g_fonts[font].ready;
+    return font >= 0 && font < FVG_FONT_COUNT && (g_fonts[font].ready || fv_android_text_available());
 }
 
 static uint32_t next_codepoint(const char **s) {
@@ -339,28 +350,47 @@ static uint32_t next_codepoint(const char **s) {
 }
 
 static const FvGlyph *get_glyph(int font, float size_px, uint32_t cp) {
-    const int size_q = (int)(size_px * 4.0f + 0.5f);
-    uint32_t hash = (cp * 2654435761u) ^ ((uint32_t)size_q * 40503u) ^ ((uint32_t)font * 97u);
+    if (!isfinite(size_px) || size_px<=0 || size_px>512) return NULL;
+    uint32_t size_key; memcpy(&size_key,&size_px,sizeof(size_key));
+    const uint32_t hash = (cp * 2654435761u) ^ ((size_key^(size_key>>16u)) * 40503u) ^ ((uint32_t)font * 97u);
+    FvGlyph *slot=NULL;
     for (int probe = 0; probe < 32; probe++) {
         FvGlyph *g = &g_glyphs[(hash + (uint32_t)probe) % GLYPH_CACHE_SIZE];
-        if (g->used && g->font == font && g->size_q == size_q && g->cp == cp) return g;
-        if (!g->used) {
-            const stbtt_fontinfo *info = &g_fonts[font].info;
-            const float scale = stbtt_ScaleForPixelHeight(info, (float)size_q / 4.0f);
-            int advance = 0, lsb = 0;
-            stbtt_GetCodepointHMetrics(info, (int)cp, &advance, &lsb);
-            g->bmp = stbtt_GetCodepointBitmap(info, 0, scale, (int)cp, &g->w, &g->h, &g->xoff, &g->yoff);
-            g->advance = (float)advance * scale;
-            g->font = font;
-            g->size_q = size_q;
-            g->cp = cp;
-            g->used = true;
-            return g;
-        }
+        if (g->used && g->font == font && g->size_key == size_key && g->cp == cp) { g->last_used=++glyph_age; return g; }
+        if (!g->used) { slot=g; break; }
+        if (!slot || g->last_used<slot->last_used) slot=g;
     }
-    return NULL; /* cache neighbourhood full; the glyph is skipped rather than evicting */
+    /* Reclaim the oldest neighbour instead of silently dropping text when
+     * font-size changes or long recordings fill this bounded cache. */
+    if (!slot) return NULL;
+    FvTextGlyph raster={0};
+    const float pixels=size_px;
+    if (!fv_android_text_glyph(font,pixels,cp,&raster)) {
+        if (!g_fonts[font].ready) return NULL;
+        const stbtt_fontinfo *info=&g_fonts[font].info;
+        const float scale=stbtt_ScaleForMappingEmToPixels(info,pixels);
+        int advance=0,lsb=0; stbtt_GetCodepointHMetrics(info,(int)cp,&advance,&lsb);
+        raster.bitmap=stbtt_GetCodepointBitmap(info,0,scale,(int)cp,&raster.w,&raster.h,&raster.xoff,&raster.yoff);
+        raster.advance=(float)advance*scale;
+        if (raster.w>0 && raster.h>0 && !raster.bitmap) return NULL;
+    }
+    free(slot->bmp);
+    *slot=(FvGlyph){.used=true,.font=font,.size_key=size_key,.cp=cp,.w=raster.w,.h=raster.h,
+        .xoff=raster.xoff,.yoff=raster.yoff,.advance=raster.advance,.bmp=raster.bitmap,.last_used=++glyph_age};
+    return slot;
 }
-
+static float kerning(int font,float pixels,uint32_t left,uint32_t right) {
+    uint32_t size_key; memcpy(&size_key,&pixels,sizeof(size_key));
+    const unsigned hash=(left*2654435761u)^(right*40503u)^((size_key^(size_key>>16u))*97u)^(unsigned)font;
+    FvKern *k=&g_kerns[hash%2048u];
+    if (k->used && k->font==font && k->size_key==size_key && k->left==left && k->right==right) return k->value;
+    float value;
+    if (fv_android_text_available()) value=fv_android_text_kerning(font,pixels,left,right);
+    else if (g_fonts[font].ready) value=(float)stbtt_GetCodepointKernAdvance(&g_fonts[font].info,(int)left,(int)right)*
+        stbtt_ScaleForMappingEmToPixels(&g_fonts[font].info,pixels);
+    else value=0;
+    *k=(FvKern){.used=true,.font=font,.size_key=size_key,.left=left,.right=right,.value=value}; return value;
+}
 /* Glyphs Roboto lacks, drawn as shapes so the Java labels ("▶ FWD", "◀ REV") still render. */
 static bool is_arrow(uint32_t cp) {
     return cp == 0x25B6u || cp == 0x25C0u;
@@ -378,13 +408,16 @@ static float draw_arrow(FvCanvas *c, float size_px, float x, float y, uint32_t c
 
 static float text_impl(FvCanvas *c, int font, float size_px, float x, float y, const char *utf8,
                        uint32_t argb, bool bold, bool draw) {
-    if (!utf8 || !fvg_font_ready(font)) return 0.0f;
+    if (!utf8 || !isfinite(size_px) || size_px<=0 || size_px>512 || !fvg_font_ready(font)) return 0.0f;
+    if (bold && font==FVG_FONT_SANS && fvg_font_ready(FVG_FONT_BOLD)) { font=FVG_FONT_BOLD; bold=false; }
     const float embolden = bold ? fmaxf(1.0f, size_px / 30.0f) : 0.0f;
     float pen = x;
-    const char *s = utf8;
+    const char *s = utf8; uint32_t previous=0;
     while (*s) {
         const uint32_t cp = next_codepoint(&s);
-        if (is_arrow(cp) && stbtt_FindGlyphIndex(&g_fonts[font].info, (int)cp) == 0) {
+        if (previous) pen+=kerning(font,size_px,previous,cp);
+        previous=cp;
+        if (!fv_android_text_available() && g_fonts[font].ready && is_arrow(cp) && stbtt_FindGlyphIndex(&g_fonts[font].info, (int)cp) == 0) {
             pen += draw_arrow(c, size_px, pen, y, cp, argb, draw);
             continue;
         }
@@ -420,11 +453,66 @@ float fvg_text_width(int font, float size_px, const char *utf8, bool bold) {
     return text_impl(NULL, font, size_px, 0.0f, 0.0f, utf8, 0, bold, false);
 }
 
+void fvg_text_elide(int font,float size_px,const char *utf8,float max_width,bool bold,char *out,size_t capacity) {
+    if (!out || !capacity) return;
+    out[0]=0;
+    if (!utf8 || !isfinite(max_width) || max_width<=0 || capacity<4u) return;
+    size_t length=strlen(utf8); bool shortened=length>=capacity;
+    if (length>=capacity) {
+        length=capacity-4u;
+        while (length && (((unsigned char)utf8[length]&0xc0u)==0x80u)) length--;
+    }
+    memcpy(out,utf8,length); out[length]=0;
+    if (!shortened && fvg_text_width(font,size_px,out,bold)<=max_width) return;
+    if (length>capacity-4u) length=capacity-4u;
+    while (length && (((unsigned char)utf8[length]&0xc0u)==0x80u)) length--;
+    for (;;) {
+        memcpy(out+length,"…",4);
+        if (fvg_text_width(font,size_px,out,bold)<=max_width) return;
+        if (!length) { out[0]=0; return; }
+        length--;
+        while (length && (((unsigned char)utf8[length]&0xc0u)==0x80u)) length--;
+    }
+}
+
+void fvg_text_elide_filename(int font,float size_px,const char *name,float max_width,char *out,size_t capacity) {
+    if (!out || !capacity) return;
+    out[0]=0;
+    if (!name) return;
+    const size_t length=strlen(name);
+    if (length<capacity && fvg_text_width(font,size_px,name,false)<=max_width) {
+        memcpy(out,name,length+1u); return;
+    }
+    const char *suffix=strrchr(name,'-');
+    if (!suffix || strlen(suffix)>16u) suffix=strrchr(name,'.');
+    if (!suffix || suffix==name || strlen(suffix)+4u>=capacity) {
+        fvg_text_elide(font,size_px,name,max_width,false,out,capacity); return;
+    }
+    const size_t tail=strlen(suffix);
+    size_t prefix=(size_t)(suffix-name);
+    if (prefix>capacity-tail-4u) prefix=capacity-tail-4u;
+    while (prefix && (((unsigned char)name[prefix]&0xc0u)==0x80u)) prefix--;
+    for (;;) {
+        memcpy(out,name,prefix); memcpy(out+prefix,"…",3); memcpy(out+prefix+3u,suffix,tail+1u);
+        if (fvg_text_width(font,size_px,out,false)<=max_width) return;
+        if (!prefix) { fvg_text_elide(font,size_px,name,max_width,false,out,capacity); return; }
+        prefix--;
+        while (prefix && (((unsigned char)name[prefix]&0xc0u)==0x80u)) prefix--;
+    }
+}
+
 void fvg_text_center(FvCanvas *c, int font, float size_px, float x, float y, float w, float h,
                      const char *utf8, uint32_t argb, bool bold) {
     const float tw = fvg_text_width(font, size_px, utf8, bold);
-    /* Cap height is about 0.7 of the pixel size for Roboto; centre that band in the box. */
-    const float baseline = y + h * 0.5f + size_px * 0.35f;
+    int face=font;
+    if (bold && font==FVG_FONT_SANS && fvg_font_ready(FVG_FONT_BOLD)) face=FVG_FONT_BOLD;
+    float top=0,bottom=0;
+    if (!fv_android_text_metrics(face,size_px,&top,&bottom) && face>=0 && face<FVG_FONT_COUNT && g_fonts[face].ready) {
+        int ascent=0,descent=0,gap=0; stbtt_GetFontVMetrics(&g_fonts[face].info,&ascent,&descent,&gap);
+        const float scale=stbtt_ScaleForMappingEmToPixels(&g_fonts[face].info,size_px);
+        top=-(float)ascent*scale; bottom=-(float)descent*scale;
+    }
+    const float baseline = y + h * 0.5f - (top+bottom)*0.5f;
     fvg_text(c, font, size_px, x + (w - tw) * 0.5f, baseline, utf8, argb, bold);
 }
 

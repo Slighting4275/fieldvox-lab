@@ -21,6 +21,7 @@ Audio comes from broadcast streams or selected WAV files. FieldVox does not use 
 
 ## Camera, sensors, and display
 
+- **Platform typography.** C23 JNI uses Android’s system sans-serif typefaces with real regular, medium, and bold weights. Controls/status labels use 12 sp, small values 8 sp, the controls title 14 sp, and library filenames 16 sp with 11 sp details. Android converts sp using the device’s font settings, including nonlinear scaling. Long filenames are elided at the declared size while retaining their file type and capture suffix; a bounded glyph cache prevents text from disappearing as sizes change.
 - **Screen stays awake in the foreground.** Camera monitoring, controls, recording, and library replay remain visible without the normal display timeout. Leaving the app restores normal timeout behavior; the power button can still lock the phone. Estes mode retains its intentional dark display.
 - Camera2 NDK viewfinder with orientation correction, low-light luma boost, and a stalled-frame watchdog.
 - PHOSPHOR, THERMAL, CYAN, and STEALTH display filters. These are visual treatments of ordinary camera images; THERMAL is a false-color display, not a temperature measurement.
@@ -81,7 +82,7 @@ Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speakin
 
 ## Download the APK
 
-[Download FieldVox Lab 0.5.0-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `7`.
+[Download FieldVox Lab 0.5.1-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `8`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 
@@ -108,13 +109,13 @@ Add `--offline` to the Gradle command when its dependencies are already cached. 
 
 ## Verification
 
-Run the host C23 unit, recording, fragment-engine, and simulator smoke tests:
+Run the host C23 unit, recording, fragment-engine, typography, and simulator smoke tests:
 
 ```bash
 make -C source test
 ```
 
-The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, paired-source persistence, descriptor ownership, backend rejection, regional language selection, and invalid inputs. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
+The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, paired-source persistence, descriptor ownership, backend rejection, regional language selection, and invalid inputs. Typography tests use the installed sans font reported by `fc-match`; set `TYPOGRAPHY_FONT=/path/to/font.ttf` when needed. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
 
 Inspect a connected device and follow runtime diagnostics:
 
@@ -134,6 +135,7 @@ Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's ac
 | --- | --- |
 | `fieldvox_native_activity.c` | Activity lifecycle, controls, camera HUD, sensors, audio integration, and recording. |
 | `fv_native_radio.c` | Bounded on-demand HTTP clip fetches, compressed-source ownership, cancellation and native decoding. |
+| `fv_android_text.c`, `fv_gfx.c` | Platform typeface rasterization through C JNI, sp conversion, metrics, and bounded text caches. |
 | `fv_platform_voices.c` | C JNI Android players, pitch/speed, platform reverb, finite echo scheduling and playback deadlines. |
 | `fv_fragment_engine.c` | Fragment selection, independent pitch/tempo, voice slots, finite echoes, reverb, and static. |
 | `fv_station_policy.c` | Language filtering and shuffled ten-station groups. |

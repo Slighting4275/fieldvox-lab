@@ -22,6 +22,7 @@ add_library(
     fv_native_camera.c
     fv_native_video_recorder.c
     fv_gfx.c
+    fv_android_text.c
     fv_grain_gate.c
     fv_hit_capture.c
     fv_vox_controls.c
@@ -53,6 +54,7 @@ target_link_libraries(
     fieldvox_native
     android
     log
+    jnigraphics
     aaudio
     camera2ndk
     mediandk

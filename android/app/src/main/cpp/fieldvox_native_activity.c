@@ -26,6 +26,7 @@
 
 #include "fv_core.h"
 #include "fv_gfx.h"
+#include "fv_android_text.h"
 #include "fv_grain_gate.h"
 #include "fv_hit_capture.h"
 #include "fv_vox_controls.h"
@@ -110,6 +111,7 @@ typedef struct {
     ANativeWindow *window;
     AInputQueue *input_queue;
     float density;
+    FvTextScale text_scale;
 
     pthread_t render_thread, sensor_thread, audio_thread, input_thread, camera_thread;
     bool render_thread_started, sensor_thread_started, audio_thread_started;
@@ -266,9 +268,11 @@ typedef struct {
     float scroll;   /* content -> screen offset */
     float x0, w;    /* content column */
     WidgetRect *rects;
+    const FvTextScale *text_scale;
 } Ui;
 
-static float sp(const Ui *ui, float v) { return v * ui->d; }
+static float dp(const Ui *ui, float v) { return v * ui->d; }
+static float text_sp(const Ui *ui,float v) { return fv_text_sp(ui->text_scale,v); }
 
 /* Largest font size <= size_px that fits `max_w`. */
 static float fit_size(int font, float size_px, const char *text, float max_w, bool bold) {
@@ -295,13 +299,13 @@ typedef struct {
 static const PillStyle PILL_IDLE = {0xE8181818, 0xFF555555, 0xFFEAEAEA};
 static const PillStyle PILL_ACTIVE = {0xFFF0F0F0, 0xFFFFFFFF, 0xFF111111};
 
-/* Java makePillButton: 34 dp tall, 8 dp radius, 10 sp bold label. */
+/* Action labels use platform medium weight at 14 sp; geometry remains dp. */
 static void draw_pill(Ui *ui, WidgetId id, float x, float y, float w, float h, const char *label, PillStyle st) {
     place(ui, id, x, y, w, h);
     const float sy = y - ui->scroll;
-    fvg_round_rect(ui->c, x, sy, w, h, sp(ui, 8), st.bg, st.stroke, fmaxf(1.0f, sp(ui, 1)));
-    const float size = fit_size(FVG_FONT_SANS, sp(ui, 10.5f), label, w - sp(ui, 6), true);
-    fvg_text_center(ui->c, FVG_FONT_SANS, size, x, sy, w, h, label, st.text, true);
+    fvg_round_rect(ui->c, x, sy, w, h, dp(ui, 8), st.bg, st.stroke, fmaxf(1.0f, dp(ui, 1)));
+    const float size = fit_size(FVG_FONT_MEDIUM, text_sp(ui,14.0f), label, w - dp(ui, 6), false);
+    fvg_text_center(ui->c, FVG_FONT_MEDIUM, size, x, sy, w, h, label, st.text, false);
 }
 
 /* Java LogoGlyphView: sensor ring, compass ticks, waveform core, antenna spine and field dots. */
@@ -309,8 +313,8 @@ static void __attribute__((unused)) draw_logo(Ui *ui, float cx, float cy, float 
     static const float amps[9] = {0.10f, -0.34f, 0.22f, -0.52f, 0.50f, -0.20f, 0.35f, -0.12f, 0.08f};
     FvCanvas *c = ui->c;
     const float r = size * 0.36f;
-    const float stroke = fmaxf(1.5f, sp(ui, 2.0f));
-    const float soft = fmaxf(1.0f, sp(ui, 1.0f));
+    const float stroke = fmaxf(1.5f, dp(ui, 2.0f));
+    const float soft = fmaxf(1.0f, dp(ui, 1.0f));
     const uint32_t white = 0xFFFFFFFF, soft_col = 0x6EFFFFFF;
     fvg_circle(c, cx, cy, r, 0, white, stroke);
     fvg_circle(c, cx, cy, r * 0.63f, 0, soft_col, soft);
@@ -381,8 +385,8 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
     draw_pill(ui, W_VIS_PREV, x+2.0f*d, y+(h-arrow_h)*0.5f, 34.0f*d, arrow_h, "<", PILL_IDLE);
     draw_pill(ui, W_VIS_NEXT, x+w-36.0f*d, y+(h-arrow_h)*0.5f, 34.0f*d, arrow_h, ">", PILL_IDLE);
     const float footer_h = 30.0f*d, footer_y = y+h-footer_h-2.0f*d;
-    fvg_text_center(c, FVG_FONT_SANS, 10.0f*d, x+inset, footer_y, plot_w*0.60f, footer_h,
-                    visualizer_names[s->visualizer_style % 3], color, true);
+    fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), x+inset, footer_y, plot_w*0.60f, footer_h,
+                    visualizer_names[s->visualizer_style % 3], color, false);
     draw_pill(ui, W_VIS_COLOR, x+inset+plot_w*0.62f, footer_y, plot_w*0.38f, footer_h,
               visualizer_color_names[s->visualizer_color % 4], PILL_IDLE);
 }
@@ -449,7 +453,7 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
     const float help_w = 32.0f*d, torch_w = 54.0f*d, mute_w = 56.0f*d;
     const float help_x = x+w-help_w, torch_x = help_x-gap-torch_w, mute_x = torch_x-gap-mute_w;
     const float title_w = fmaxf(30.0f*d, mute_x-x-8.0f*d);
-    const float title_size = fit_size(FVG_FONT_SANS, 18.0f*d, "FIELDVOX", title_w, true);
+    const float title_size = fit_size(FVG_FONT_SANS, text_sp(ui,16.0f), "FIELDVOX", title_w, true);
     fvg_text_center(c, FVG_FONT_SANS, title_size, x+4.0f*d, y, title_w, row_h, "FIELDVOX", 0xFFFFFFFF, true);
     draw_pill(ui, W_MUTE, mute_x, y, mute_w, row_h, s->audio_muted ? "MUTED" : "MUTE",
               s->audio_muted ? PILL_ACTIVE : PILL_IDLE);
@@ -465,7 +469,7 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
                  !s->sweep_active ? "PAUSED" : (s->carrier_station >= 0 ? station_at(s->carrier_station)->callsign : (s->local_only ? "WAV / CACHE" : "CONNECTING")),
                  s->voice_detected ? "  |  SPEAKING MUTE" : "");
     }
-    const float size = fit_size(FVG_FONT_SANS, 10.5f*d, detail, w-16.0f*d, false);
+    const float size = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), detail, w-16.0f*d, false);
     fvg_text_center(c, FVG_FONT_SANS, size, x+8.0f*d, y+row_h, w-16.0f*d, h-row_h, detail,
                     s->video_recording_active && (now/500L)%2 == 0 ? 0xFFFF6677 : 0xFFE0E0E0, false);
 }
@@ -492,8 +496,8 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
     snprintf(emf_str, sizeof(emf_str), "EMF %.1f µT %s%s", s->emf_magnitude, preset_str,
              cal ? " [OK]" : (s->emf_spike ? " [!]" : ""));
     const uint32_t emf_text_col = s->emf_spike ? 0xFFFF5252 : (cal ? 0xFF00E676 : 0xFFFFFFFF);
-    const float es = fit_size(FVG_FONT_SANS, 10.0f * d, emf_str, half_w * 0.65f, true);
-    fvg_text(c, FVG_FONT_SANS, es, lx + 8.0f * d, y + h * 0.65f, emf_str, emf_text_col, true);
+    const float es = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), emf_str, half_w * 0.65f, false);
+    fvg_text(c, FVG_FONT_SANS, es, lx + 8.0f * d, y + h * 0.65f, emf_str, emf_text_col, false);
 
     /* 5-LED dynamic indicator inside the EMF badge */
     const int leds = 5;
@@ -545,8 +549,8 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
     }
 
     fvg_round_rect(c, rx, y, half_w, h, 6.0f * d, tel_bg, tel_stroke, fmaxf(1.0f, d));
-    const float ts = fit_size(FVG_FONT_SANS, 10.5f * d, telem, half_w - 12.0f * d, true);
-    fvg_text_center(c, FVG_FONT_SANS, ts, rx, y, half_w, h, telem, tel_text, true);
+    const float ts = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), telem, half_w - 12.0f * d, false);
+    fvg_text_center(c, FVG_FONT_SANS, ts, rx, y, half_w, h, telem, tel_text, false);
 }
 
 /* FieldVox style camera dock with prominent circular record shutter button */
@@ -575,7 +579,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         const uint32_t b1_bg = 0xC0181818;
         const uint32_t b1_stroke = 0x77FFFFFF;
         fvg_round_rect(c, b1_x, btn_y, btn_w, btn_h, 10.0f * d, b1_bg, b1_stroke, fmaxf(1.0f, 1.2f * d));
-        fvg_text_center(c, FVG_FONT_SANS, fit_size(FVG_FONT_SANS, 10.5f*d, "LIBRARY", btn_w-8.0f*d, true),
+        fvg_text_center(c, FVG_FONT_SANS, fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), "LIBRARY", btn_w-8.0f*d, true),
                         b1_x, btn_y, btn_w, btn_h, "LIBRARY", 0xFFFFFFFF, true);
 
         /* Button 2: W_MARK_HIT (Pre-Roll Lossless Audio Capture) */
@@ -588,7 +592,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         } else {
             snprintf(hit_lbl, sizeof(hit_lbl), "MARK HIT");
         }
-        const float s2 = fit_size(FVG_FONT_SANS, 11.0f * d, hit_lbl, btn_w - 6.0f * d, true);
+        const float s2 = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), hit_lbl, btn_w - 6.0f * d, true);
         fvg_text_center(c, FVG_FONT_SANS, s2, b2_x, btn_y, btn_w, btn_h, hit_lbl, 0xFFFFD180, true);
     }
 
@@ -612,7 +616,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
             /* Subtle glossy 3D sheen */
             fvg_circle(c, cx, cy - r_inner * 0.35f, r_inner * 0.45f, 0x22FFFFFF, 0, 0);
             /* Centered white text label */
-            fvg_text_center(c, FVG_FONT_SANS, 10.5f * d, cx - r_inner, cy - r_inner,
+            fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), cx - r_inner, cy - r_inner,
                             r_inner * 2.0f, r_inner * 2.0f, "REC", 0xFFFFFFFF, true);
         } else {
             /* RECORDING STATE: Pulsating red aura, morphing into rounded red stop square */
@@ -634,7 +638,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
             const float sq_rad = 5.0f * d;
             fvg_round_rect(c, cx - sq_half, cy - sq_half, sq_size, sq_size, sq_rad,
                            0xFFFF1744, 0xFFFFFFFF, fmaxf(1.5f, 2.0f * d));
-            fvg_text_center(c, FVG_FONT_SANS, 9.5f * d, cx - sq_half, cy - sq_half,
+            fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), cx - sq_half, cy - sq_half,
                             sq_size, sq_size, "STOP", 0xFFFFFFFF, true);
         }
     }
@@ -649,7 +653,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         char lens_name[32];
         const char *fname = fv_camera_filter_name(s->cam_filter);
         snprintf(lens_name, sizeof(lens_name), "%s", fname);
-        const float s3 = fit_size(FVG_FONT_SANS, 10.5f * d, lens_name, btn_w - 6.0f * d, true);
+        const float s3 = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), lens_name, btn_w - 6.0f * d, true);
         fvg_text_center(c, FVG_FONT_SANS, s3, b3_x, btn_y, btn_w, btn_h, lens_name, 0xFFFFFFFF, true);
 
         /* Button 4: W_CTRL (DSP & Paranormal Settings Drawer) */
@@ -658,8 +662,8 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         const uint32_t b4_bg = s->controls_visible ? 0xDD280A35 : 0xC0181818;
         fvg_round_rect(c, b4_x, btn_y, btn_w, btn_h, 10.0f * d, b4_bg, 0xFFAAAAAA, fmaxf(1.0f, 1.2f * d));
         const char *b4_label = s->controls_visible ? "CLOSE" : "CONTROLS";
-        const float s4 = fit_size(FVG_FONT_SANS, 10.5f * d, b4_label, btn_w - 6.0f * d, true);
-        fvg_text_center(c, FVG_FONT_SANS, s4, b4_x, btn_y, btn_w, btn_h, b4_label, 0xFFFFFFFF, true);
+        const float s4 = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), b4_label, btn_w - 6.0f * d, true);
+        fvg_text_center(c, FVG_FONT_SANS, s4, b4_x, btn_y, btn_w, btn_h, b4_label, 0xFFFFFFFF, false);
     }
 }
 
@@ -667,8 +671,8 @@ static void draw_level_slider(Ui *ui, WidgetId id, float x, float y, float w, fl
                               const char *label, int level, const char *value) {
     const float d = ui->d;
     place(ui, id, x, y, w, h);
-    fvg_text(ui->c, FVG_FONT_SANS, 11.5f*d, x+8.0f*d, y+h*0.38f, label, 0xFFFFFFFF, true);
-    fvg_text_center(ui->c, FVG_FONT_MONO, 10.0f*d, x+w*0.70f, y, w*0.30f, h*0.45f, value, 0xFFCCCCCC, false);
+    fvg_text(ui->c, FVG_FONT_SANS, text_sp(ui,12.0f), x+8.0f*d, y+h*0.38f, label, 0xFFFFFFFF, false);
+    fvg_text_center(ui->c, FVG_FONT_SANS, text_sp(ui,8.0f), x+w*0.70f, y, w*0.30f, h*0.45f, value, 0xFFCCCCCC, false);
     const float left = x+w*0.12f, right = x+w*0.88f, line_y = y+h*0.72f;
     const float knob = left+(right-left)*(float)level/100.0f;
     fvg_line(ui->c, left, line_y, right, line_y, 2.0f*d, 0xFF444444);
@@ -679,8 +683,8 @@ static void draw_level_slider(Ui *ui, WidgetId id, float x, float y, float w, fl
 static void draw_vox_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h) {
     const float d = ui->d;
     fvg_round_rect(ui->c, x, y, w, h, 16.0f*d, 0xF50D0D0D, 0xFF666666, d);
-    fvg_text_center(ui->c, FVG_FONT_SANS, 15.0f*d, x, y+4.0f*d, w-44.0f*d, 32.0f*d,
-                    "FIELDVOX • AUDIO CONTROLS", 0xFFFFFFFF, true);
+    fvg_text_center(ui->c, FVG_FONT_SANS, text_sp(ui,14.0f), x, y+4.0f*d, w-44.0f*d, 32.0f*d,
+                    "FIELDVOX • AUDIO CONTROLS", 0xFFFFFFFF, false);
     draw_pill(ui, W_CLOSE_DRAWER, x+w-42.0f*d, y+4.0f*d, 36.0f*d, 32.0f*d, "X", PILL_IDLE);
     const bool wide = w>600.0f*d;
     const float row = (h-44.0f*d)/(wide ? 4.0f : 6.0f);
@@ -721,7 +725,7 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
     /* Drawer Header */
     const float header_h = 28.0f * d;
     const char *header = "ADVANCED • TAP TITLE FOR AUDIO";
-    fvg_text_center(c, FVG_FONT_SANS, 12.0f * d, x, y + 2.0f * d, w, header_h, header, 0xFF6FE7FF, true);
+    fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), x, y + 2.0f * d, w, header_h, header, 0xFF6FE7FF, true);
 
     place(ui, W_ADVANCED, x, y, w-48.0f*d, header_h);
     /* Close Button in Header */
@@ -837,7 +841,7 @@ static void draw_help_overlay(Ui *ui, float screen_h) {
     const float y = (screen_h - h) * 0.5f;
     fvg_fill_rect(c, 0, 0, (float)c->w, screen_h, 0xB8000000);
     fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xF70A121C, 0xFF6FE7FF, fmaxf(1.0f, 1.5f * d));
-    fvg_text_center(c, FVG_FONT_SANS, 17.0f * d, x, y + 8.0f * d, w, 30.0f * d,
+    fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,16.0f), x, y + 8.0f * d, w, 30.0f * d,
                     "FIELDVOX QUICK GUIDE", 0xFFFFFFFF, true);
     const char *lines[] = {
         "REC: start or stop an H.264/AAC evidence video",
@@ -853,7 +857,7 @@ static void draw_help_overlay(Ui *ui, float screen_h) {
     float ly = y + 52.0f * d;
     for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {
         fvg_circle(c, x + 16.0f * d, ly - 3.0f * d, 2.3f * d, 0xFFEAEAEA, 0, 0);
-        const float fs = fit_size(FVG_FONT_SANS, 11.0f * d, lines[i], w - 38.0f * d, false);
+        const float fs = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), lines[i], w - 38.0f * d, false);
         fvg_text(c, FVG_FONT_SANS, fs, x + 26.0f * d, ly, lines[i], 0xFFE0E0E0, false);
         ly += 32.0f * d;
     }
@@ -869,9 +873,9 @@ static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, float screen_h) 
     const float h=fminf(screen_h-92.0f*d,390.0f*d),y=(screen_h-h)*0.5f;
     fvg_fill_rect(c,0,0,(float)c->w,screen_h,0xD0000000);
     fvg_round_rect(c,x,y,w,h,14.0f*d,0xFA101010,0xFF888888,d);
-    fvg_text(c,FVG_FONT_SANS,16.0f*d,x+14.0f*d,y+29.0f*d,"LOCAL RECORDINGS",0xFFFFFFFF,true);
+    fvg_text(c,FVG_FONT_SANS, text_sp(ui,16.0f),x+14.0f*d,y+29.0f*d,"LOCAL RECORDINGS",0xFFFFFFFF,true);
     draw_pill(ui,W_CLOSE_EVIDENCE,x+w-48.0f*d,y+9.0f*d,38.0f*d,25.0f*d,"X",PILL_IDLE);
-    fvg_text(c,FVG_FONT_SANS,9.5f*d,x+14.0f*d,y+48.0f*d,
+    fvg_text(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+14.0f*d,y+48.0f*d,
               s->recording_active || s->video_recording_active ? "Stop recording before replaying saved media" : "Saved on this phone • play without internet",0xFFBBBBBB,false);
     const float row_x=x+12.0f*d,row_w=w-24.0f*d,row_h=fminf(58.0f*d,(h-132.0f*d)/4.0f);
     float row_y=y+62.0f*d;
@@ -879,21 +883,25 @@ static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, float screen_h) 
         const EvidenceEntry *entry=&s->evidence[i];const bool video=strcmp(entry->mime,"video/mp4")==0;
         fvg_round_rect(c,row_x,row_y,row_w,row_h,8.0f*d,0xEE191919,0xFF444444,d);
         const float tag_w=44.0f*d,open_w=54.0f*d,text_x=row_x+58.0f*d,text_w=row_w-188.0f*d;
-        fvg_text_center(c,FVG_FONT_SANS,11.0f*d,row_x+6.0f*d,row_y,tag_w,row_h,video ? "MP4" : "WAV",0xFFE0E0E0,true);
-        fvg_text(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS,10.5f*d,entry->name,text_w,true),text_x,row_y+row_h*0.40f,entry->name,0xFFFFFFFF,true);
-        fvg_text(c,FVG_FONT_MONO,fit_size(FVG_FONT_MONO,9.0f*d,entry->detail,text_w,false),text_x,row_y+row_h*0.76f,entry->detail,0xFFBBBBBB,false);
+        fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x+6.0f*d,row_y,tag_w,row_h,video ? "MP4" : "WAV",0xFFE0E0E0,true);
+        char name[sizeof(entry->name)+4u];
+        fvg_text_elide_filename(FVG_FONT_SANS,text_sp(ui,16.0f),entry->name,text_w,name,sizeof(name));
+        fvg_text(c,FVG_FONT_SANS,text_sp(ui,16.0f),text_x,row_y+row_h*0.40f,name,0xFFFFFFFF,false);
+        char detail[sizeof(entry->detail)+4u];
+        fvg_text_elide(FVG_FONT_SANS,text_sp(ui,11.0f),entry->detail,text_w,false,detail,sizeof(detail));
+        fvg_text(c,FVG_FONT_SANS,text_sp(ui,11.0f),text_x,row_y+row_h*0.76f,detail,0xFFBBBBBB,false);
         if (!video) draw_pill(ui,(WidgetId)(W_EVIDENCE_BANK_0+i),row_x+row_w-2.0f*open_w-12.0f*d,row_y+8.0f*d,open_w,row_h-16.0f*d,"BANK",PILL_IDLE);
         draw_pill(ui,(WidgetId)(W_EVIDENCE_OPEN_0+i),row_x+row_w-open_w-8.0f*d,row_y+8.0f*d,open_w,row_h-16.0f*d,"PLAY",PILL_ACTIVE);
         row_y+=row_h+5.0f*d;
     }
-    if (!s->evidence_count) fvg_text_center(c,FVG_FONT_SANS,12.0f*d,row_x,row_y+30.0f*d,row_w,45.0f*d,"No saved recordings yet",0xFFBBBBBB,false);
+    if (!s->evidence_count) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x,row_y+30.0f*d,row_w,45.0f*d,"No saved recordings yet",0xFFBBBBBB,false);
     const float footer=y+h-48.0f*d,bw=(row_w-12.0f*d)/3.0f;
     draw_pill(ui,W_LIBRARY_PREV,row_x,footer,bw,34.0f*d,"< PREV",PILL_IDLE);
     draw_pill(ui,W_LIBRARY_REFRESH,row_x+bw+6.0f*d,footer,bw,34.0f*d,"REFRESH",PILL_IDLE);
     draw_pill(ui,W_LIBRARY_NEXT,row_x+2.0f*(bw+6.0f*d),footer,bw,34.0f*d,"NEXT >",PILL_IDLE);
     char count[96];const size_t pages=(s->evidence_total+EVIDENCE_MAX-1)/EVIDENCE_MAX;
     snprintf(count,sizeof(count),"Page %zu / %zu • %zu recordings",pages ? s->evidence_page+1 : 0,pages,s->evidence_total);
-    fvg_text_center(c,FVG_FONT_SANS,9.0f*d,row_x,footer-20.0f*d,row_w,18.0f*d,count,0xFFBBBBBB,false);
+    fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x,footer-20.0f*d,row_w,18.0f*d,count,0xFFBBBBBB,false);
 }
 
 static void playback_time(char *out,size_t capacity,int64_t ms) {
@@ -907,17 +915,17 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
     fvg_clear(c,0xFF080808);
     draw_pill(ui,W_PLAY_BACK,x,top,80.0f*d,34.0f*d,"< LIBRARY",PILL_IDLE);
     draw_pill(ui,W_PLAY_MUTE,x+w-64.0f*d,top,64.0f*d,34.0f*d,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
-    fvg_text_center(c,FVG_FONT_SANS,13.0f*d,x+84.0f*d,top,w-152.0f*d,34.0f*d,"LOCAL PLAYBACK",0xFFFFFFFF,true);
-    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS,12.0f*d,p->name,w,false),x,top+38.0f*d,w,25.0f*d,p->name,0xFFDDDDDD,false);
+    fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+84.0f*d,top,w-152.0f*d,34.0f*d,"LOCAL PLAYBACK",0xFFFFFFFF,true);
+    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),p->name,w,false),x,top+38.0f*d,w,25.0f*d,p->name,0xFFDDDDDD,false);
     const float buttons_y=height-bottom-90.0f*d;
     const float wave_h=(landscape ? 56.0f : 100.0f)*d;
     const float wave_y=buttons_y-wave_h-42.0f*d;
     const float preview_y=top+70.0f*d,preview_h=fmaxf(0.0f,wave_y-preview_y-8.0f*d);
     if (p->video) {
         fv_local_player_draw_video(c,x,preview_y,w,preview_h);
-        if (!p->video_frames && !p->error) fvg_text_center(c,FVG_FONT_SANS,12.0f*d,x,preview_y,w,preview_h,"Loading local video…",0xFFAAAAAA,false);
+        if (!p->video_frames && !p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,preview_y,w,preview_h,"Loading local video…",0xFFAAAAAA,false);
     } else {
-        fvg_text_center(c,FVG_FONT_SANS,(landscape ? 16.0f : 26.0f)*d,x,preview_y,w,preview_h,p->error ? "RECORDING UNAVAILABLE" : "SAVED AUDIO",0xFFDDDDDD,true);
+        fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,landscape ? 16.0f : 20.0f),x,preview_y,w,preview_h,p->error ? "RECORDING UNAVAILABLE" : "SAVED AUDIO",0xFFDDDDDD,true);
     }
     fvg_round_rect(c,x,wave_y,w,wave_h,8.0f*d,0xFF141414,0xFF444444,d);
     place(ui,W_PLAY_SEEK,x,wave_y,w,wave_h);
@@ -929,7 +937,7 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
             const float amplitude=p->waveform[i]*wave_h*0.45f;
             fvg_line(c,x+((float)i+0.5f)*step,mid-amplitude,x+((float)i+0.5f)*step,mid+amplitude,fmaxf(d,step*0.65f),0xFFCCCCCC);
         }
-    } else if (!p->error) fvg_text_center(c,FVG_FONT_SANS,10.0f*d,x,wave_y,w,wave_h,"Decoding local waveform…",0xFFBBBBBB,false);
+    } else if (!p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,wave_y,w,wave_h,"Decoding local waveform…",0xFFBBBBBB,false);
     if (p->duration_ms>0) {
         for (size_t i=0;i<p->bookmark_count;i++) {
             const float bx=x+w*(float)((double)p->bookmarks[i]/(double)p->duration_ms);
@@ -941,11 +949,11 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
     char elapsed[40],duration[40],clock[96];
     playback_time(elapsed,sizeof(elapsed),p->position_ms);playback_time(duration,sizeof(duration),p->duration_ms);
     snprintf(clock,sizeof(clock),"%s / %s",elapsed,duration);
-    fvg_text_center(c,FVG_FONT_MONO,11.0f*d,x,wave_y+wave_h,w,20.0f*d,clock,0xFFFFFFFF,false);
+    fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,wave_y+wave_h,w,20.0f*d,clock,0xFFFFFFFF,false);
     char status[160];
     if (p->ready) snprintf(status,sizeof(status),"On this phone • drag waveform to seek • %zu bookmarks",p->bookmark_count);
     else snprintf(status,sizeof(status),"%s",p->status);
-    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS,9.0f*d,status,w,false),x,buttons_y-21.0f*d,w,20.0f*d,status,p->error ? 0xFFFF7777 : 0xFFBBBBBB,false);
+    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),status,w,false),x,buttons_y-21.0f*d,w,20.0f*d,status,p->error ? 0xFFFF7777 : 0xFFBBBBBB,false);
     const float gap=5.0f*d,bw=(w-3.0f*gap)/4.0f;
     const WidgetId ids[]={W_PLAY_REWIND_10,W_PLAY_REWIND_5,W_PLAY_TOGGLE,W_PLAY_FORWARD_5};
     const char *labels[]={"-10 SEC","-5 SEC",p->playing ? "PAUSE" : "PLAY","+5 SEC"};
@@ -958,15 +966,15 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
 
 static void draw_estes(FvCanvas *c, float d, const FieldVoxApp *s, int w, int h) {
     fvg_clear(c, 0xFF000000);
-    fvg_text_center(c, FVG_FONT_SANS, 26 * d, 0, (float)h * 0.40f, (float)w, 40 * d, "ESTES PROTOCOL", 0xFF881111, true);
+    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,20), 0, (float)h * 0.40f, (float)w, 40 * d, "ESTES PROTOCOL", 0xFF881111, true);
     char hits[64];
     snprintf(hits, sizeof(hits), "Hits logged: %d", s->estes_hit_count);
-    fvg_text_center(c, FVG_FONT_SANS, 16 * d, 0, (float)h * 0.40f + 48 * d, (float)w, 30 * d, hits, 0xFF2A6A78, false);
-    fvg_text_center(c, FVG_FONT_SANS, 13 * d, 0, (float)h - 90 * d, (float)w, 30 * d, "Tap anywhere to log a hit",
+    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,16), 0, (float)h * 0.40f + 48 * d, (float)w, 30 * d, hits, 0xFF2A6A78, false);
+    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,12), 0, (float)h - 90 * d, (float)w, 30 * d, "Tap anywhere to log a hit",
                     0xFF3A3A3A, false);
     const float bw = 150 * d, bh = 44 * d, bx = (float)w - bw - 16 * d, by = 60 * d;
     fvg_round_rect(c, bx, by, bw, bh, 10 * d, 0xFF210707, 0xFF661111, d);
-    fvg_text_center(c, FVG_FONT_SANS, 13 * d, bx, by, bw, bh, "EXIT ESTES", 0xFFAA2222, true);
+    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,14), bx, by, bw, bh, "EXIT ESTES", 0xFFAA2222, true);
 }
 
 /* Estes exit box, in screen coordinates (matches draw_estes). */
@@ -1002,7 +1010,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
 
     WidgetRect rects[W_COUNT];
     memset(rects, 0, sizeof(rects));
-    Ui ui = {&canvas, d, 0.0f, side_inset, (float)w - 2.0f * side_inset, rects};
+    Ui ui = {&canvas, d, 0.0f, side_inset, (float)w - 2.0f * side_inset, rects, &s.text_scale};
 
     if (s.playback_visible) {
         FvLocalPlayerSnapshot playback;
@@ -1039,7 +1047,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
             snprintf(status_line, sizeof(status_line), "%s • %s",
                      s.local_only ? "LOCAL" : "LIVE", s.local_only ? "Choose a WAV with BANK in LIBRARY" : "waiting for a sensor fragment…");
         }
-        const float ss = fit_size(FVG_FONT_SANS, (landscape ? 9.5f : 11.0f) * d, status_line, ui.w, false);
+        const float ss = fit_size(FVG_FONT_SANS, text_sp(&ui,12.0f), status_line, ui.w, false);
         fvg_text_center(&canvas, FVG_FONT_SANS, ss, ui.x0, status_y, ui.w, status_h, status_line, 0xFFFFE6A0, false);
     }
 
@@ -1083,7 +1091,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
         const float pulse = 0.5f + 0.5f * sinf((float)(now % 650L) * (2.0f * (float)M_PI / 650.0f));
         const uint32_t stroke = ((uint32_t)(150.0f + pulse * 105.0f) << 24) | 0x00FFD600;
         fvg_round_rect(&canvas, hx, hy, hw, hh, 10.0f * d, 0xE82B1D05, stroke, 2.0f * d);
-        fvg_text_center(&canvas, FVG_FONT_SANS, 14.0f * d, hx, hy, hw, hh, hit_text, 0xFFFFE082, true);
+        fvg_text_center(&canvas, FVG_FONT_SANS, text_sp(&ui,14.0f), hx, hy, hw, hh, hit_text, 0xFFFFE082, true);
     }
 
     /* Modal overlays are drawn last and their touch handlers mask everything beneath. */
@@ -1126,6 +1134,7 @@ static void *render_thread_func(void *arg) {
         pthread_mutex_unlock(&g_render_mutex);
         usleep(33333); // ~30 FPS
     }
+    fvg_text_shutdown();
     return NULL;
 }
 
@@ -2382,6 +2391,7 @@ static void onNativeWindowCreated(ANativeActivity *activity, ANativeWindow *wind
     const float density = read_density(activity);
     pthread_mutex_lock(&g_state_mutex);
     g_app.density = density;
+    g_app.text_scale = fv_android_text_scale(activity->clazz,density);
     pthread_mutex_unlock(&g_state_mutex);
     LOGI("ANativeWindow created: %dx%d density=%.2f", ANativeWindow_getWidth(window), ANativeWindow_getHeight(window),
          density);
@@ -2401,6 +2411,7 @@ static void onConfigurationChanged(ANativeActivity *activity) {
     const float density = read_density(activity);
     pthread_mutex_lock(&g_state_mutex);
     g_app.density = density;
+    g_app.text_scale = fv_android_text_scale(activity->clazz,density);
     g_app.scroll_y = 0.0f;
     pthread_mutex_unlock(&g_state_mutex);
 }
@@ -2497,7 +2508,9 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     atomic_init(&g_app.running, true);
     atomic_init(&g_app.resumed, true);
     atomic_init(&g_app.mark_hit_requests, 0u);
+    fv_android_text_set_vm(activity->vm);
     g_app.density = read_density(activity);
+    g_app.text_scale = fv_android_text_scale(activity->clazz,g_app.density);
     g_app.accel_gz = 9.81f;
     g_app.emf_baseline = -1.0f;
     g_app.gyro_baseline = -1.0f;
@@ -2527,6 +2540,10 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
         fvg_font_load(FVG_FONT_MONO, "/system/fonts/RobotoStatic-Regular.ttf");
     }
 
+    if (!fvg_font_load(FVG_FONT_MEDIUM,"/system/fonts/Roboto-Medium.ttf"))
+        fvg_font_load(FVG_FONT_MEDIUM,"/system/fonts/RobotoStatic-Regular.ttf");
+    if (!fvg_font_load(FVG_FONT_BOLD,"/system/fonts/Roboto-Bold.ttf"))
+        fvg_font_load(FVG_FONT_BOLD,"/system/fonts/RobotoStatic-Regular.ttf");
     const int valid_blob = fv_verify_blob_checksum(FV_STATION_PLAN_BINARY_DATA, sizeof(FV_STATION_PLAN_BINARY_DATA));
     LOGI("Verified C23 Binary Station Blob: %s (%u stations)", valid_blob ? "VALID" : "INVALID",
          (unsigned)FV_STATION_BLOB_COUNT);

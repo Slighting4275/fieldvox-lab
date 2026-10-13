@@ -3308,6 +3308,11 @@ static void stbtt__rasterize_sorted_edges(stbtt__bitmap *result, stbtt__edge *e,
    else
       scanline = scanline_data;
 
+   if (scanline == NULL) {
+      for (j = 0; j < result->h; ++j)
+         STBTT_memset(result->pixels + j * result->stride, 0, result->w);
+      return;
+   }
    scanline2 = scanline + result->w;
 
    y = off_y;
