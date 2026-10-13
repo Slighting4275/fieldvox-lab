@@ -11,6 +11,12 @@
 #endif
 
 #ifdef FIELDVOX_ENABLE_LEGACY_JNI
+#ifndef JNIEXPORT
+#define JNIEXPORT
+#endif
+#ifndef JNICALL
+#define JNICALL
+#endif
 #include <jni.h>
 #include <aaudio/AAudio.h>
 #include <android/log.h>
@@ -607,8 +613,10 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1SCNoteLegacyCarrierBlocked(JNIEnv
 
 // NATIVE AUDIO DSP & SPECTROGRAM ENGINE (C)
 // Full Suite: 256-point FFT waterfall, Schroeder Reverb, Granular Pitch Shift, Pre-roll Ring Buffer
-#define FV_DSP_ECHO_DELAY_SAMPLES (48000 * 150 / 1000) // 7200 samples (150ms @ 48kHz)
-static int16_t s_native_echo_buffer[FV_DSP_ECHO_DELAY_SAMPLES];
+#define FV_DSP_ECHO_MAX_INTERVAL_SAMPLES (48000 * 200 / 1000) // 9600 samples (200ms @ 48kHz)
+#define FV_DSP_ECHO_BUFFER_SAMPLES (FV_DSP_ECHO_MAX_INTERVAL_SAMPLES * 3) // 28800 samples (600ms @ 48kHz)
+#define FV_DSP_ECHO_DEFAULT_INTERVAL_SAMPLES (48000 * 150 / 1000) // 7200 samples (150ms @ 48kHz)
+static int16_t s_native_echo_buffer[FV_DSP_ECHO_BUFFER_SAMPLES];
 static uint32_t s_native_echo_index = 0;
 static uint64_t s_native_noise_prng = 0x854351239ULL;
 
@@ -618,13 +626,20 @@ static uint64_t s_native_noise_prng = 0x854351239ULL;
 static int16_t s_preroll_ring[FV_PREROLL_SAMPLES];
 static uint32_t s_preroll_write = 0;
 
-/* Schroeder Reverb (4 parallel comb filters + 2 series allpass filters) */
+/* Schroeder reverb (native environmental reverb approximation):
+ * - 50 ms pre-delay ring buffer (2400 samples @ 48kHz)
+ * - 4 parallel comb filters (density = 1000, decay = 9000ms * mix)
+ * - 2 series allpass filters (diffusion = 1000 * mix)
+ */
+#define FV_REV_PREDELAY_SAMPLES (48000 * 50 / 1000) // 2400 samples (50ms @ 48kHz)
 #define FV_REV_C1 1399
 #define FV_REV_C2 1777
 #define FV_REV_C3 1973
 #define FV_REV_C4 2087
 #define FV_REV_A1 241
 #define FV_REV_A2 83
+static int16_t s_rev_predelay[FV_REV_PREDELAY_SAMPLES];
+static uint32_t s_rev_ipredelay = 0;
 static int16_t s_rev_c1[FV_REV_C1];
 static int16_t s_rev_c2[FV_REV_C2];
 static int16_t s_rev_c3[FV_REV_C3];
@@ -674,42 +689,75 @@ void fv_vocal_bandpass(int16_t *samples, int count, uint32_t sample_rate) {
     }
 }
 
-void fv_apply_schroeder_reverb(int16_t *samples, int count) {
+void fv_apply_schroeder_reverb_ex(int16_t *samples, int count, float mix) {
+    if (!samples || count <= 0) return;
+    if (mix < 0.0f) mix = 0.0f;
+    if (mix > 1.0f) mix = 1.0f;
+
+    /* EnvironmentalReverb:
+     * Diffusion: 1000 * mix -> allpass feedback gain scaled with mix
+     * Density: 1000 (all 4 combs active)
+     * Reverb Delay: 50 ms pre-delay ring buffer (FV_REV_PREDELAY_SAMPLES)
+     * Decay Time: decay * mix (base decay 9000 ms -> comb feedback gain scaled with mix)
+     */
+    float t60 = 9.0f * mix;
+    if (t60 < 0.15f) t60 = 0.15f;
+    int32_t g1 = (int32_t)(expf(-6.9078f * (float)FV_REV_C1 / (48000.0f * t60)) * 1000.0f);
+    int32_t g2 = (int32_t)(expf(-6.9078f * (float)FV_REV_C2 / (48000.0f * t60)) * 1000.0f);
+    int32_t g3 = (int32_t)(expf(-6.9078f * (float)FV_REV_C3 / (48000.0f * t60)) * 1000.0f);
+    int32_t g4 = (int32_t)(expf(-6.9078f * (float)FV_REV_C4 / (48000.0f * t60)) * 1000.0f);
+    if (g1 > 950) g1 = 950;
+    if (g2 > 950) g2 = 950;
+    if (g3 > 950) g3 = 950;
+    if (g4 > 950) g4 = 950;
+
+    const int32_t allpass_gain = 500 + (int32_t)(200.0f * mix); // 500..700 permille (diffusion 1000 * mix)
+
     for (int i = 0; i < count; i++) {
         int32_t in_val = samples[i];
+
+        /* 50 ms pre-delay ring buffer */
+        int32_t predelay_out = (int32_t)s_rev_predelay[s_rev_ipredelay];
+        s_rev_predelay[s_rev_ipredelay] = (int16_t)in_val;
+        s_rev_ipredelay = (s_rev_ipredelay + 1u) % FV_REV_PREDELAY_SAMPLES;
+
+        /* 4 parallel comb filters (density = 1000) */
         int32_t c1_out = s_rev_c1[s_rev_ic1];
-        s_rev_c1[s_rev_ic1] = fv_clamp_i16(in_val + (c1_out * 78 / 100));
-        s_rev_ic1 = (s_rev_ic1 + 1) % FV_REV_C1;
+        s_rev_c1[s_rev_ic1] = fv_clamp_i16(predelay_out + (int32_t)(((int64_t)c1_out * g1) / 1000LL));
+        s_rev_ic1 = (s_rev_ic1 + 1u) % FV_REV_C1;
 
         int32_t c2_out = s_rev_c2[s_rev_ic2];
-        s_rev_c2[s_rev_ic2] = fv_clamp_i16(in_val + (c2_out * 78 / 100));
-        s_rev_ic2 = (s_rev_ic2 + 1) % FV_REV_C2;
+        s_rev_c2[s_rev_ic2] = fv_clamp_i16(predelay_out + (int32_t)(((int64_t)c2_out * g2) / 1000LL));
+        s_rev_ic2 = (s_rev_ic2 + 1u) % FV_REV_C2;
 
         int32_t c3_out = s_rev_c3[s_rev_ic3];
-        s_rev_c3[s_rev_ic3] = fv_clamp_i16(in_val + (c3_out * 78 / 100));
-        s_rev_ic3 = (s_rev_ic3 + 1) % FV_REV_C3;
+        s_rev_c3[s_rev_ic3] = fv_clamp_i16(predelay_out + (int32_t)(((int64_t)c3_out * g3) / 1000LL));
+        s_rev_ic3 = (s_rev_ic3 + 1u) % FV_REV_C3;
 
         int32_t c4_out = s_rev_c4[s_rev_ic4];
-        s_rev_c4[s_rev_ic4] = fv_clamp_i16(in_val + (c4_out * 78 / 100));
-        s_rev_ic4 = (s_rev_ic4 + 1) % FV_REV_C4;
+        s_rev_c4[s_rev_ic4] = fv_clamp_i16(predelay_out + (int32_t)(((int64_t)c4_out * g4) / 1000LL));
+        s_rev_ic4 = (s_rev_ic4 + 1u) % FV_REV_C4;
 
         int32_t comb_sum = (c1_out + c2_out + c3_out + c4_out) / 4;
 
+        /* 2 series allpass filters (diffusion) */
         int32_t a1_delayed = s_rev_a1[s_rev_ia1];
-        int32_t a1_out = -comb_sum * 65 / 100 + a1_delayed;
-        s_rev_a1[s_rev_ia1] = fv_clamp_i16(comb_sum + (a1_out * 65 / 100));
-        s_rev_ia1 = (s_rev_ia1 + 1) % FV_REV_A1;
+        int32_t a1_out = -(int32_t)(((int64_t)comb_sum * allpass_gain) / 1000LL) + a1_delayed;
+        s_rev_a1[s_rev_ia1] = fv_clamp_i16(comb_sum + (int32_t)(((int64_t)a1_out * allpass_gain) / 1000LL));
+        s_rev_ia1 = (s_rev_ia1 + 1u) % FV_REV_A1;
 
         int32_t a2_delayed = s_rev_a2[s_rev_ia2];
-        int32_t a2_out = -a1_out * 65 / 100 + a2_delayed;
-        s_rev_a2[s_rev_ia2] = fv_clamp_i16(a1_out + (a2_out * 65 / 100));
-        s_rev_ia2 = (s_rev_ia2 + 1) % FV_REV_A2;
+        int32_t a2_out = -(int32_t)(((int64_t)a1_out * allpass_gain) / 1000LL) + a2_delayed;
+        s_rev_a2[s_rev_ia2] = fv_clamp_i16(a1_out + (int32_t)(((int64_t)a2_out * allpass_gain) / 1000LL));
+        s_rev_ia2 = (s_rev_ia2 + 1u) % FV_REV_A2;
 
-        int32_t wet = in_val * 70 / 100 + a2_out * 45 / 100;
-        if (wet > 32767) wet = 32767;
-        if (wet < -32768) wet = -32768;
+        int32_t wet = (int32_t)(((int64_t)in_val * 700LL + (int64_t)a2_out * 450LL) / 1000LL);
         samples[i] = fv_clamp_i16(wet);
     }
+}
+
+void fv_apply_schroeder_reverb(int16_t *samples, int count) {
+    fv_apply_schroeder_reverb_ex(samples, count, 0.75f);
 }
 
 void fv_apply_granular_pitch(int16_t *samples, int count, int semitones) {
@@ -812,12 +860,16 @@ void fv_audio_dsp_reset(void) {
     s_native_noise_prng = 0x854351239ULL;
     memset(s_preroll_ring, 0, sizeof(s_preroll_ring));
     s_preroll_write = 0;
+    memset(s_rev_predelay, 0, sizeof(s_rev_predelay));
+    s_rev_ipredelay = 0;
     memset(s_rev_c1, 0, sizeof(s_rev_c1));
     memset(s_rev_c2, 0, sizeof(s_rev_c2));
     memset(s_rev_c3, 0, sizeof(s_rev_c3));
     memset(s_rev_c4, 0, sizeof(s_rev_c4));
     memset(s_rev_a1, 0, sizeof(s_rev_a1));
     memset(s_rev_a2, 0, sizeof(s_rev_a2));
+    s_rev_ic1 = s_rev_ic2 = s_rev_ic3 = s_rev_ic4 = 0;
+    s_rev_ia1 = s_rev_ia2 = 0;
     memset(s_pitch_buf, 0, sizeof(s_pitch_buf));
     memset(s_latest_spec_bins, 0, sizeof(s_latest_spec_bins));
     s_pitch_write = 0;
@@ -857,20 +909,45 @@ void fv_audio_capture_and_analyze(const int16_t *samples, int count) {
     }
 }
 
-void fv_audio_apply_echo(int16_t *samples, int count) {
+void fv_audio_apply_echo_ex(int16_t *samples, int count, int delay_ms, float mix) {
     if (!samples || count <= 0) return;
+    if (delay_ms <= 0) delay_ms = 150;
+    if (delay_ms > 200) delay_ms = 200;
+    if (mix < 0.0f) mix = 0.0f;
+    if (mix > 1.0f) mix = 1.0f;
+
+    /* FieldVox 3-tap discrete echo model:
+     * Scheduled via ScheduledExecutorService across 3 repetitions at delay intervals j:
+     *   Volume_k = vol * 0.2 * (0.3)^k
+     * k=1: delay j,     weight 0.0600 * mix
+     * k=2: delay 2 * j, weight 0.0180 * mix
+     * k=3: delay 3 * j, weight 0.0054 * mix
+     */
+    const uint32_t j = (uint32_t)(48000 * delay_ms / 1000);
+    const float w1 = 0.0600f * mix;
+    const float w2 = 0.0180f * mix;
+    const float w3 = 0.0054f * mix;
+
     for (int i = 0; i < count; i++) {
-        const int16_t delayed = s_native_echo_buffer[s_native_echo_index];
-        int32_t mixed = (int32_t)samples[i] + (int32_t)(delayed * 0.42f);
-        int32_t feedback = (int32_t)samples[i] + (int32_t)(delayed * 0.32f);
-        if (mixed > 32767) mixed = 32767;
-        if (mixed < -32768) mixed = -32768;
-        if (feedback > 32767) feedback = 32767;
-        if (feedback < -32768) feedback = -32768;
-        s_native_echo_buffer[s_native_echo_index] = (int16_t)feedback;
-        s_native_echo_index = (s_native_echo_index + 1) % FV_DSP_ECHO_DELAY_SAMPLES;
-        samples[i] = (int16_t)mixed;
+        const int16_t in_val = samples[i];
+        const uint32_t idx1 = (s_native_echo_index + FV_DSP_ECHO_BUFFER_SAMPLES - j) % FV_DSP_ECHO_BUFFER_SAMPLES;
+        const uint32_t idx2 = (s_native_echo_index + FV_DSP_ECHO_BUFFER_SAMPLES - 2u * j) % FV_DSP_ECHO_BUFFER_SAMPLES;
+        const uint32_t idx3 = (s_native_echo_index + FV_DSP_ECHO_BUFFER_SAMPLES - 3u * j) % FV_DSP_ECHO_BUFFER_SAMPLES;
+
+        const float echo_rep = (float)s_native_echo_buffer[idx1] * w1
+                             + (float)s_native_echo_buffer[idx2] * w2
+                             + (float)s_native_echo_buffer[idx3] * w3;
+
+        int32_t mixed = (int32_t)in_val + (int32_t)lrintf(echo_rep);
+        samples[i] = fv_clamp_i16(mixed);
+
+        s_native_echo_buffer[s_native_echo_index] = in_val;
+        s_native_echo_index = (s_native_echo_index + 1u) % FV_DSP_ECHO_BUFFER_SAMPLES;
     }
+}
+
+void fv_audio_apply_echo(int16_t *samples, int count) {
+    fv_audio_apply_echo_ex(samples, count, 150, 1.0f);
 }
 
 void fv_audio_apply_noise(int16_t *samples, int count, int amplitude) {
@@ -1127,62 +1204,11 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
         }
 
         if (echo_enabled) {
-            for (jint i = 0; i < count; i++) {
-                int16_t delayed = s_native_echo_buffer[s_native_echo_index];
-                int32_t mixed = (int32_t)monitor[i] + (int32_t)(delayed * 0.42f);
-                if (mixed > 32767) mixed = 32767;
-                if (mixed < -32768) mixed = -32768;
-
-                int32_t feedback = (int32_t)monitor[i] + (int32_t)(delayed * 0.32f);
-                if (feedback > 32767) feedback = 32767;
-                if (feedback < -32768) feedback = -32768;
-
-                s_native_echo_buffer[s_native_echo_index] = (int16_t)feedback;
-                s_native_echo_index = (s_native_echo_index + 1) % FV_DSP_ECHO_DELAY_SAMPLES;
-                monitor[i] = (int16_t)mixed;
-            }
+            fv_audio_apply_echo(monitor, count);
         }
 
-        // Schroeder Reverb (4 parallel comb filters + 2 series allpass filters)
         if (reverb_enabled) {
-            for (jint i = 0; i < count; i++) {
-                int32_t in_val = monitor[i];
-
-                // 4 Comb filters
-                int32_t c1_out = s_rev_c1[s_rev_ic1];
-                s_rev_c1[s_rev_ic1] = (int16_t)(in_val + (c1_out * 78 / 100));
-                s_rev_ic1 = (s_rev_ic1 + 1) % FV_REV_C1;
-
-                int32_t c2_out = s_rev_c2[s_rev_ic2];
-                s_rev_c2[s_rev_ic2] = (int16_t)(in_val + (c2_out * 78 / 100));
-                s_rev_ic2 = (s_rev_ic2 + 1) % FV_REV_C2;
-
-                int32_t c3_out = s_rev_c3[s_rev_ic3];
-                s_rev_c3[s_rev_ic3] = (int16_t)(in_val + (c3_out * 78 / 100));
-                s_rev_ic3 = (s_rev_ic3 + 1) % FV_REV_C3;
-
-                int32_t c4_out = s_rev_c4[s_rev_ic4];
-                s_rev_c4[s_rev_ic4] = (int16_t)(in_val + (c4_out * 78 / 100));
-                s_rev_ic4 = (s_rev_ic4 + 1) % FV_REV_C4;
-
-                int32_t comb_sum = (c1_out + c2_out + c3_out + c4_out) / 4;
-
-                // 2 Allpass filters
-                int32_t a1_delayed = s_rev_a1[s_rev_ia1];
-                int32_t a1_out = -comb_sum * 65 / 100 + a1_delayed;
-                s_rev_a1[s_rev_ia1] = (int16_t)(comb_sum + (a1_out * 65 / 100));
-                s_rev_ia1 = (s_rev_ia1 + 1) % FV_REV_A1;
-
-                int32_t a2_delayed = s_rev_a2[s_rev_ia2];
-                int32_t a2_out = -a1_out * 65 / 100 + a2_delayed;
-                s_rev_a2[s_rev_ia2] = (int16_t)(a1_out + (a2_out * 65 / 100));
-                s_rev_ia2 = (s_rev_ia2 + 1) % FV_REV_A2;
-
-                int32_t wet = in_val * 60 / 100 + a2_out * 40 / 100;
-                if (wet > 32767) wet = 32767;
-                if (wet < -32768) wet = -32768;
-                monitor[i] = (int16_t)wet;
-            }
+            fv_apply_schroeder_reverb(monitor, count);
         }
 
         if (noise_enabled) {
@@ -1239,3 +1265,102 @@ Java_org_fieldvox_lab_MainActivity_nativeProcessAudioDsp(
     if (monitor) (*env)->ReleaseShortArrayElements(env, j_monitor, monitor, 0);
 }
 #endif
+
+void fv_vox_voice_pool_init(FvVoxVoicePool *pool, float reverb_mix) {
+    if (!pool) return;
+    memset(pool, 0, sizeof(*pool));
+    pool->reverb_mix = fmaxf(0.0f, fminf(1.0f, reverb_mix));
+}
+
+void fv_vox_voice_pool_set_reverb(FvVoxVoicePool *pool, float reverb_mix) {
+    if (!pool) return;
+    pool->reverb_mix = fmaxf(0.0f, fminf(1.0f, reverb_mix));
+}
+
+void fv_vox_voice_pool_update(FvVoxVoicePool *pool, uint64_t now_ms) {
+    if (!pool) return;
+    for (int i = 0; i < FV_VOX_MAX_VOICES; i++) {
+        if (pool->voices[i].active && now_ms >= pool->voices[i].release_time_ms) {
+            pool->voices[i].active = false;
+        }
+    }
+}
+
+int fv_vox_voice_pool_allocate_ex(FvVoxVoicePool *pool, uint64_t now_ms, uint64_t grain_duration_ms,
+                                  float playback_speed, int station_id, float volume,
+                                  int pitch_semitones, int tap_index) {
+    if (!pool || grain_duration_ms == 0) return -1;
+    fv_vox_voice_pool_update(pool, now_ms);
+
+    const float speed = (playback_speed > 0.05f) ? playback_speed : 1.0f;
+    const uint64_t play_duration_ms = (uint64_t)((float)grain_duration_ms / speed + 0.5f);
+    const uint64_t reverb_tail_ms = (uint64_t)(9000.0f * pool->reverb_mix + 0.5f);
+    const uint64_t release_time_ms = now_ms + play_duration_ms + reverb_tail_ms;
+
+    int slot = -1;
+    for (int i = 0; i < FV_VOX_MAX_VOICES; i++) {
+        if (!pool->voices[i].active) {
+            slot = i;
+            break;
+        }
+    }
+
+    /* Reject saturation; playing voices and their tails retain ownership. */
+
+    if (slot >= 0) {
+        pool->voices[slot] = (FvVoxVoiceSlot){
+            .active = true,
+            .start_time_ms = now_ms,
+            .play_duration_ms = play_duration_ms,
+            .release_time_ms = release_time_ms,
+            .station_id = station_id,
+            .speed = speed,
+            .volume = (volume > 0.0f) ? volume : 1.0f,
+            .pitch_semitones = pitch_semitones,
+            .tap_index = tap_index
+        };
+    }
+    return slot;
+}
+
+int fv_vox_voice_pool_allocate(FvVoxVoicePool *pool, uint64_t now_ms, uint64_t grain_duration_ms,
+                               float playback_speed, int station_id) {
+    return fv_vox_voice_pool_allocate_ex(pool, now_ms, grain_duration_ms, playback_speed,
+                                         station_id, 1.0f, 0, 0);
+}
+
+bool fv_vox_voice_is_playing(const FvVoxVoicePool *pool, int voice_idx, uint64_t now_ms) {
+    if (!pool || voice_idx < 0 || voice_idx >= FV_VOX_MAX_VOICES) return false;
+    const FvVoxVoiceSlot *v = &pool->voices[voice_idx];
+    if (!v->active) return false;
+    return (now_ms >= v->start_time_ms && now_ms < v->start_time_ms + v->play_duration_ms);
+}
+
+bool fv_vox_voice_is_busy(const FvVoxVoicePool *pool, int voice_idx, uint64_t now_ms) {
+    if (!pool || voice_idx < 0 || voice_idx >= FV_VOX_MAX_VOICES) return false;
+    const FvVoxVoiceSlot *v = &pool->voices[voice_idx];
+    if (!v->active) return false;
+    return (now_ms < v->release_time_ms);
+}
+
+void fv_audio_generate_sweep_static(int16_t *samples, int count, uint32_t *rng, float volume) {
+    if (!samples || count <= 0) return;
+    const float vol = (volume > 0.0f) ? fminf(1.0f, volume) : 0.02f;
+    uint32_t state = rng ? *rng : 0x85435123u;
+    for (int i = 0; i < count; i++) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        const float r = ((float)(state & 0xFFFFu) / 65535.0f) * 0.4f - 0.2f;
+        const int32_t s = (int32_t)(r * 32767.0f * vol);
+        samples[i] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, (float)s));
+    }
+    if (rng) *rng = state;
+}
+
+bool fv_audio_is_sweep_burst_active(uint64_t clock_ms, uint32_t sweep_rate_ms) {
+    if (sweep_rate_ms == 0) return false;
+    const uint32_t cycle_period_ms = sweep_rate_ms + 40u;
+    const uint32_t phase = (uint32_t)(clock_ms % (uint64_t)cycle_period_ms);
+    return (phase < sweep_rate_ms);
+}

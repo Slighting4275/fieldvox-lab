@@ -30,3 +30,12 @@ android/*sha256.txt
 .DS_Store
 *.swp
 *~
+
+source/fv-station-blob-gen
+
+source/fv-recording-test
+
+source/fv-fragment-test
+
+# Local analyzer databases, fuzzing artifacts, and device captures.
+.bug-check/

@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TAG "FieldVoxVideoRec"
@@ -48,8 +48,9 @@ typedef struct {
     ssize_t video_track;
     ssize_t audio_track;
 
-    uint64_t start_time_ms;
-    uint64_t last_frame_time_ms;
+    uint64_t start_time_us;
+    uint64_t last_frame_time_us;
+    uint64_t last_video_pts_us;
     uint64_t video_frame_count;
     uint64_t audio_sample_count;
 
@@ -71,10 +72,10 @@ static VideoRecorderState s_rec = {
     .audio_track = -1,
 };
 
-static uint64_t current_time_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+static uint64_t current_time_us(void) {
+    struct timespec ts = {0};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
 static inline uint8_t clamp_u8(int v) {
@@ -126,8 +127,8 @@ static void argb_to_nv12_bt709(const uint32_t *src, int src_w, int src_h, int sr
 
             /* Subsample UV on even (dx, dy) */
             if ((dy & 1) == 0 && (dx & 1) == 0) {
-                const int cb = ((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128;
-                const int cr = ((128 * r - 116 * g - 12 * b + 128) >> 8) + 128;
+                const int cb = (-29 * r - 99 * g + 128 * b + 32896) >> 8;
+                const int cr = (128 * r - 116 * g - 12 * b + 32896) >> 8;
 
                 const int uv_row_idx = dy / 2;
                 uint8_t *uv_row = uv_plane + (size_t)uv_row_idx * (size_t)dst_stride;
@@ -367,8 +368,9 @@ bool fv_video_recorder_start(const char *output_mp4_path, int width, int height,
     }
     s_rec.input_stride = input_stride;
     s_rec.input_slice_height = input_slice_h;
-    s_rec.start_time_ms = current_time_ms();
-    s_rec.last_frame_time_ms = 0;
+    s_rec.start_time_us = current_time_us();
+    s_rec.last_frame_time_us = 0;
+    s_rec.last_video_pts_us = 0;
     s_rec.video_frame_count = 0;
     s_rec.audio_sample_count = 0;
     for (int i = 0; i < MAX_PENDING_PACKETS; i++) {
@@ -417,16 +419,16 @@ void fv_video_recorder_feed_audio(const int16_t *pcm, int frames) {
 void fv_video_recorder_feed_frame(const uint32_t *argb, int src_w, int src_h, int stride_px) {
     if (!argb || src_w <= 0 || src_h <= 0) return;
 
-    const uint64_t now_ms = current_time_ms();
-
     pthread_mutex_lock(&s_rec.mutex);
     if (!s_rec.active || !s_rec.video_codec) {
         pthread_mutex_unlock(&s_rec.mutex);
         return;
     }
 
-    /* Target 30 fps (throttle frame rate) */
-    if (now_ms - s_rec.last_frame_time_ms < 32) {
+    const uint64_t now_us = current_time_us();
+
+    /* Limit capture to 30 fps; retain real timing when rendering is slower. */
+    if (now_us - s_rec.last_frame_time_us < 33333ULL) {
         pthread_mutex_unlock(&s_rec.mutex);
         return;
     }
@@ -477,9 +479,13 @@ void fv_video_recorder_feed_frame(const uint32_t *argb, int src_w, int src_h, in
                                s_rec.width, s_rec.height,
                                s_rec.input_stride, s_rec.input_slice_height);
 
-            const uint64_t pts_us = s_rec.video_frame_count * 1000000ULL / 30ULL;
+            uint64_t pts_us = now_us - s_rec.start_time_us;
+            if (s_rec.video_frame_count > 0 && pts_us <= s_rec.last_video_pts_us) {
+                pts_us = s_rec.last_video_pts_us + 1;
+            }
             s_rec.video_frame_count++;
-            s_rec.last_frame_time_ms = now_ms;
+            s_rec.last_frame_time_us = now_us;
+            s_rec.last_video_pts_us = pts_us;
 
             size_t bytes_to_queue = (size_t)s_rec.input_stride * (size_t)s_rec.input_slice_height * 3 / 2;
             if (bytes_to_queue > in_size) bytes_to_queue = in_size;
@@ -504,6 +510,11 @@ void fv_video_recorder_stop(char *out_saved_path, size_t max_len) {
     LOGI("Stopping video recording (%llu frames, %llu audio samples)...",
          (unsigned long long)s_rec.video_frame_count, (unsigned long long)s_rec.audio_sample_count);
 
+    uint64_t video_end_pts_us = current_time_us() - s_rec.start_time_us;
+    if (video_end_pts_us <= s_rec.last_video_pts_us) {
+        video_end_pts_us = s_rec.last_video_pts_us + 1;
+    }
+
     /* Signal EOS to video encoder with retries and draining */
     if (s_rec.video_codec) {
         ssize_t v_idx = -1;
@@ -513,7 +524,7 @@ void fv_video_recorder_stop(char *out_saved_path, size_t max_len) {
         }
         if (v_idx >= 0) {
             AMediaCodec_queueInputBuffer(s_rec.video_codec, (size_t)v_idx, 0, 0,
-                                         s_rec.video_frame_count * 1000000ULL / 30ULL,
+                                         video_end_pts_us,
                                          AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
         }
         drain_encoder_locked(true, 10000, true);
@@ -608,7 +619,7 @@ uint32_t fv_video_recorder_get_duration_ms(void) {
     pthread_mutex_lock(&s_rec.mutex);
     uint32_t dur = 0;
     if (s_rec.active) {
-        dur = (uint32_t)(current_time_ms() - s_rec.start_time_ms);
+        dur = (uint32_t)((current_time_us() - s_rec.start_time_us) / 1000ULL);
     }
     pthread_mutex_unlock(&s_rec.mutex);
     return dur;

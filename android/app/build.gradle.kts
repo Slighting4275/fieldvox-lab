@@ -20,7 +20,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                cFlags += listOf("-std=c11", "-O3", "-Wall", "-Wextra")
+                cFlags += listOf("-std=c23", "-O3", "-Wall", "-Wextra")
             }
         }
     }

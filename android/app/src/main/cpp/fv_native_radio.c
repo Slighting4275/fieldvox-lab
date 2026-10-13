@@ -49,6 +49,7 @@ typedef struct {
     int16_t ring[RING_FRAMES];
     uint32_t read_pos;
     uint32_t count;
+    int pcm_station; /* guarded by lock; identity of the buffered PCM */
     bool primed;
     uint32_t prime_frames; /* guarded by lock */
     int dwell_count;
@@ -73,12 +74,28 @@ static _Atomic int g_direction = 1;
 static pthread_mutex_t g_pick_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_cursor = -1;
 static long g_fail_until_ms[FV_STATION_BLOB_COUNT];
+static long g_station_last_trigger_ms[FV_STATION_BLOB_COUNT];
 static uint32_t g_rand = 0x9E3779B9u;
 
 static long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
+}
+
+bool fv_radio_station_is_refractory(int station, long now_msec) {
+    if (station < 0 || (size_t)station >= FV_STATION_BLOB_COUNT) return false;
+    pthread_mutex_lock(&g_pick_mutex);
+    const bool refractory = (now_msec - g_station_last_trigger_ms[station] < FV_STATION_REFRACTORY_MS);
+    pthread_mutex_unlock(&g_pick_mutex);
+    return refractory;
+}
+
+void fv_radio_mark_station_triggered(int station, long now_msec) {
+    if (station < 0 || (size_t)station >= FV_STATION_BLOB_COUNT) return;
+    pthread_mutex_lock(&g_pick_mutex);
+    g_station_last_trigger_ms[station] = now_msec;
+    pthread_mutex_unlock(&g_pick_mutex);
 }
 
 static uint32_t next_rand(void) {
@@ -126,7 +143,9 @@ static int pick_station(int self) {
             chosen = candidate;
         }
     }
-    if (chosen >= 0) atomic_store(&g_decks[self].station, chosen);
+    if (chosen >= 0) {
+        atomic_store(&g_decks[self].station, chosen);
+    }
     pthread_mutex_unlock(&g_pick_mutex);
     return chosen;
 }
@@ -138,10 +157,11 @@ static void mark_failed(int station) {
     pthread_mutex_unlock(&g_pick_mutex);
 }
 
-static void ring_reset(FvRadioDeck *deck) {
+static void ring_reset(FvRadioDeck *deck, int station) {
     pthread_mutex_lock(&deck->lock);
     deck->read_pos = 0;
     deck->count = 0;
+    deck->pcm_station = station;
     deck->primed = false;
     deck->prime_frames = PREBUFFER_DEFAULT_FRAMES;
     pthread_mutex_unlock(&deck->lock);
@@ -296,7 +316,7 @@ static bool stream_station(FvRadioDeck *deck, int station) {
     AMediaFormat_delete(format);
     deck->phase = 0.0;
     deck->prev = 0.0f;
-    ring_reset(deck);
+    ring_reset(deck, station);
 
     /* The first dwell is staggered per deck so the decks never all rotate out at the same time. */
     const long stagger = deck->dwell_count++ == 0 ? (long)(deck - g_decks) * (DWELL_MIN_MS / FV_RADIO_DECKS) : 0L;
@@ -379,7 +399,7 @@ static bool stream_station(FvRadioDeck *deck, int station) {
     AMediaCodec_stop(codec);
     AMediaCodec_delete(codec);
     AMediaExtractor_delete(extractor);
-    ring_reset(deck);
+    ring_reset(deck, -1);
     return got_audio;
 }
 
@@ -426,6 +446,7 @@ bool fv_radio_start(JavaVM *vm, int station_count) {
     int started = 0;
     for (int d = 0; d < FV_RADIO_DECKS; d++) {
         pthread_mutex_init(&g_decks[d].lock, NULL);
+        g_decks[d].pcm_station = -1;
         atomic_init(&g_decks[d].state, FV_RADIO_IDLE);
         atomic_init(&g_decks[d].station, -1);
         pthread_attr_t attr;
@@ -447,7 +468,8 @@ void fv_radio_set_direction(int direction) {
     atomic_store(&g_direction, direction > 0 ? 1 : (direction < 0 ? -1 : 0));
 }
 
-int fv_radio_pull(int deck_index, int16_t *out, int frames) {
+int fv_radio_pull_with_station(int deck_index, int16_t *out, int frames, int *station) {
+    if (station) *station = -1;
     if (!out || frames <= 0) return 0;
     memset(out, 0, (size_t)frames * sizeof(int16_t));
     if (deck_index < 0 || deck_index >= FV_RADIO_DECKS || !atomic_load(&g_started)) return 0;
@@ -471,8 +493,13 @@ int fv_radio_pull(int deck_index, int16_t *out, int frames) {
         deck->read_pos = (deck->read_pos + 1) % RING_FRAMES;
     }
     deck->count -= (uint32_t)n;
+    if (station) *station = deck->pcm_station;
     pthread_mutex_unlock(&deck->lock);
     return n;
+}
+
+int fv_radio_pull(int deck_index, int16_t *out, int frames) {
+    return fv_radio_pull_with_station(deck_index, out, frames, NULL);
 }
 
 int fv_radio_deck_state(int deck) {

@@ -1,13 +1,29 @@
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
 #include <unistd.h>
+#include <math.h>
+#include <float.h>
+#include <sys/stat.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #include "../../android/app/src/main/cpp/fv_station_blob_data.h"
 #include "../../android/app/src/main/cpp/fv_native_audio.h"
 #include "../../android/app/src/main/cpp/fv_grain_gate.h"
+#include "../../android/app/src/main/cpp/fv_hit_capture.h"
+#include "../../android/app/src/main/cpp/fv_vox_controls.h"
+#include "../../android/app/src/main/cpp/fv_sensor_dsp.h"
+#include "../../android/app/src/main/cpp/fv_local_bank.h"
+
+static inline uint32_t load_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8u) | ((uint32_t)p[2] << 16u) | ((uint32_t)p[3] << 24u);
+}
 
 /* Minimal standalone SHA-256 for test verification */
 typedef struct {
@@ -113,7 +129,9 @@ typedef enum {
     TEST_W_SENS_LOW, TEST_W_SENS_MED, TEST_W_SENS_HIGH, TEST_W_COOL_CYCLE,
     TEST_W_EVIDENCE_OPEN_0, TEST_W_EVIDENCE_OPEN_1,
     TEST_W_EVIDENCE_OPEN_2, TEST_W_EVIDENCE_OPEN_3,
-    TEST_W_CLOSE_EVIDENCE, TEST_W_CLOSE_HELP,
+    TEST_W_CLOSE_EVIDENCE, TEST_W_CLOSE_HELP, TEST_W_AUTO_GATE,
+    TEST_W_VIS_PREV, TEST_W_VIS_NEXT, TEST_W_VIS_COLOR, TEST_W_VOICE_DUCK, TEST_W_ADVANCED,
+    TEST_W_ECHO_LEVEL, TEST_W_REVERB_LEVEL, TEST_W_DISTORTION_LEVEL, TEST_W_GRAIN_LEVEL,
     TEST_W_COUNT
 } TestWidgetId;
 
@@ -257,7 +275,320 @@ static void test_grain_gate(void) {
     printf("  [PASS] Grain gate proximity queue and sensor cooldowns\n");
 }
 
+static void test_sensor_only(void) {
+    assert(fv_gate_emf_exceeds_threshold(0.8f, 0.75f));
+    assert(!fv_gate_emf_exceeds_threshold(0.8f, 1.65f));
+    assert(fv_gate_emf_exceeds_threshold(1.8f, 1.65f));
+    assert(!fv_gate_emf_exceeds_threshold(1.8f, 3.0f));
+    assert(fv_gate_emf_exceeds_threshold(3.0f, 3.0f));
+    assert(!fv_gate_emf_exceeds_threshold(NAN, 0.75f));
+    assert(!fv_gate_emf_exceeds_threshold(INFINITY, 0.75f));
+    assert(!fv_gate_emf_exceeds_threshold(1.0f, NAN));
+    assert(!fv_gate_emf_exceeds_threshold(1.0f, 0.0f));
+    FvGrainGate gate;
+    float gain[1024];
+    fv_gate_init(&gate, 48000, 123u, 0);
+    fv_gate_set_auto_enabled(&gate, false, 0);
+    for (uint64_t t = 0; t < 60u * 48000u; t += 1024) {
+        fv_gate_process(&gate, t, gain, 1024, true, 450);
+        for (int i = 0; i < 1024; i++) assert(gain[i] == 0.0f);
+    }
+    assert(!gate.open);
+    assert(!fv_gate_request(&gate, 60u * 48000u, FV_GATE_AUTO_SCAN, 0, 450, true));
+    assert(fv_gate_request(&gate, 60u * 48000u, FV_GATE_MAGNETOMETER, 1.8f, 450, true));
+    fv_gate_process(&gate, 60u * 48000u, gain, 1024, true, 450);
+    assert(gain[512] > 0.0f && gate.reason == FV_GATE_MAGNETOMETER);
+    /* A mode change cuts an active timer packet, but preserves a sensor packet. */
+    fv_gate_set_auto_enabled(&gate, true, 60u * 48000u);
+    fv_gate_set_auto_enabled(&gate, false, 60u * 48000u);
+    assert(gate.open && gate.reason == FV_GATE_MAGNETOMETER);
+    fv_gate_init(&gate, 48000, 123u, 0);
+    assert(fv_gate_request(&gate, 0, FV_GATE_AUTO_SCAN, 0, 450, true));
+    fv_gate_set_auto_enabled(&gate, false, 0);
+    assert(!gate.open);
+    fv_gate_process(&gate, 0, gain, 1024, true, 450);
+    for (int i = 0; i < 1024; i++) assert(gain[i] == 0.0f);
+    printf("  [PASS] Distinct EMF thresholds and 60-second sensor-only gating\n");
+}
+
+static uint32_t read_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void test_hit_capture(void) {
+    char directory[] = "/tmp/fieldvox-hit-test-XXXXXX";
+    assert(mkdtemp(directory));
+    char output[640], path[640];
+    fv_hit_capture_reset();
+    assert(!fv_hit_capture_save(directory, 123, 0, output, sizeof(output)));
+    int16_t clean[1024], processed[1024];
+    FvHitBlock block = {.station_a = 7, .station_b = -1, .audible_a = true,
+        .reason_a = FV_GATE_MAGNETOMETER, .emf_threshold = 0.75f, .emf_delta = NAN,
+        .effects = FV_HIT_FX_ECHO, .pitch_semitones = -2,
+        .echo_percent = 37, .reverb_percent = 62, .distortion_percent = 18,
+        .grain_ms = 450, .voice_duck_enabled = true, .speaker_ducked = true};
+    strcpy(block.label_a, "Quoted \"station\"\\\n");
+    strcpy(block.url_a, "https://example.invalid/radio?x=\"test\"");
+    for (uint32_t n = 0; n < 180u; n++) {
+        block.sample_start = (uint64_t)n * 1024u;
+        block.auto_enabled = n < 100u;
+        block.effects = n < 100u ? FV_HIT_FX_ECHO : FV_HIT_FX_REVERB;
+        for (uint32_t i = 0; i < 1024; i++) {
+            clean[i] = (int16_t)((n * 1024u + i) % 10000u);
+            processed[i] = (int16_t)-clean[i];
+        }
+        fv_hit_capture_push(clean, processed, 1024, &block);
+    }
+    assert(fv_hit_capture_save(directory, 123, 0, output, sizeof(output)));
+    const char *suffixes[] = {"clean.wav", "preroll.wav"};
+    for (unsigned which = 0; which < 2; which++) {
+        snprintf(path, sizeof(path), "%s/hit-123-0-%s", directory, suffixes[which]);
+        FILE *f = fopen(path, "rb"); assert(f);
+        uint8_t header[44];
+        size_t nread = fread(header, 1, 44, f);
+        assert(nread == 44);
+        assert(memcmp(header, "RIFF", 4) == 0 && memcmp(header + 8, "WAVE", 4) == 0);
+        assert(read_le32(header + 24) == FV_HIT_RATE);
+        assert(read_le32(header + 40) == FV_HIT_FRAMES * 2u);
+        const uint32_t first = 180u * 1024u - FV_HIT_FRAMES;
+        for (uint32_t i = 0; i < FV_HIT_FRAMES; i++) {
+            uint8_t bytes[2];
+            size_t br = fread(bytes, 1, 2, f);
+            assert(br == 2);
+            const int16_t actual = (int16_t)((uint16_t)bytes[0] | (uint16_t)bytes[1] << 8);
+            const int16_t expected = (int16_t)((first + i) % 10000u);
+            assert(actual == (which ? (int16_t)-expected : expected));
+        }
+        int c_eof = fgetc(f);
+        assert(c_eof == EOF);
+        int fc_rc = fclose(f);
+        assert(fc_rc == 0);
+    }
+    snprintf(path, sizeof(path), "%s/hit-123-0.json", directory);
+    FILE *f = fopen(path, "rb"); assert(f);
+    char *json = malloc(160000); assert(json);
+    const size_t len = fread(json, 1, 159999, f); json[len] = '\0';
+    int at_eof = feof(f);
+    assert(at_eof != 0);
+    fclose(f);
+    assert(strstr(json, "\"timeline_complete\":true"));
+    assert(strstr(json, "\"emf_delta_ut\":null"));
+    assert(strstr(json, "\"offset_frames\":0,\"frames\":640"));
+    assert(strstr(json, "\"auto_enabled\":true") && strstr(json, "\"auto_enabled\":false"));
+    assert(strstr(json, "Quoted \\\"station\\\"\\\\\\u000a"));
+    free(json);
+    /* A repeated ID must not replace an existing hit. */
+    assert(!fv_hit_capture_save(directory, 123, 0, output, sizeof(output)));
+    struct stat st; assert(stat(path, &st) == 0 && st.st_size == (off_t)len);
+    /* Force a failure after writing both WAVs: only our new files are removed. */
+    snprintf(path, sizeof(path), "%s/hit-124-0.json", directory);
+    f = fopen(path, "wb"); assert(f); fputs("keep", f); fclose(f);
+    assert(!fv_hit_capture_save(directory, 124, 0, output, sizeof(output)));
+    snprintf(path, sizeof(path), "%s/hit-124-0-clean.wav", directory); assert(access(path, F_OK) != 0);
+    snprintf(path, sizeof(path), "%s/hit-124-0-preroll.wav", directory); assert(access(path, F_OK) != 0);
+    snprintf(path, sizeof(path), "%s/hit-124-0.json", directory); assert(stat(path, &st) == 0 && st.st_size == 4);
+    /* Discontinuous input starts a new capture; no stale PCM or phantom padding. */
+    block.sample_start = 999999u;
+    fv_hit_capture_push(clean, processed, 1024, &block);
+    assert(fv_hit_capture_save(directory, 125, 0, output, sizeof(output)));
+    assert(stat(output, &st) == 0 && st.st_size == 44 + 2048);
+    if (getenv("FIELDVOX_KEEP_TEST_HITS")) printf("HIT_TEST_DIRECTORY=%s\n", directory);
+    else {
+        const unsigned ids[] = {123, 124, 125};
+        const char *all_suffixes[] = {"-clean.wav", "-preroll.wav", ".json"};
+        for (unsigned i = 0; i < 3; i++) for (unsigned j = 0; j < 3; j++) {
+            snprintf(path, sizeof(path), "%s/hit-%u-0%s", directory, ids[i], all_suffixes[j]);
+            unlink(path);
+        }
+        assert(rmdir(directory) == 0);
+    }
+    printf("  [PASS] Paired PCM, historical metadata, JSON escaping, wraparound, interruption, and failure cleanup\n");
+}
+
+static void test_c23_dsp_and_vox(void) {
+    float delta, left, right;
+    assert(fv_update_barometer(1005.0f, &delta)==0 && fabsf(delta)<0.001f);
+    assert(fv_update_barometer(1004.7f, &delta)==1 && delta < -0.29f);
+    assert(fv_update_barometer(NAN, &delta)==0 && delta==0);
+    fv_reset_barometer_baseline(1000.0f);
+    assert(fv_get_barometer_baseline()==1000.0f);
+    fv_calc_spatial_pan_gains(0, &left, &right);
+    assert(fabsf(left-0.70710678f)<0.0001f && fabsf(left-right)<0.0001f);
+    fv_calc_spatial_pan_gains(FLT_MAX, &left, &right);
+    assert(isfinite(left) && isfinite(right) && fabsf(left*left+right*right-1.0f)<0.0001f);
+    fv_calc_spatial_pan_gains(INFINITY, &left, &right);
+    assert(fabsf(left-0.70710678f)<0.0001f);
+    fv_calc_spatial_pan_gains(0, NULL, NULL);
+    assert(fv_verify_blob_checksum(FV_STATION_PLAN_BINARY_DATA,sizeof(FV_STATION_PLAN_BINARY_DATA))==1);
+    assert(fv_verify_blob_checksum(FV_STATION_PLAN_BINARY_DATA,16)==0);
+    assert(fv_verify_blob_checksum(NULL,100)==0);
+    uint8_t *corrupt = malloc(sizeof(FV_STATION_PLAN_BINARY_DATA)); assert(corrupt);
+    memcpy(corrupt,FV_STATION_PLAN_BINARY_DATA,sizeof(FV_STATION_PLAN_BINARY_DATA));
+    corrupt[20]^=255u;
+    assert(fv_verify_blob_checksum(corrupt,sizeof(FV_STATION_PLAN_BINARY_DATA))==0);
+    free(corrupt);
+    int16_t tone[48000];
+    for (size_t i=0; i<48000; i++) tone[i]=32760;
+    fv_rem_pod_generate(tone,48000,99,48000);
+    for (size_t i=0; i<48000; i++) assert(tone[i]>=22260);
+    fv_rem_pod_generate(NULL,1,1,48000); fv_rem_pod_generate(tone,1,1,0);
+
+    /* FieldVox micro-decimal sensor gate assertions */
+    FvVoxDecimalTrigger trig = {0};
+    assert(!fv_vox_eval_decimal_trigger(0, 0, 0, true, 0.5f, &trig));
+    assert(!fv_vox_eval_decimal_trigger(NAN, 0, 0, true, 0.5f, &trig));
+    assert(!fv_vox_eval_decimal_trigger(10, 20, 30, true, 0.5f, NULL));
+    /* Shortest fraction 00010000000000000000: gate digits [1:4] are 001. */
+    assert(fv_vox_eval_decimal_trigger(10.0001, 0, 0, true, 0.5f, &trig));
+    assert(trig.passed && trig.gate_code == 1);
+    assert(trig.pitch == FV_VOX_PITCH_LOW && trig.pitch_semitones == -9 && fabsf(trig.pitch_factor - 0.6f) < 0.001f);
+    assert(trig.speed == FV_VOX_SPEED_SLOW && fabsf(trig.speed_factor - 0.7f) < 0.001f);
+    assert(trig.grain_duration_ms == 400);
+    assert(trig.playback_duration_ms == 571); /* Speed-compensated: 400 / 0.7 = 571 ms */
+    assert(fabsf(trig.seek_offset - 0.06f) < 0.001f);
+    assert(trig.channel_hop == 0);
+
+    assert(fv_vox_slider_percent(0,0,100)==0);
+    assert(fv_vox_slider_percent(50,0,100)==50);
+    assert(fv_vox_slider_percent(200,0,100)==100);
+    assert(fv_vox_slider_percent(NAN,0,100)==0);
+    int16_t original[1024], pcm[1024];
+    for (int i=0; i<1024; i++) original[i]=(int16_t)((i%2 ? -1 : 1)*12000);
+    memcpy(pcm,original,sizeof(pcm)); fv_audio_dsp_reset();
+    fv_vox_apply_effects(pcm,1024,0,0,0);
+    assert(memcmp(pcm,original,sizeof(pcm))==0);
+    fv_vox_apply_effects(pcm,1024,0,0,100);
+    assert(pcm[0]>original[0] && pcm[1]<original[1]);
+    assert(abs(pcm[0]+pcm[1])<=1);
+    memset(pcm,0,sizeof(pcm)); fv_audio_dsp_reset();
+    pcm[0]=20000; fv_vox_apply_effects(pcm,1024,100,100,0);
+    assert(pcm[0]!=20000);
+    fv_vox_apply_effects(NULL,10,100,100,100);
+    fv_audio_dsp_reset();
+
+    /* FieldVox Speech VAD (80-300 Hz) */
+    FvVoxDucker detector={0}; uint64_t clock=0;
+    memset(pcm,0,sizeof(pcm));
+    for (int i=0; i<20; i++,clock+=1024) assert(!fv_vox_detect_voice(&detector,pcm,1024,clock,48000));
+    /* Synthesize 150 Hz speech fundamental tone */
+    for (int i=0; i<1024; i++) pcm[i]=(int16_t)(sin(2.0 * M_PI * 150.0 * (double)i / 48000.0) * 16000.0);
+    assert(fv_vox_detect_voice(&detector,pcm,1024,clock,48000));
+    assert(detector.speech_detected);
+    assert(detector.speech_energy > 2.0f);
+    /* 2000 ms holdoff: 48000 * 2 = 96000 samples */
+    assert(fv_vox_detect_voice(&detector,NULL,0,clock+95000,48000));
+    assert(!fv_vox_detect_voice(&detector,NULL,0,clock+96001,48000));
+
+    /* FieldVox Voice Pool & Reverb Tail Release */
+    FvVoxVoicePool pool;
+    fv_vox_voice_pool_init(&pool, 0.5f);
+    int slot = fv_vox_voice_pool_allocate(&pool, 1000, 760, 1.2f, 10);
+    assert(slot == 0);
+    assert(pool.voices[0].play_duration_ms == 633);
+    assert(pool.voices[0].release_time_ms == 1000 + 633 + 4500); /* 4500 ms reverb tail */
+    assert(fv_vox_voice_is_playing(&pool, 0, 1500));
+    assert(!fv_vox_voice_is_playing(&pool, 0, 1700));
+    assert(fv_vox_voice_is_busy(&pool, 0, 1700));
+    assert(fv_vox_voice_is_busy(&pool, 0, 6132));
+    assert(!fv_vox_voice_is_busy(&pool, 0, 6134));
+
+    /* FieldVox 10 concurrent voices allocation */
+    for (int i = 1; i < 10; i++) {
+        int v_slot = fv_vox_voice_pool_allocate(&pool, 1000 + (uint64_t)i * 10, 500, 1.0f, i);
+        assert(v_slot == i);
+        assert(pool.voices[i].active);
+    }
+    assert(FV_VOX_MAX_VOICES == 10);
+    assert(fv_vox_voice_pool_allocate(&pool,1100,500,1.0f,99)==-1);
+
+    /* FieldVox Boundary-clamped grain seek & duration truncation */
+    int dur = 760, seek = 0;
+    /* 5000 ms buffer, seek_fraction = 0.90 -> seek = 4500, seek+dur = 5260 > 5000 */
+    fv_vox_clamp_grain_boundary(5000, 0.90f, &dur, &seek);
+    assert(seek == 5000 - 760 - 10); /* shifted = 4230 */
+    assert(seek + dur <= 5000);
+    assert(dur == 760);
+    /* Very small buffer 500 ms with 760 ms duration */
+    dur = 760; seek = 0;
+    fv_vox_clamp_grain_boundary(500, 0.50f, &dur, &seek);
+    assert(seek == 0);
+    assert(dur == 500);
+
+    /* FieldVox four-tap echo volume attenuation */
+    assert(fabsf(fv_vox_echo_tap_volume(1.0f, 1) - 0.06f) < 0.001f);
+    assert(fabsf(fv_vox_echo_tap_volume(1.0f, 2) - 0.018f) < 0.001f);
+    assert(fabsf(fv_vox_echo_tap_volume(1.0f, 3) - 0.0054f) < 0.0001f);
+    assert(fabsf(fv_vox_echo_tap_volume(1.0f, 4) - 0.00162f) < 0.00001f);
+    assert(fv_vox_echo_tap_volume(1.0f, 5) == 0.0f);
+    assert(fv_vox_echo_tap_delay_ms(150, 1) == 150);
+    assert(fv_vox_echo_tap_delay_ms(150, 2) == 300);
+    assert(fv_vox_echo_tap_delay_ms(150, 3) == 450);
+
+    /* FieldVox Cache vs Live decision */
+    FvVoxDecimalTrigger dtrig = {0};
+    /* Vector with frac "000" in [1:4], d7=9 (prefer cached if 10 < N <= 20) */
+    assert(fv_vox_eval_decimal_trigger_ex(10.00010009, 0, 0, true, 0.5f, 5, &dtrig));
+    assert(dtrig.prefer_live == true); /* N=5 <= 10 => prefer live */
+    assert(fv_vox_eval_decimal_trigger_ex(10.00010009, 0, 0, true, 0.5f, 15, &dtrig));
+    assert(dtrig.prefer_live == false); /* N=15, d7=9 => prefer cached */
+    assert(fv_vox_eval_decimal_trigger_ex(10.00010009, 0, 0, true, 0.5f, 25, &dtrig));
+    assert(dtrig.prefer_live == false); /* N=25 > 20, d7=9 >= 8 => prefer cached */
+
+    /* FieldVox Reverb-dependent global cooldown gate */
+    FvGrainGate rgate;
+    fv_gate_init(&rgate, 48000, 42, 0);
+    fv_gate_set_reverb_mix(&rgate, 0.5f); /* 2000 ms + 8000 ms * 0.5 = 6000 ms = 288000 samples */
+    assert(fv_gate_request(&rgate, 0, FV_GATE_MAGNETOMETER, 5.0f, 450, true));
+    for (uint64_t t = 0; t <= rgate.packet_start + rgate.packet_len + 48000; t += 1024) {
+        fv_gate_process(&rgate, t, NULL, 1024, true, 450);
+    }
+    assert(!rgate.open);
+    /* At 5.0s (240000 samples), still within 6.0s (288000 samples) lockout */
+    assert(!fv_gate_request(&rgate, 240000, FV_GATE_MAGNETOMETER, 5.0f, 450, true));
+    const uint64_t target_t = rgate.next_allowed > 288000 ? rgate.next_allowed + 1024 : 288001;
+    assert(fv_gate_request(&rgate, target_t, FV_GATE_MAGNETOMETER, 5.0f, 450, true));
+
+    /* FieldVox Sweep burst static */
+    int16_t static_pcm[128];
+    uint32_t srng = 54321;
+    fv_audio_generate_sweep_static(static_pcm, 128, &srng, 0.02f);
+    for (int i=0; i<128; i++) assert(abs(static_pcm[i]) <= 250);
+    assert(fv_audio_is_sweep_burst_active(50, 200));
+    assert(!fv_audio_is_sweep_burst_active(220, 200));
+
+    /* FieldVox Local bank 100-file FIFO eviction cap */
+    char temp_dir[] = "/tmp/fv_bank_test_XXXXXX";
+    assert(mkdtemp(temp_dir) != NULL);
+    for (int i = 0; i < 105; i++) {
+        char file_path[512];
+        snprintf(file_path, sizeof(file_path), "%s/clip_%03d.wav", temp_dir, i);
+        FILE *tf = fopen(file_path, "wb");
+        assert(tf != NULL);
+        fputc(0, tf);
+        fclose(tf);
+    }
+    int evicted = fv_local_bank_enforce_cache_cap(temp_dir, 100);
+    assert(evicted == 5);
+    for (int i = 5; i < 105; i++) {
+        char file_path[512];
+        snprintf(file_path, sizeof(file_path), "%s/clip_%03d.wav", temp_dir, i);
+        unlink(file_path);
+    }
+    rmdir(temp_dir);
+
+    FvGrainGate gate;
+    fv_gate_init(&gate,48000,123,0); fv_gate_set_grain_ms(&gate,1000);
+    assert(fv_gate_request(&gate,0,FV_GATE_PROXIMITY,0,450,true));
+    for (int i=0; i<gate.grain_count; i++) assert(gate.grain_len[i]==48000u);
+    fv_gate_init(&gate,48000,123,0); fv_gate_set_grain_ms(&gate,-1); assert(gate.grain_ms==0);
+    fv_gate_set_grain_ms(&gate,1); assert(gate.grain_ms==65);
+    printf("  [PASS] C23 sensor/DSP port, CRC validation, effect levels, fragment timing and microphone ducking\n");
+}
+
 int main(void) {
+    test_c23_dsp_and_vox();
+    test_sensor_only();
+    test_hit_capture();
     test_grain_gate();
     printf("[TEST] Running FieldVox native C unit tests...\n");
 
@@ -288,31 +619,22 @@ int main(void) {
 
     /* 4. Verify Station Blob Magic, Count, and CRC32 */
     assert(sizeof(FV_STATION_PLAN_BINARY_DATA) >= 16);
-    uint32_t magic = ((uint32_t)FV_STATION_PLAN_BINARY_DATA[0]) |
-                     ((uint32_t)FV_STATION_PLAN_BINARY_DATA[1] << 8) |
-                     ((uint32_t)FV_STATION_PLAN_BINARY_DATA[2] << 16) |
-                     ((uint32_t)FV_STATION_PLAN_BINARY_DATA[3] << 24);
+    uint32_t magic = load_le32(FV_STATION_PLAN_BINARY_DATA);
     assert(magic == FV_STATION_BLOB_MAGIC);
 
-    uint32_t count = ((uint32_t)FV_STATION_PLAN_BINARY_DATA[8]) |
-                     ((uint32_t)FV_STATION_PLAN_BINARY_DATA[9] << 8) |
-                     ((uint32_t)FV_STATION_PLAN_BINARY_DATA[10] << 16) |
-                     ((uint32_t)FV_STATION_PLAN_BINARY_DATA[11] << 24);
+    uint32_t count = load_le32(FV_STATION_PLAN_BINARY_DATA + 8);
     assert(count == FV_STATION_BLOB_COUNT);
     assert(count == 512);
     assert(FV_STATION_BLOB_COUNT == 512);
 
-    uint32_t expected_crc = ((uint32_t)FV_STATION_PLAN_BINARY_DATA[12]) |
-                           ((uint32_t)FV_STATION_PLAN_BINARY_DATA[13] << 8) |
-                           ((uint32_t)FV_STATION_PLAN_BINARY_DATA[14] << 16) |
-                           ((uint32_t)FV_STATION_PLAN_BINARY_DATA[15] << 24);
+    uint32_t expected_crc = load_le32(FV_STATION_PLAN_BINARY_DATA + 12);
     assert(expected_crc == FV_STATION_BLOB_CRC32);
 
     const uint8_t *record_bytes = FV_STATION_PLAN_BINARY_DATA + 16;
     size_t record_len = count * sizeof(FvBlobStationEntry);
     uint32_t computed_crc = crc32_buf(0, record_bytes, record_len);
     assert(computed_crc == expected_crc);
-    printf("  [PASS] Zig packed station blob header & CRC32 verification (%u stations)\n", (unsigned)count);
+    printf("  [PASS] C23 packed station blob header & CRC32 verification (%u stations)\n", (unsigned)count);
 
     /* 5. Verify first station entry in binary blob */
     const FvBlobStationEntry *e0 = (const FvBlobStationEntry *)record_bytes;
@@ -350,6 +672,57 @@ int main(void) {
     }
     printf("  [PASS] Native reverb feedback remains saturated without signed wraparound\n");
 
+    /* 6a. EnvironmentalReverb 50 ms pre-delay verification */
+    {
+        fv_audio_dsp_reset();
+        int16_t impulse_buf[4800] = {0};
+        impulse_buf[0] = 20000;
+        fv_apply_schroeder_reverb_ex(impulse_buf, 4800, 1.0f);
+        assert(impulse_buf[0] == (int16_t)(((int64_t)20000 * 700LL) / 1000LL));
+        for (size_t t = 1; t < 2400; t++) {
+            assert(impulse_buf[t] == 0);
+        }
+        bool reflections_arrived = false;
+        for (size_t t = 2400; t < 4800; t++) {
+            if (impulse_buf[t] != 0) {
+                reflections_arrived = true;
+                break;
+            }
+        }
+        assert(reflections_arrived);
+        printf("  [PASS] FieldVox EnvironmentalReverb 50ms pre-delay (2400 samples) verification\n");
+    }
+
+    /* 6b. FieldVox 3-tap discrete echo model verification */
+    {
+        fv_audio_dsp_reset();
+        const int delay_ms = 150;
+        const uint32_t j = (uint32_t)(48000 * delay_ms / 1000);
+        int16_t *echo_test = calloc(28800 + 100, sizeof(int16_t));
+        assert(echo_test != NULL);
+        echo_test[0] = 10000;
+        fv_audio_apply_echo_ex(echo_test, (int)(28800 + 100), delay_ms, 1.0f);
+
+        assert(echo_test[0] == 10000);
+        for (size_t t = 1; t < j; t++) {
+            assert(echo_test[t] == 0);
+        }
+        assert(echo_test[j] == 600);
+        for (size_t t = j + 1; t < 2 * j; t++) {
+            assert(echo_test[t] == 0);
+        }
+        assert(echo_test[2 * j] == 180);
+        for (size_t t = 2 * j + 1; t < 3 * j; t++) {
+            assert(echo_test[t] == 0);
+        }
+        assert(echo_test[3 * j] == 54);
+        for (size_t t = 3 * j + 1; t < 28800 + 100; t++) {
+            assert(echo_test[t] == 0);
+        }
+        free(echo_test);
+        printf("  [PASS] Legacy PCM echo 3-tap discrete model (production fragment echo is tested separately) (Volume_k = vol * 0.2 * (0.3)^k) verified\n");
+    }
+
     const int16_t capture[] = { -32768, -1234, 0, 1234, 32767 };
     fv_audio_capture_and_analyze(capture, (int)(sizeof(capture) / sizeof(capture[0])));
     char wav_path[128];
@@ -385,8 +758,8 @@ int main(void) {
 
         /* BT.709 Studio Swing coefficients: Y in [16..235], Cb/Cr in [16..240] centered at 128 */
         const int y = ((54 * r + 183 * g + 18 * b + 128) >> 8) + 16;
-        const int cb = ((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128;
-        const int cr = ((128 * r - 116 * g - 12 * b + 128) >> 8) + 128;
+        const int cb = (-29 * r - 99 * g + 128 * b + 32896) >> 8;
+        const int cr = (128 * r - 116 * g - 12 * b + 32896) >> 8;
 
         /* For pure Red: Y ~ 70, Cb ~ 100 (< 128), Cr ~ 256 clamped to 255 (> 200) */
         assert(y >= 65 && y <= 75);
@@ -399,8 +772,8 @@ int main(void) {
         const int bg = (int)((blue_pixel >> 8) & 0xFF);
         const int bb = (int)((blue_pixel >> 16) & 0xFF);
         assert(br == 0 && bg == 0 && bb == 255);
-        const int b_cb = ((-29 * br - 99 * bg + 128 * bb + 128) >> 8) + 128;
-        const int b_cr = ((128 * br - 116 * bg - 12 * bb + 128) >> 8) + 128;
+        const int b_cb = (-29 * br - 99 * bg + 128 * bb + 32896) >> 8;
+        const int b_cr = (128 * br - 116 * bg - 12 * bb + 32896) >> 8;
         /* For pure Blue: Cb must be high (> 200), Cr must be low (< 128) */
         assert(b_cb > 200);
         assert(b_cr < 128);
@@ -505,7 +878,7 @@ int main(void) {
     /* 11. Verify GUI widget layout invariants, bounding boxes, dock isolation, and tap hit resolution */
     {
         assert(TEST_W_CAL == 0);
-        assert(TEST_W_COUNT == 41);
+        assert(TEST_W_COUNT == 51);
 
         /* Test across various display configurations:
          * 1) Standard portrait: 1080x2400, density 2.625
@@ -525,7 +898,7 @@ int main(void) {
             const int screen_h = configs[c_idx].h;
             const float d = configs[c_idx].d;
             const bool landscape = screen_w > screen_h;
-            const float top_inset = (landscape ? 14.0f : 58.0f) * d;
+            const float top_inset = (landscape ? 36.0f : 58.0f) * d;
             const float side_inset = (landscape ? 36.0f : 12.0f) * d;
             const float bottom_inset = (landscape ? 10.0f : 32.0f) * d;
             const float ui_x0 = side_inset;
@@ -536,7 +909,7 @@ int main(void) {
             memset(widgets, 0, sizeof(widgets));
 
             /* Top header (no placed widgets) */
-            const float header_h = (landscape ? 28.0f : 36.0f) * d;
+            const float header_h = (landscape ? 48.0f : 66.0f) * d;
             const float status_y = top_inset + header_h + 3.0f * d;
             const float status_h = (landscape ? 14.0f : 18.0f) * d;
             const float badge_y = status_y + status_h + 3.0f * d;
@@ -550,7 +923,7 @@ int main(void) {
             /* Dock & Floating Visualizer */
             const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
             const float bottom_bar_y = (float)screen_h - bottom_inset - bottom_bar_h;
-            const float vis_h = (landscape ? 54.0f : 80.0f) * d;
+            const float vis_h = (landscape ? 74.0f : 130.0f) * d;
             const float vis_top = bottom_bar_y - vis_h - 8.0f * d;
 
             /* Floating visualizer placed when drawer is closed */
@@ -570,7 +943,7 @@ int main(void) {
 
             /* Left flank */
             const float b1_x = ui_x0;
-            widgets[TEST_W_START] = (TestWidgetRect){b1_x, btn_y, btn_w, btn_h, true};
+            widgets[TEST_W_SESS] = (TestWidgetRect){b1_x, btn_y, btn_w, btn_h, true};
             const float b2_x = b1_x + btn_w + gap;
             widgets[TEST_W_MARK_HIT] = (TestWidgetRect){b2_x, btn_y, btn_w, btn_h, true};
 
@@ -606,7 +979,7 @@ int main(void) {
             /* Test tap resolution for center shutter */
             assert(test_resolve_tap(widgets, dock_cx, dock_cy) == TEST_W_VIDEO_REC);
             /* Test tap resolution for SWEEP */
-            assert(test_resolve_tap(widgets, b1_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_START);
+            assert(test_resolve_tap(widgets, b1_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_SESS);
             /* Test tap resolution for MARK HIT */
             assert(test_resolve_tap(widgets, b2_x + btn_w * 0.5f, btn_y + btn_h * 0.5f) == TEST_W_MARK_HIT);
             /* Test tap resolution for CAM TINT */

@@ -1,180 +1,135 @@
 # FieldVox Lab
 
-FieldVox Lab is an experimental, audit-oriented Android ITC and sensor workstation. The Android app is implemented as a pure `android.app.NativeActivity`: project runtime code is C11 and Zig, station data is a CRC32-checked binary blob, and there are no project Java, Kotlin, or C++ runtime sources.
+FieldVox Lab is an experimental Android workstation for sensor-triggered radio audio, offline fragment playback, camera monitoring, and session recording. Its application runtime is written in **C23**, using Android's `NativeActivity`, Camera2 NDK, AAudio, and native media codecs. There are no project Java, Kotlin, or C++ runtime sources.
 
-FieldVox does not claim that sensor changes or audio fragments prove paranormal communication. It records and displays physical signals so investigative sessions can be audited without obscuring where a sound or trigger originated.
+## New audio features
 
-## Current native feature set
+- **LIVE and LOCAL playback.** LIVE buffers online radio across up to ten decks and uses cached clips when streams are unavailable. LOCAL plays cached radio clips without network connections, or fragments from a saved PCM WAV selected in the library.
+- **Independent pitch and speed.** Fragments use pitch ratios of 0.6×, 1.0×, or 1.2× and playback speeds of 0.7×, 1.0×, or 1.2×. Speed changes playback duration independently of pitch.
+- **Ten playback slots.** Each admitted fragment gets its own immutable audio buffer. Busy slots remain reserved through the configured reverb tail; a full pool rejects additional fragments rather than replacing a playing voice.
+- **Four finite echo repeats.** Repeats play at gains of 0.06, 0.018, 0.0054, and 0.00162. The Echo slider sets the interval between repeats to 200 ms × its level.
+- **Native reverb.** A floating-point reverberator provides 50 ms pre-delay, mix-dependent diffusion, and decay up to nine seconds. It approximates an environmental reverb effect; it is not a measured model of a particular room.
+- **Persistent offline cache.** LIVE saves decoded four-second PCM clips in a dedicated cache. Memory and disk caches each hold up to 100 clips, evict the oldest clips, and limit each cached clip to five playback admissions per run. Cache eviction does not delete session recordings or marked hits.
+- **Sensor-derived fragment selection.** Magnetometer and accelerometer vector magnitudes supply decimal digits for gating, pitch, speed, source choice, seek position, and source lengths of 400–760 ms. Distortion adjusts pitch/speed selection thresholds instead of applying clipping.
+- **Playback cooldowns.** Accepted fragments share a reverb-dependent cooldown of 2–10 seconds. A five-second cooldown limits repeated use of the same station.
+- **Speaking mute.** An optional microphone detector measures energy in the 80–300 Hz band, suppresses new fragments during detection and for two seconds afterward, and fades speaker monitoring. This is a frequency-band detector, not speech recognition.
+- **Timed static bursts.** Optional low-level white noise follows the selected sweep interval with a 40 ms gap between bursts.
 
-- **512-slot verified station ring**: Binary station plan generated in Zig and embedded as a packed binary blob with CRC32 verification. Streams are verified direct live broadcasts (news, public radio, talk, NOAA weather, aviation, global shortwave relays).
-- **GhostTube-style viewfinder GUI**: High-contrast darkroom HUD with interactive reticle, corner targeting brackets, status telemetry, and a slide-up controls drawer.
-- **Real-time H.264 + AAC MP4 video recording**: Hardware-accelerated AMediaCodec video recording (H.264 AVC High Profile @ 720×1280, 30 fps, BT.709 studio limited swing, 3.5 Mbps) multiplexed with 48 kHz AAC audio in an MP4 container.
-- **Hardware-aligned NV12 encoding**: Automatic query of codec input format (`AMEDIAFORMAT_KEY_STRIDE` = 768) preventing scanline shifting, chroma corruption, or edge artifacts on Android hardware encoders.
-- **Camera2 NDK viewfinder pipeline**: Native 16:9 640×360 capture with hardware sensor orientation compensation (90°/180°/270°/0° bijective rotation) and dynamic range AGC low-light boost.
-- **Camera buffer starvation protection & watchdog**: 8-buffer reader pool with queue-draining `acquireNextImage` loop and a 2000 ms frame liveness watchdog that automatically recycles stalled HAL sessions.
-- **Spectral optical filters**: Real-time luma processing for **PHOSPHOR** (night-vision green), **THERMAL** (infrared heat map), **CYAN** (twilight spectral), and **STEALTH** (OLED black).
-- **Multi-sensor VOX gating**: Real-time NDK sensor processing for magnetometer (EMF), gyroscope, accelerometer (geophone vibration), barometer (cold-spot pressure delta), and proximity detection.
-- **Offline & live sweep modes**: Forward, reverse, and random sweep patterns with user-selectable cadences (100 ms, 250 ms, 500 ms, 1000 ms) and dual-deck carrier switching.
-- **Native DSP audio chain**: Voice-band bandpass filter (300 Hz–3.4 kHz), 150 ms feedback echo, Schroeder reverb, granular pitch shifting, white noise generator, and reverse-block buffer processing.
-- **Floating sound visualizer**: 256-point FFT spectral analysis driving a centered, real-time audio spectrum display.
-- **Pre-roll hit capture (MARK HIT)**: Five-second native PCM ring buffer; tapping **MARK HIT** captures the preceding three seconds as a timestamped 48 kHz, 16-bit mono WAV file.
-- **Full session WAV recording**: Continuous background audio logging to app-private storage.
-- **Sensor-driven REM-pod tone synthesis**: Four-tier audible alert tones synthesized natively in Zig based on EMF deviation.
-- **Azimuth-driven 3D stereo panning**: Maps compass orientation to equal-power stereo gains.
-- **Estes blind mode**: AMOLED blackout screen with touch-based hit logging and a visible exit target.
+Sensor-only triggering is the default. AUTO adds timer-driven requests. Pitch defaults to sensor selection and can be overridden with LOW, NORMAL, or HIGH.
 
-## Controls & GUI Layout
+Audio comes from broadcast streams or selected WAV files. FieldVox does not use word banks, text-to-speech, or generated phrases. Sensor readings and perceived audio messages are not evidence of paranormal communication.
 
-The user interface follows a GhostTube VOX-inspired camera workstation layout with a bottom control dock, interactive telemetry HUD, and slide-up DSP drawer:
+## Camera, sensors, and display
 
-| Control | Position | Behavior |
-| --- | --- | --- |
-| **Record Shutter** (`REC` / `STOP`) | **Bottom Center** | Prominent circular shutter button. In idle state, displays a white concentric ring with solid red trigger. When recording, morphs into a rounded Stop square with an animated pulsating red aura, live recording tally badge (`REC MM:SS`) with flashing red LED, and subtle perimeter viewfinder frame. |
-| `LIVE` / `SWEEP` | Bottom Left | Starts or stops the live 512-station radio sweep engine with green live tally indicator. |
-| `MARK HIT` | Bottom Left | Instantly flushes preceding 3 seconds from the 48 kHz ring buffer to a timestamped WAV hit file. |
-| `LENS` (`PHOSPHOR` / `THERMAL` / etc.) | Bottom Right | Cycles spectral camera filters (Night Vision Green, Heat Map Thermal, Twilight Cyan, Stealth OLED, Off). |
-| `SETTINGS` | Bottom Right | Slides open the DSP & investigation parameter drawer. |
-| `MUTE` / `MUTED` | Top HUD | Silences speaker monitoring immediately while the live sweep keeps buffering and WAV/MP4 capture continues. |
-| `TORCH` | Top HUD | Toggles the rear-camera flashlight without interrupting the viewfinder or an active recording. |
-| `?` | Top HUD | Opens the in-app field guide for the primary controls, sensor badges, recording, and safe-use guidance. |
-| **EMF Meter Badge** | **Top HUD Left** | Tapping the EMF meter badge directly zero-calibrates the magnetometer baseline. |
-| **Environment Badge** | **Top HUD Right** | Tapping the environment telemetry badge toggles REM-POD mode. |
-| `CAL ZERO` | Drawer | Re-zeros magnetometer and barometric baseline references. |
-| `CADENCE` | Drawer | Cycles sweep interval (100 ms, 250 ms, 500 ms, 1000 ms). |
-| `DIR` | Drawer | Toggles sweep pattern: Forward (`FWD`), Reverse (`REV`), Random (`RND`). |
-| `DUAL` / `SB11` | Drawer | Toggles dual simultaneous carrier sweepers. |
-| `VOCAL` | Drawer | Toggles telephone voice-band pass filter (300 Hz–3.4 kHz). |
-| `ECHO` | Drawer | Toggles 150 ms feedback delay. |
-| `REVERB` | Drawer | Toggles native Schroeder reverberation. |
-| `PITCH` | Drawer | Toggles granular pitch transposition (-2st, 0, +2st). |
-| `NOISE` | Drawer | Toggles background white-noise bed. |
-| `REMPOD` | Drawer | Toggles proximity/EMF audio alert synth. |
-| `3D PAN` | Drawer | Toggles compass-based stereo panning. |
-| `ESTES` | Drawer | Enters blind listener mode with tap-to-mark hit logging. |
-| `SENS LOW` / `MED` / `HIGH` | Drawer | Selects named EMF trigger presets for noisy rooms (3.00 µT), general indoor use (1.65 µT), or quiet environments (0.75 µT). |
-| `COOL` | Drawer | Cycles the sensor trigger cooldown through 250, 450, and 900 ms. |
-| `SESS WAV` | Drawer | Toggles continuous background WAV logging. |
-| `VID MP4` | Drawer | Toggles H.264 + AAC MP4 video recording directly from drawer. |
-| `EVIDENCE` | Drawer | Opens the four most recent WAV/MP4 captures with timestamp and file size; `OPEN` publishes the item once to `Music/FieldVox` or `Movies/FieldVox` through Android MediaStore, then hands its readable `content://` URI to an installed viewer. |
+- Camera2 NDK viewfinder with orientation correction, low-light luma boost, and a stalled-frame watchdog.
+- PHOSPHOR, THERMAL, CYAN, and STEALTH display filters. These are visual treatments of ordinary camera images; THERMAL is a false-color display, not a temperature measurement.
+- Magnetometer, accelerometer, gyroscope, proximity, and barometer telemetry, where supported by the device.
+- Spectrum, PCM waveform, and spectral history views with selectable trace colors.
+- Slide-up audio controls, advanced sensor controls, haptic feedback, torch control, and an in-app field guide.
+- Optional voice-band filtering, reversed audio, sensor-driven REM tones, compass-based stereo panning, and an Estes blackout mode with tap-to-mark logging.
 
-Every control provides a short haptic confirmation. `MARK HIT` provides a distinct double pulse and a temporary `HIT SAVED` counter in the viewfinder; sensor alerts are rate-limited so they remain useful without constant vibration.
+The embedded 512-entry station catalog is generated in C23 and verified with CRC32 at startup. Availability depends on the broadcaster and network.
 
-## Media Specifications
+## Recording and library
 
-### MP4 Video Recordings
-- **Container**: ISO Base Media File Format (`.mp4`)
-- **Video Track**: H.264 AVC High Profile (`avc1`)
-  - Resolution: 720×1280 (Portrait) / 1280×720 (Landscape)
-  - Frame Rate: 30 fps progressive
-  - Colorimetry: BT.709 Studio Swing (`tv, bt709, progressive`)
-  - Bitrate: 3.5 Mbps VBR
-- **Audio Track**: AAC-LC (`mp4a`)
-  - Sample Rate: 48,000 Hz mono
-  - Bitrate: 128 kbps
-- **Destination**: `/storage/emulated/0/Android/data/org.fieldvox.lab/files/fieldvox-recordings/session-<timestamp>.mp4`
+**MARK HIT** saves up to three seconds of available pre-roll as two aligned 48 kHz, 16-bit mono WAV files and a JSON timeline:
 
-### Audio Hit Captures (MARK HIT)
-- **Format**: Broadcast WAV (`RIFF / WAVE fmt 1`)
-- **Audio**: 48,000 Hz, 16-bit signed PCM mono
-- **Duration**: 3.0 seconds pre-roll capture
-- **Destination**: `/storage/emulated/0/Android/data/org.fieldvox.lab/files/fieldvox-hits/hit-<timestamp>.wav`
+- `hit-<timestamp>-<sequence>-clean.wav`: pitched, tempo-adjusted primary fragments plus microphone audio, before echo, reverb, static, and alert tones.
+- `hit-<timestamp>-<sequence>-preroll.wav`: processed recording audio before speaker mute and stereo panning.
+- `hit-<timestamp>-<sequence>.json`: historical source and trigger metadata, sensor readings, effect settings, pitch ratio, playback speed, grain length, seek fraction, cached-source flag, and active voice count.
 
-## Architecture
+The timeline records the audio blocks actually included in the WAVs. Its completion flag indicates metadata coverage. Pausing resets pre-roll, and newly started captures save only the audio available.
 
-```text
-source/src/station_blob_gen.zig
-        │
-        ├── android/app/src/main/assets/fieldvox_station_plan.bin (512 stations)
-        └── android/app/src/main/cpp/fv_station_blob_data.h
-                    │
-                    ▼
-android.app.NativeActivity (libfieldvox_native.so)
-        │
-        ├── fieldvox_native_activity.c   Lifecycle, touch widgets, HUD, drawer, worker threads
-        ├── fv_native_video_recorder.c   NDK AMediaCodec (H.264/AAC) + AMediaMuxer (NV12 BT.709)
-        ├── fv_native_camera.c           Camera2 NDK, AImageReader (640x360), rotation, AGC, watchdog
-        ├── fv_gfx.c                     Anti-aliased software rasteriser, cover blit, text glow
-        ├── fv_native_radio.c            Multi-deck HTTP streaming engine & carrier switching
-        ├── fv_grain_gate.c              Sensor-triggered VOX grain windowing
-        ├── fv_stage1r_native_audio.c    256-pt FFT, 5s ring buffer, Schroeder reverb, pitch shift
-        └── fieldvox_zig_dsp.zig         Zig binary blob validator, REM tones, 3D panning gains
-```
+**SESS WAV** records continuous session audio. **REC / STOP** records camera video as H.264 with AAC audio in MP4: up to 30 fps, 3.5 Mbps video, BT.709 limited-range color, and 48 kHz mono audio at 128 kbps. Capture timestamps follow the actual frame cadence.
 
-The Zig DSP module is cross-compiled to position-independent code (PIC) for each Android ABI (`arm64-v8a`, `x86_64`) and statically linked into `libfieldvox_native.so`.
+**LIBRARY** lists saved WAV and MP4 captures. In-app replay supports seeking, WAV waveforms, and bookmarks. **BANK** selects a saved PCM WAV as the LOCAL fragment source; **PLAY** replays the recording. Explicit exports use Android MediaStore under `Music/FieldVox` or `Movies/FieldVox`.
 
-## Build and Installation
+Recordings, hit captures, and the radio clip cache use separate app-private directories:
 
-### Requirements
+| Content | Directory relative to the app's private storage |
+| --- | --- |
+| Session recordings | `files/fieldvox-recordings/` |
+| Marked hits and JSON timelines | `files/fieldvox-hits/` |
+| Automatically cached radio clips | `files/fieldvox-grain-cache/` |
 
-- Linux (Arch Linux, Debian/Ubuntu, or compatible)
-- Android SDK (API 30+) & NDK (r25+)
-- Zig 0.13+ or compatible
-- JDK 17+
-- C11 compiler (`gcc` or `clang`) for host tests
-- `adb` and `ffmpeg` (for media verification)
+## Main controls
 
-### Build Android APK
+| Control | Purpose |
+| --- | --- |
+| `RUNNING / STOPPED` | Start or stop fragment playback. |
+| `LIVE / LOCAL` | Choose online radio with cached fallback or offline playback. |
+| `AUTO / SENSOR` | Enable timer-plus-sensor requests or sensor-only requests. |
+| `ECHO`, `REVERB`, `DISTORTION` | Adjust repeat spacing, reverb mix, and sensor pitch/speed selection. |
+| `RADIO SWEEP RATE` / `CADENCE` | Set sweep/static timing and optional AUTO source length. Sensor source lengths remain 400–760 ms. |
+| `PITCH` | Cycle AUTO, LOW, NORMAL, and HIGH. |
+| `SPEAKING MUTE` | Enable microphone-based fragment suppression and speaker fading. |
+| `WHITE NOISE` / `NOISE` | Enable timed static bursts. |
+| `MUTE / MUTED` | Silence speaker monitoring while recording continues. |
+| `MARK HIT` | Save paired pre-roll audio and its timeline. |
+| `REC / STOP`, `SESS WAV` | Record MP4 video or session WAV audio. |
+| `LIBRARY`, `PLAY`, `BANK` | Browse, replay, or select a saved WAV for fragments. |
+| `LENS`, visualizer arrows and color | Select camera and audio display styles. |
+| `CAL ZERO`, sensitivity and cooldown presets | Adjust sensor baseline and auxiliary sensor trigger settings. |
+| `VOCAL`, reverse, `REMPOD`, `3D PAN`, `ESTES` | Enable optional audio and investigation tools. |
+
+Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speaking mute is off by default. Auxiliary sensor presets are separate from the decimal magnetometer/accelerometer gate and the audio engine's admission cooldowns.
+
+## Build and install
+
+Requirements: a C23-capable host compiler, Android SDK platform/build tools 37, NDK `30.0.16248370`, CMake `4.1.2`, a compatible JDK, and ADB. Minimum Android version is Android 11 (API 30). Builds target `arm64-v8a` and `x86_64`.
+
+Run from the repository root, using your Android SDK path:
 
 ```bash
-cd android
-ANDROID_HOME=/home/baconfat/Android/Sdk ./gradlew :app:assembleDebug
-```
-
-The compiled APK will be at:
-`android/app/build/outputs/apk/debug/app-debug.apk`
-
-### Install and Run on Device
-
-```bash
-# Install to connected device
+ANDROID_HOME=/home/baconfat/Android/Sdk ./android/gradlew -p android :app:assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-
-# Launch NativeActivity
 adb shell am start -n org.fieldvox.lab/android.app.NativeActivity
 ```
 
-## Verification and Testing
+Add `--offline` to the Gradle command when its dependencies are already cached. Installing with `-r` preserves app data. The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-### Host Native Test Suite
+## Verification
 
-Run native C unit tests, Zig DSP tests, and end-to-end smoke tests:
+Run the host C23 unit, recording, fragment-engine, and simulator smoke tests:
 
 ```bash
-make -C source clean
 make -C source test
 ```
 
-### Inspect Output Media on Device
+The fragment tests cover independent pitch/speed conversion, echo timing and gain, speech suppression, admission cooldowns, voice capacity, cache limits, persistence, and invalid inputs. Host tests do not replace camera, codec, sensor, or lifecycle testing on an Android device.
+
+Inspect a connected device and follow runtime diagnostics:
 
 ```bash
-# List recorded videos and hit WAVs
+adb devices -l
+adb shell pidof org.fieldvox.lab
+adb logcat -v time -s FieldVoxNative FieldVoxRadio FieldVoxCamera FieldVoxVideoRec
 adb shell run-as org.fieldvox.lab ls -lh files/fieldvox-recordings
 adb shell run-as org.fieldvox.lab ls -lh files/fieldvox-hits
-
-# Pull newest recorded session
-adb pull /storage/emulated/0/Android/data/org.fieldvox.lab/files/fieldvox-recordings/$(adb shell ls -1t /storage/emulated/0/Android/data/org.fieldvox.lab/files/fieldvox-recordings/ | head -n 1) session_test.mp4
-
-# Verify stream parameters with ffprobe
-ffprobe -hide_banner session_test.mp4
 ```
 
-### Camera & Hardware Encoder Live Telemetry
+Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's actual media properties.
 
-```bash
-# Monitor camera frame production and buffer queue
-adb shell dumpsys media.camera | grep -E "Consumer name|Frames produced|currently dequeued"
+## Implementation
 
-# Monitor video recorder and native activity events
-adb logcat -s FieldVoxVideoRec FieldVoxCamera FieldVoxNative
-```
+| Module | Responsibility |
+| --- | --- |
+| `fieldvox_native_activity.c` | Activity lifecycle, controls, camera HUD, sensors, audio integration, and recording. |
+| `fv_native_radio.c` | Ten-deck network decoding and PCM buffering. |
+| `fv_fragment_engine.c` | Fragment selection, independent pitch/tempo, voice slots, finite echoes, reverb, and static. |
+| `fv_fragment_store.c` | Background clip persistence, reload, and FIFO eviction. |
+| `fv_sensor_dsp.c` | Decimal sensor parameters, station-blob validation, REM tones, and panning gains. |
+| `fv_vox_controls.c` | Microphone voice-band detection and control helpers. |
+| `fv_hit_capture.c` | Paired pre-roll audio and source/effect timelines. |
+| `fv_local_bank.c`, `fv_local_player.c` | Selected-WAV fragments and in-app recording replay. |
+| `fv_native_camera.c`, `fv_native_video_recorder.c` | Native camera capture and H.264/AAC MP4 recording. |
+| `source/` | Host simulator, station generator, utilities, and regression tests. |
 
-## Permissions and Privacy
+All native application translation units require C23. The production audio path uses the fragment engine; older continuous DSP helpers remain available for legacy tests. No Zig compiler or runtime is required.
 
-- `CAMERA`: Required for real-time Camera2 viewfinder display and video recording.
-- `RECORD_AUDIO`: Required for microphone monitoring and audio muxing into video sessions.
-- `INTERNET`: Required for streaming live radio stations from verified online broadcast feeds.
-- All session recordings remain strictly in app-private storage unless explicitly pulled via ADB or exported by the user.
-- There are no word banks, no text-to-speech synthesizers, and no algorithmic phrase generators.
+## Permissions and storage
+
+Camera access supports the viewfinder and video recording. Microphone access is requested for features that need microphone input; radio-only playback and recording do not require it. Network access is used for LIVE radio. Recordings remain in app-private storage until the user exports or copies them.
 
 ## License
 

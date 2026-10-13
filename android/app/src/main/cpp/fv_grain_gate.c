@@ -46,8 +46,32 @@ void fv_gate_init(FvGrainGate *gate, uint32_t sample_rate, uint32_t seed, uint64
     memset(gate, 0, sizeof(*gate));
     gate->sample_rate = sample_rate > 0 ? sample_rate : 48000u;
     gate->rng = seed != 0 ? seed : 0x9E3779B9u;
+    gate->auto_enabled = true;
+    gate->reverb_mix = 0.0f;
     gate->next_allowed = now;
     gate->next_auto = now + ms_to_samples(gate, 1200.0);
+}
+
+void fv_gate_set_reverb_mix(FvGrainGate *gate, float reverb_mix) {
+    if (gate) gate->reverb_mix = fmaxf(0.0f, fminf(1.0f, reverb_mix));
+}
+
+bool fv_gate_emf_exceeds_threshold(float delta, float threshold) {
+    return isfinite(delta) && isfinite(threshold) && threshold > 0.0f && delta >= threshold;
+}
+
+void fv_gate_set_grain_ms(FvGrainGate *gate, int milliseconds) {
+    if (gate) gate->grain_ms = milliseconds <= 0 ? 0 : clamp_int(milliseconds, 65, 1000);
+}
+
+void fv_gate_set_auto_enabled(FvGrainGate *gate, bool enabled, uint64_t now) {
+    if (!gate || gate->auto_enabled == enabled) return;
+    gate->auto_enabled = enabled;
+    gate->next_auto = now + ms_to_samples(gate, 1200.0);
+    if (!enabled && gate->open && gate->reason == FV_GATE_AUTO_SCAN) {
+        gate->open = false;
+        gate->advance_at = 0;
+    }
 }
 
 void fv_gate_carrier_started(FvGrainGate *gate, uint64_t now) {
@@ -56,7 +80,7 @@ void fv_gate_carrier_started(FvGrainGate *gate, uint64_t now) {
     if (!gate->open && gate->next_auto < first) gate->next_auto = first;
 }
 
-/* Builds and opens one packet (Java openOnlineCarrierGate after its admission checks). */
+/* Builds and opens one packet (FieldVox 400-760 ms human speech grain duration). */
 static void open_packet(FvGrainGate *gate, uint64_t now, FvGateReason reason, float delta) {
     int grains;
     switch (reason) {
@@ -83,6 +107,7 @@ static void open_packet(FvGrainGate *gate, uint64_t now, FvGateReason reason, fl
             gap = gap - 15 > 35 ? gap - 15 : 35;
         }
         d = clamp_int(d, 65, 390);
+        if (gate->grain_ms) d = gate->grain_ms;
         gap = clamp_int(gap, 30, 260);
         gate->grain_start[i] = offset;
         gate->grain_len[i] = ms_to_samples(gate, d);
@@ -115,7 +140,7 @@ static uint64_t sensor_cooldown_ms(FvGateReason reason, int cooldown_ms) {
 
 bool fv_gate_request(FvGrainGate *gate, uint64_t now, FvGateReason reason, float delta,
                      int cooldown_ms, bool carrier_ready) {
-    if (!gate) return false;
+    if (!gate || (reason == FV_GATE_AUTO_SCAN && !gate->auto_enabled)) return false;
     if (reason == FV_GATE_PROXIMITY) {
         // Proximity is an intentional user gate: it skips the forced silence but never overlaps a packet.
         if (carrier_ready && !gate->open) {
@@ -134,6 +159,14 @@ bool fv_gate_request(FvGrainGate *gate, uint64_t now, FvGateReason reason, float
         return false;
     }
     if (gate->open || now < gate->next_allowed) return false;
+
+    /* FieldVox Reverb-dependent sensor cooldown: 2000 ms + 8000 ms * reverb_mix */
+    if (reason != FV_GATE_PROXIMITY && reason != FV_GATE_AUTO_SCAN) {
+        const double reverb_lockout_ms = 2000.0 + (8000.0 * (double)gate->reverb_mix);
+        const uint64_t reverb_lockout_samples = ms_to_samples(gate, reverb_lockout_ms);
+        if (gate->has_last_gate && (now - gate->last_gate < reverb_lockout_samples)) return false;
+    }
+
     const uint64_t cooldown = ms_to_samples(gate, (double)sensor_cooldown_ms(reason, cooldown_ms));
     if (cooldown > 0 && gate->has_last_gate && now - gate->last_gate < cooldown) return false;
     open_packet(gate, now, reason, delta);
@@ -149,7 +182,7 @@ bool fv_gate_process(FvGrainGate *gate, uint64_t now, float *gain, int frames, b
         gate->proximity_pending = false;
         fv_gate_request(gate, now, FV_GATE_PROXIMITY, gate->proximity_delta, cooldown_ms, true);
     }
-    if (now >= gate->next_auto) {
+    if (gate->auto_enabled && now >= gate->next_auto) {
         // Auto-scan fires every 1.7-6.0 s whether or not the gate admits it, as in Java.
         if (carrier_ready) fv_gate_request(gate, now, FV_GATE_AUTO_SCAN, 0.0f, cooldown_ms, true);
         gate->next_auto = now + ms_to_samples(gate, 1700.0 + gate_random(gate) * 4300.0);

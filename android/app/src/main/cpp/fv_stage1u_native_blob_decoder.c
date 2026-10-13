@@ -146,7 +146,7 @@ Java_org_fieldvox_lab_MainActivity_nativeStage1UDecoderProbe(JNIEnv *env, jobjec
 
     char buf[512];
     int written = snprintf(buf, sizeof(buf),
-             "stage=1U-A native_blob_ok=%d ring_count=%u base_count=%u blob_crc32=0x%08X decode_probe_failures=%d decoder=packed_binary_blob_zig",
+             "stage=1U-A native_blob_ok=%d ring_count=%u base_count=%u blob_crc32=0x%08X decode_probe_failures=%d decoder=packed_binary_blob_c23",
              ok,
              FV_STATION_BLOB_COUNT,
              FV_STATION_BLOB_COUNT,

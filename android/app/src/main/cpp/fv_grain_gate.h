@@ -28,6 +28,8 @@ typedef enum {
 typedef struct {
     uint32_t sample_rate;
     uint32_t rng;
+    bool auto_enabled;
+    int grain_ms; /* 0 retains the original varied durations; otherwise 65..1000 ms. */
 
     bool open;
     uint64_t packet_start;
@@ -45,13 +47,26 @@ typedef struct {
 
     bool proximity_pending;
     float proximity_delta;
+
+    /* FieldVox Lockout scaled by reverb mix */
+    float reverb_mix;
 } FvGrainGate;
 
 /* Called once. `now` is the current sample clock. */
 void fv_gate_init(FvGrainGate *gate, uint32_t sample_rate, uint32_t seed, uint64_t now);
 
+/* Sets the reverb mix level (0.0..1.0), scaling the trigger lockout to (2000 ms + 8000 ms * mix). */
+void fv_gate_set_reverb_mix(FvGrainGate *gate, float reverb_mix);
+
 /* A new carrier is ready: first auto-scan packet 1.2 s later (Java startOnlineCarrierAutoGate). */
 void fv_gate_carrier_started(FvGrainGate *gate, uint64_t now);
+
+/* Disable timer packets immediately; sensor packets retain their normal cooldowns. */
+void fv_gate_set_auto_enabled(FvGrainGate *gate, bool enabled, uint64_t now);
+void fv_gate_set_grain_ms(FvGrainGate *gate, int milliseconds);
+
+/* Sensitivity is expressed directly in microteslas, matching the UI presets. */
+bool fv_gate_emf_exceeds_threshold(float delta, float threshold);
 
 /*
  * Sensor or auto-scan request. Mirrors the Java cooldowns: the gate must be closed, past its

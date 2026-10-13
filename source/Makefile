@@ -1,9 +1,8 @@
 .RECIPEPREFIX := >
 
 CC ?= cc
-CFLAGS ?= -std=c11 -O3 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
+CFLAGS ?= -std=c23 -O3 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wformat=2
 LDFLAGS ?= -lm
-ZIG ?= /usr/bin/zig
 
 MAIN_BIN := fieldvox
 DUMP_BIN := fv-blobdump
@@ -13,12 +12,12 @@ TEST_BIN := fv-unit-test
 MAIN_SRC := src/main.c src/fv_core.c
 DUMP_SRC := src/fv_blobdump.c src/fv_core.c
 CSV_SRC := src/fv_csvvox.c src/fv_core.c
-TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_grain_gate.c
+TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_grain_gate.c ../android/app/src/main/cpp/fv_hit_capture.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_recording_data.c
 HDR := src/fv_core.h
 
-.PHONY: all clean run inspect dump extract csvtest audition test zigtest blobgen
+.PHONY: all clean run inspect dump extract csvtest audition test blobgen
 
-all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN)
+all: $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN) fv-recording-test fv-fragment-test
 
 $(MAIN_BIN): $(MAIN_SRC) $(HDR)
 >$(CC) $(CFLAGS) -o $@ $(MAIN_SRC) $(LDFLAGS)
@@ -31,6 +30,9 @@ $(CSV_BIN): $(CSV_SRC) $(HDR)
 
 $(TEST_BIN): $(TEST_SRC)
 >$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
+
+fv-recording-test: tests/test_recordings.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_recording_data.h
+>$(CC) $(CFLAGS) -o $@ tests/test_recordings.c ../android/app/src/main/cpp/fv_recording_data.c $(LDFLAGS)
 
 run: all
 >./$(MAIN_BIN) --seconds 24 --threshold 1.80 --seed 0xBEEFBEEF
@@ -60,15 +62,21 @@ audition:
 
 test: all
 >./$(TEST_BIN)
->$(MAKE) zigtest
+>./fv-recording-test
+>./fv-fragment-test
 >./tests/test_smoke.sh
 
-zigtest:
->$(ZIG) test ../android/app/src/main/cpp/fieldvox_zig_dsp.zig
+FRAGMENT_SRC := tests/test_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_store.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c
+fv-fragment-test: $(FRAGMENT_SRC) $(wildcard ../android/app/src/main/cpp/fv_fragment*.h)
+>$(CC) $(CFLAGS) -o $@ $(FRAGMENT_SRC) $(LDFLAGS) -pthread
 
-blobgen:
->$(ZIG) run -lc src/station_blob_gen.zig
+fv-station-blob-gen: src/station_blob_gen.c src/station_catalog.h
+>$(CC) $(CFLAGS) -o $@ src/station_blob_gen.c
+
+blobgen: fv-station-blob-gen
+>./fv-station-blob-gen
 
 clean:
->rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN)
+>rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN) fv-recording-test fv-station-blob-gen
+>rm -f fv-fragment-test
 >rm -rf out

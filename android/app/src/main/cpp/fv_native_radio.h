@@ -17,7 +17,7 @@
  * sweep direction after its dwell expires.
  */
 
-#define FV_RADIO_DECKS 4
+#define FV_RADIO_DECKS 10
 
 enum {
     FV_RADIO_IDLE = 0,
@@ -40,6 +40,9 @@ void fv_radio_set_direction(int direction);
  */
 int fv_radio_pull(int deck, int16_t *out, int frames);
 
+/* Pull PCM and its source identity under the same ring lock. */
+int fv_radio_pull_with_station(int deck, int16_t *out, int frames, int *station);
+
 /* Deck state (FV_RADIO_*), and the station it holds (-1 when none). */
 int fv_radio_deck_state(int deck);
 int fv_radio_deck_station(int deck);
@@ -52,5 +55,13 @@ int fv_radio_deck_buffered(int deck);
 
 /* Number of decks currently live. */
 int fv_radio_live_count(void);
+
+#define FV_STATION_REFRACTORY_MS 5000L
+
+/*
+ * 5-second per-station anti-repeat refractory lockout.
+ */
+bool fv_radio_station_is_refractory(int station, long now_ms);
+void fv_radio_mark_station_triggered(int station, long now_ms);
 
 #endif
