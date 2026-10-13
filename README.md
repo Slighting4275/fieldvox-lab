@@ -4,15 +4,15 @@ FieldVox Lab is an experimental Android workstation for sensor-triggered radio a
 
 ## New audio features
 
-- **LIVE and LOCAL playback.** LIVE buffers online radio across up to ten decks and uses cached clips when streams are unavailable. LOCAL plays cached radio clips without network connections, or fragments from a saved PCM WAV selected in the library.
-- **Independent pitch and speed.** Fragments use pitch ratios of 0.6×, 1.0×, or 1.2× and playback speeds of 0.7×, 1.0×, or 1.2×. Speed changes playback duration independently of pitch.
-- **Ten playback slots.** Each admitted fragment gets its own immutable audio buffer. Busy slots remain reserved through the configured reverb tail; a full pool rejects additional fragments rather than replacing a playing voice.
+- **LIVE and LOCAL playback.** LIVE requests short online radio clips from a shuffled group of ten stations selected by language. Sensor digits choose a live request or a cached clip. Failed requests retain their cooldown instead of silently walking to another station. LOCAL plays cached radio clips without network connections, or fragments from a saved PCM WAV selected in the library.
+- **Independent pitch and speed.** Fragments use pitch ratios of 0.6×, 1.0×, or 1.2× and playback speeds of 0.7×, 1.0×, or 1.2×. Android’s open-source Sonic C engine changes tempo independently of pitch, using sinc resampling and proper short-fragment flushing.
+- **Ten playback slots.** Each admitted fragment gets its own immutable audio buffer. Echoes acquire a slot when their scheduled time arrives. Main slots remain reserved through the configured reverb tail; a full pool rejects additional fragments rather than replacing a playing voice.
 - **Four finite echo repeats.** Repeats play at gains of 0.06, 0.018, 0.0054, and 0.00162. The Echo slider sets the interval between repeats to 200 ms × its level.
-- **Native reverb.** A floating-point reverberator provides 50 ms pre-delay, mix-dependent diffusion, and decay up to nine seconds. It approximates an environmental reverb effect; it is not a measured model of a particular room.
-- **Persistent offline cache.** LIVE saves decoded four-second PCM clips in a dedicated cache. Memory and disk caches each hold up to 100 clips, evict the oldest clips, and limit each cached clip to five playback admissions per run. Cache eviction does not delete session recordings or marked hits.
-- **Sensor-derived fragment selection.** Magnetometer and accelerometer vector magnitudes supply decimal digits for gating, pitch, speed, source choice, seek position, and source lengths of 400–760 ms. Distortion adjusts pitch/speed selection thresholds instead of applying clipping.
-- **Playback cooldowns.** Accepted fragments share a reverb-dependent cooldown of 2–10 seconds. A five-second cooldown limits repeated use of the same station.
-- **Speaking mute.** An optional microphone detector measures energy in the 80–300 Hz band, suppresses new fragments during detection and for two seconds afterward, and fades speaker monitoring. This is a frequency-band detector, not speech recognition.
+- **Native reverb.** The Android open-source LVREV C core replaces the former comb-filter approximation, with 50 ms pre-delay and environmental diffusion, density, and damping controls. Its supported decay is capped at seven seconds; voice reservation still follows the requested nine-second × mix tail. This does not establish identical output to every device’s platform effect.
+- **Persistent offline cache.** LIVE downloads up to 50,000 compressed bytes with bounded network timeouts, decodes the completed clip, and saves PCM in a dedicated cache. Clip duration depends on the broadcaster’s bitrate, with a 30-second safety cap. Memory and disk caches each hold up to 100 clips, evict the oldest clips, and limit each cached clip to five retrievals per run. Cache eviction does not delete session recordings or marked hits.
+- **Sensor-derived fragment selection.** Magnetometer magnitudes and accelerometer/gyroscope squared magnitudes supply decimal digits for gating, pitch, speed, source choice, seek position, and source lengths of 400–760 ms. Distortion adjusts pitch/speed selection thresholds instead of applying clipping.
+- **Playback cooldowns.** Live requests start a reverb-dependent cooldown of 2–10 seconds before downloading. A five-second cooldown limits repeated live requests to the same station. Cached playback selects one clip without substituting another exhausted slot.
+- **Speaking mute.** An optional microphone detector uses a Hann-windowed packed-real FFT to measure energy in the 80–300 Hz band, suppresses new fragments during detection and for two seconds afterward, and fades speaker monitoring. This is a frequency-band detector, not speech recognition.
 - **Timed static bursts.** Optional low-level white noise follows the selected sweep interval with a 40 ms gap between bursts.
 
 Sensor-only triggering is the default. AUTO adds timer-driven requests. Pitch defaults to sensor selection and can be overridden with LOW, NORMAL, or HIGH.
@@ -58,7 +58,7 @@ Recordings, hit captures, and the radio clip cache use separate app-private dire
 | Control | Purpose |
 | --- | --- |
 | `RUNNING / STOPPED` | Start or stop fragment playback, static bursts, and effect tails. Cached clips and selected effect levels are retained. |
-| `LIVE / LOCAL` | Choose online radio with cached fallback or offline playback. |
+| `LIVE / LOCAL` | Choose online radio with sensor-selected cached clips or offline playback. |
 | `AUTO / SENSOR` | Enable timer-plus-sensor requests or sensor-only requests. |
 | `ECHO`, `REVERB`, `DISTORTION` | Adjust repeat spacing, reverb mix, and sensor pitch/speed selection. |
 | `RADIO SWEEP RATE` / `CADENCE` | Set sweep/static timing and optional AUTO source length. Sensor source lengths remain 400–760 ms. |
@@ -73,11 +73,11 @@ Recordings, hit captures, and the radio clip cache use separate app-private dire
 | `CAL ZERO`, sensitivity and cooldown presets | Adjust sensor baseline and auxiliary sensor trigger settings. |
 | `VOCAL`, reverse, `REMPOD`, `3D PAN`, `ESTES` | Enable optional audio and investigation tools. |
 
-Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speaking mute is off by default. Auxiliary sensor presets are separate from the decimal magnetometer/accelerometer gate and the audio engine's admission cooldowns.
+Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speaking mute is off by default. Auxiliary sensor presets are separate from the decimal magnetometer/accelerometer/gyroscope gate and the audio engine's admission cooldowns.
 
 ## Download the APK
 
-[Download FieldVox Lab 0.3.2-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `5`.
+[Download FieldVox Lab 0.4.0-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `6`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 
@@ -129,8 +129,10 @@ Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's ac
 | Module | Responsibility |
 | --- | --- |
 | `fieldvox_native_activity.c` | Activity lifecycle, controls, camera HUD, sensors, audio integration, and recording. |
-| `fv_native_radio.c` | Ten-deck network decoding and PCM buffering. |
+| `fv_native_radio.c` | Bounded on-demand HTTP clip fetches, cancellation and native decoding. |
 | `fv_fragment_engine.c` | Fragment selection, independent pitch/tempo, voice slots, finite echoes, reverb, and static. |
+| `fv_station_policy.c` | Language filtering and shuffled ten-station groups. |
+| `fv_environment_reverb.c` | Android LVREV C reverb integration. |
 | `fv_fragment_store.c` | Background clip persistence, reload, and FIFO eviction. |
 | `fv_sensor_dsp.c` | Decimal sensor parameters, station-blob validation, REM tones, and panning gains. |
 | `fv_vox_controls.c` | Microphone voice-band detection and control helpers. |
@@ -139,7 +141,7 @@ Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's ac
 | `fv_native_camera.c`, `fv_native_video_recorder.c` | Native camera capture and H.264/AAC MP4 recording. |
 | `source/` | Host simulator, station generator, utilities, and regression tests. |
 
-All native application translation units require C23. The production audio path uses the fragment engine; older continuous DSP helpers remain available for legacy tests. No Zig compiler or runtime is required.
+All native application translation units, including vendored Sonic and LVREV sources, compile as C23. The vendored components retain their Apache-2.0 notices and upstream identities under `android/app/src/main/cpp/third_party/`. The production audio path uses the fragment engine; older continuous DSP helpers remain available for legacy tests. No Zig compiler or runtime is required.
 
 ## Permissions and storage
 

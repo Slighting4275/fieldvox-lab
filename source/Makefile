@@ -66,9 +66,19 @@ test: all
 >./fv-fragment-test
 >./tests/test_smoke.sh
 
-FRAGMENT_SRC := tests/test_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_store.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c
-fv-fragment-test: $(FRAGMENT_SRC) $(wildcard ../android/app/src/main/cpp/fv_fragment*.h)
->$(CC) $(CFLAGS) -o $@ $(FRAGMENT_SRC) $(LDFLAGS) -pthread
+FRAGMENT_SRC := tests/test_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_store.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_station_policy.c ../android/app/src/main/cpp/fv_environment_reverb.c
+LVM_ROOT := ../android/app/src/main/cpp/third_party/lvm
+ALGORITHM_SRC := $(wildcard $(LVM_ROOT)/Reverb/src/*.c $(LVM_ROOT)/Common/src/*.c) ../android/app/src/main/cpp/third_party/sonic/sonic.c
+ALGORITHM_FLAGS := -DBUILD_FLOAT -DHIGHER_FS -I$(LVM_ROOT)/Reverb/lib -I$(LVM_ROOT)/Reverb/src -I$(LVM_ROOT)/Common/lib -I$(LVM_ROOT)/Common/src
+ALGORITHM_OBJ := $(patsubst %.c,.audio-build/%.o,$(notdir $(ALGORITHM_SRC)))
+ALGORITHM_HDR := $(wildcard $(LVM_ROOT)/Reverb/lib/*.h $(LVM_ROOT)/Reverb/src/*.h $(LVM_ROOT)/Common/lib/*.h $(LVM_ROOT)/Common/src/*.h) ../android/app/src/main/cpp/third_party/sonic/sonic.h
+$(ALGORITHM_OBJ): $(ALGORITHM_HDR)
+vpath %.c $(sort $(dir $(ALGORITHM_SRC)))
+.audio-build/%.o: %.c
+>mkdir -p .audio-build
+>$(CC) -std=c23 -O2 -g $(ALGORITHM_FLAGS) -c $< -o $@
+fv-fragment-test: $(FRAGMENT_SRC) $(ALGORITHM_SRC) $(ALGORITHM_OBJ) $(wildcard ../android/app/src/main/cpp/*.h)
+>$(CC) $(CFLAGS) $(ALGORITHM_FLAGS) -o $@ $(FRAGMENT_SRC) $(ALGORITHM_OBJ) $(LDFLAGS) -pthread
 
 fv-station-blob-gen: src/station_blob_gen.c src/station_catalog.h
 >$(CC) $(CFLAGS) -o $@ src/station_blob_gen.c
@@ -79,4 +89,5 @@ blobgen: fv-station-blob-gen
 clean:
 >rm -f $(MAIN_BIN) $(DUMP_BIN) $(CSV_BIN) $(TEST_BIN) fv-recording-test fv-station-blob-gen
 >rm -f fv-fragment-test
+>rm -rf .audio-build
 >rm -rf out

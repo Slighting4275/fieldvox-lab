@@ -1,537 +1,288 @@
-/*
- * FieldVox native live-radio carrier engine (C, NDK media).
- * See fv_native_radio.h for the deck model.
- */
-
+#define _POSIX_C_SOURCE 200809L
 #include "fv_native_radio.h"
-
+#include "fv_fragment_engine.h"
+#include "fv_station_policy.h"
+#include "fv_station_blob_data.h"
 #include <android/log.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaExtractor.h>
 #include <media/NdkMediaFormat.h>
-
+#include <fcntl.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "fv_station_blob_data.h"
-
-#define TAG "FieldVoxRadio"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-
-#define OUT_RATE 48000
-#define RING_FRAMES (OUT_RATE * 30)
-/*
- * Android's HTTP cache hands the extractor 64 KB pages, so a live stream arrives in chunks of
- * roughly 4 s (128 kbps) to 16 s (32 kbps) of audio. The ring must hold several chunks; only a
- * runaway backlog beyond MAX_BUFFERED_FRAMES is trimmed.
- */
-#define MAX_BUFFERED_FRAMES (OUT_RATE * 26)
-#define TRIM_TO_FRAMES (OUT_RATE * 16)
-#define DWELL_MIN_MS 25000L
-#define DWELL_JITTER_MS 15000L
-/* Default prebuffer before chunk gaps are measured; then 1.3x the largest measured gap, clamped. */
-#define PREBUFFER_DEFAULT_FRAMES (OUT_RATE * 6)
-#define PREBUFFER_MIN_FRAMES (OUT_RATE)
-#define PREBUFFER_MAX_FRAMES (OUT_RATE * 20)
-#define NO_AUDIO_TIMEOUT_MS 20000L
-#define FAIL_BACKOFF_MS 60000L
-#define PCM_ENCODING_FLOAT 4
-
-typedef struct {
-    pthread_mutex_t lock;
-    int16_t ring[RING_FRAMES];
-    uint32_t read_pos;
-    uint32_t count;
-    int pcm_station; /* guarded by lock; identity of the buffered PCM */
-    bool primed;
-    uint32_t prime_frames; /* guarded by lock */
-    int dwell_count;
-    _Atomic int state;
-    _Atomic int station;
-    pthread_t thread;
-    /* Decoder-thread-only resampler state. */
-    double phase;
-    float prev;
-    int in_rate;
-    int in_channels;
-    int pcm_encoding;
-} FvRadioDeck;
-
-static FvRadioDeck g_decks[FV_RADIO_DECKS];
-static JavaVM *g_vm;
-static int g_station_count;
-static atomic_bool g_started;
-static atomic_bool g_enabled;
-static _Atomic int g_direction = 1;
-
-static pthread_mutex_t g_pick_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int g_cursor = -1;
-static long g_fail_until_ms[FV_STATION_BLOB_COUNT];
-static long g_station_last_trigger_ms[FV_STATION_BLOB_COUNT];
-static uint32_t g_rand = 0x9E3779B9u;
-
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,"FieldVoxRadio",__VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,"FieldVoxRadio",__VA_ARGS__)
+#define FETCH_BYTES 50000u
+static struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t changed;
+    JavaVM *vm;
+    bool started,enabled,queued,busy,ready;
+    unsigned generation,job_generation,group[FV_STATION_GROUP_SIZE];
+    size_t group_count;
+    int station,result_station;
+    FvVoxDecimalTrigger trigger,result_trigger;
+    int16_t *pcm;
+    size_t frames;
+    char directory[512];
+} radio={.mutex=PTHREAD_MUTEX_INITIALIZER,.changed=PTHREAD_COND_INITIALIZER};
 static long now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
+    struct timespec ts; if(clock_gettime(CLOCK_MONOTONIC,&ts)!=0) return 0;
+    return ts.tv_sec*1000L+ts.tv_nsec/1000000L;
 }
-
-bool fv_radio_station_is_refractory(int station, long now_msec) {
-    if (station < 0 || (size_t)station >= FV_STATION_BLOB_COUNT) return false;
-    pthread_mutex_lock(&g_pick_mutex);
-    const bool refractory = (now_msec - g_station_last_trigger_ms[station] < FV_STATION_REFRACTORY_MS);
-    pthread_mutex_unlock(&g_pick_mutex);
-    return refractory;
+static bool current(unsigned generation) {
+    pthread_mutex_lock(&radio.mutex);
+    const bool ok=radio.enabled && radio.generation==generation;
+    pthread_mutex_unlock(&radio.mutex); return ok;
 }
-
-void fv_radio_mark_station_triggered(int station, long now_msec) {
-    if (station < 0 || (size_t)station >= FV_STATION_BLOB_COUNT) return;
-    pthread_mutex_lock(&g_pick_mutex);
-    g_station_last_trigger_ms[station] = now_msec;
-    pthread_mutex_unlock(&g_pick_mutex);
+static const FvBlobStationEntry *entry_at(int station) {
+    if(station<0 || (unsigned)station>=FV_STATION_BLOB_COUNT) return NULL;
+    return (const FvBlobStationEntry *)(FV_STATION_PLAN_BINARY_DATA+16u+(size_t)station*sizeof(FvBlobStationEntry));
 }
-
-static uint32_t next_rand(void) {
-    g_rand ^= g_rand << 13;
-    g_rand ^= g_rand >> 17;
-    g_rand ^= g_rand << 5;
-    return g_rand;
-}
-
-static const FvBlobStationEntry *entry_at(int index) {
-    if (index < 0) index = 0;
-    index %= (int)FV_STATION_BLOB_COUNT;
-    return (const FvBlobStationEntry *)(FV_STATION_PLAN_BINARY_DATA + 16 +
-                                        (size_t)index * sizeof(FvBlobStationEntry));
-}
-
-static bool station_held_elsewhere(int station, int self) {
-    for (int d = 0; d < FV_RADIO_DECKS; d++) {
-        if (d != self && atomic_load(&g_decks[d].station) == station) return true;
-    }
-    return false;
-}
-
-/* Picks the next station in the sweep direction that no other deck holds and is not backing off. */
-static int pick_station(int self) {
-    pthread_mutex_lock(&g_pick_mutex);
-    if (g_station_count <= 0) {
-        pthread_mutex_unlock(&g_pick_mutex);
-        return -1;
-    }
-    const long now = now_ms();
-    const int dir = atomic_load(&g_direction);
-    int chosen = -1;
-    for (int attempt = 0; attempt < g_station_count * 2 && chosen < 0; attempt++) {
-        int candidate;
-        if (dir == 0) {
-            candidate = (int)(next_rand() % (uint32_t)g_station_count);
-        } else {
-            g_cursor = ((g_cursor + dir) % g_station_count + g_station_count) % g_station_count;
-            candidate = g_cursor;
-        }
-        if (candidate >= 0 && (size_t)candidate < FV_STATION_BLOB_COUNT) {
-            if (g_fail_until_ms[candidate] > now) continue;
-            if (station_held_elsewhere(candidate, self)) continue;
-            chosen = candidate;
-        }
-    }
-    if (chosen >= 0) {
-        atomic_store(&g_decks[self].station, chosen);
-    }
-    pthread_mutex_unlock(&g_pick_mutex);
-    return chosen;
-}
-
-static void mark_failed(int station) {
-    if (station < 0 || (size_t)station >= FV_STATION_BLOB_COUNT) return;
-    pthread_mutex_lock(&g_pick_mutex);
-    g_fail_until_ms[station] = now_ms() + FAIL_BACKOFF_MS;
-    pthread_mutex_unlock(&g_pick_mutex);
-}
-
-static void ring_reset(FvRadioDeck *deck, int station) {
-    pthread_mutex_lock(&deck->lock);
-    deck->read_pos = 0;
-    deck->count = 0;
-    deck->pcm_station = station;
-    deck->primed = false;
-    deck->prime_frames = PREBUFFER_DEFAULT_FRAMES;
-    pthread_mutex_unlock(&deck->lock);
-}
-
-static void ring_push(FvRadioDeck *deck, const int16_t *samples, int n) {
-    pthread_mutex_lock(&deck->lock);
-    for (int i = 0; i < n; i++) {
-        if (deck->count == RING_FRAMES) {
-            deck->read_pos = (deck->read_pos + 1) % RING_FRAMES;
-            deck->count--;
-        }
-        deck->ring[(deck->read_pos + deck->count) % RING_FRAMES] = samples[i];
-        deck->count++;
-    }
-    pthread_mutex_unlock(&deck->lock);
-}
-
-/* Downmixes one decoded block to mono and linearly resamples it to 48 kHz into the ring. */
-static void push_decoded(FvRadioDeck *deck, const uint8_t *data, size_t bytes) {
-    const int ch = deck->in_channels > 0 ? deck->in_channels : 1;
-    const bool is_float = deck->pcm_encoding == PCM_ENCODING_FLOAT;
-    const size_t sample_bytes = is_float ? sizeof(float) : sizeof(int16_t);
-    const size_t in_frames = bytes / (sample_bytes * (size_t)ch);
-    if (in_frames == 0 || deck->in_rate < 4000 || deck->in_rate > 192000) return;
-
-    const double step = (double)deck->in_rate / (double)OUT_RATE;
-    int16_t out[1024];
-    int out_n = 0;
-    for (size_t f = 0; f < in_frames; f++) {
-        float mono = 0.0f;
-        for (int c = 0; c < ch; c++) {
-            if (is_float) {
-                float v;
-                memcpy(&v, data + (f * (size_t)ch + (size_t)c) * sizeof(float), sizeof(float));
-                mono += v;
-            } else {
-                int16_t v;
-                memcpy(&v, data + (f * (size_t)ch + (size_t)c) * sizeof(int16_t), sizeof(int16_t));
-                mono += (float)v / 32768.0f;
-            }
-        }
-        mono /= (float)ch;
-        if (!isfinite(mono)) mono = 0.0f;
-        /* Emit every output sample that falls between prev (t=0) and this input frame (t=1). */
-        while (deck->phase <= 1.0) {
-            float s = deck->prev + (mono - deck->prev) * (float)deck->phase;
-            if (s != s) s = 0.0f; /* NaN from a float decoder would make the int16 conversion undefined */
-            if (s > 1.0f) s = 1.0f;
-            if (s < -1.0f) s = -1.0f;
-            out[out_n++] = (int16_t)(s * 32767.0f);
-            if (out_n == (int)(sizeof(out) / sizeof(out[0]))) {
-                ring_push(deck, out, out_n);
-                out_n = 0;
-            }
-            deck->phase += step;
-        }
-        deck->phase -= 1.0;
-        deck->prev = mono;
-    }
-    if (out_n > 0) ring_push(deck, out, out_n);
-}
-
-static void read_output_format(FvRadioDeck *deck, AMediaFormat *format) {
-    int32_t v = 0;
-    if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &v) && v > 0) deck->in_rate = v;
-    if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &v) && v > 0) deck->in_channels = v;
-    deck->pcm_encoding = 2;
-    if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_PCM_ENCODING, &v)) deck->pcm_encoding = v;
-}
-
-/* Counts other decks that are actually playable (live and primed), not merely connected. */
-static int live_decks_other_than(FvRadioDeck *self) {
-    int live = 0;
-    for (int d = 0; d < FV_RADIO_DECKS; d++) {
-        FvRadioDeck *other = &g_decks[d];
-        if (other == self || atomic_load(&other->state) != FV_RADIO_LIVE) continue;
-        pthread_mutex_lock(&other->lock);
-        if (other->primed) live++;
-        pthread_mutex_unlock(&other->lock);
-    }
-    return live;
-}
-
-/*
- * Leaves LIVE only while another deck is playable. The check and the state change happen under
- * g_pick_mutex so two decks whose dwell expires together cannot both see the other and rotate out.
- */
-static bool try_rotate_out(FvRadioDeck *deck) {
-    pthread_mutex_lock(&g_pick_mutex);
-    const bool other_live = live_decks_other_than(deck) > 0;
-    if (other_live) atomic_store(&deck->state, FV_RADIO_CONNECTING);
-    pthread_mutex_unlock(&g_pick_mutex);
-    return other_live;
-}
-
-/* Streams one station until its dwell ends, the sweep is disabled, or the stream fails. */
-static bool stream_station(FvRadioDeck *deck, int station) {
-    const FvBlobStationEntry *entry = entry_at(station);
-    char url[sizeof(entry->url) + 1];
-    memcpy(url, entry->url, sizeof(entry->url));
-    url[sizeof(entry->url)] = '\0';
-
-    AMediaExtractor *extractor = AMediaExtractor_new();
-    AMediaCodec *codec = NULL;
-    bool got_audio = false;
-    if (!extractor) return false;
-
-    const long open_started = now_ms();
-    if (AMediaExtractor_setDataSource(extractor, url) != AMEDIA_OK) {
-        LOGW("deck %d: open failed for %s after %ld ms", (int)(deck - g_decks), entry->callsign,
-             now_ms() - open_started);
-        AMediaExtractor_delete(extractor);
+/* Calls platform HTTP classes from C23. All local references and exceptions are
+ * confined to this request; connect/read deadlines also bound lifecycle cancellation. */
+static bool download(JNIEnv *env,const char *url,FILE *file,unsigned generation) {
+    if((*env)->PushLocalFrame(env,24)!=JNI_OK) {
+        if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         return false;
     }
-
-    int track = -1;
-    char mime[64] = {0};
-    AMediaFormat *format = NULL;
-    const size_t tracks = AMediaExtractor_getTrackCount(extractor);
-    for (size_t t = 0; t < tracks && track < 0; t++) {
-        AMediaFormat *f = AMediaExtractor_getTrackFormat(extractor, t);
-        const char *m = NULL;
-        if (f && AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &m) && m && strncmp(m, "audio/", 6) == 0) {
-            track = (int)t;
-            format = f;
-            snprintf(mime, sizeof(mime), "%s", m);
-        } else if (f) {
-            AMediaFormat_delete(f);
+    bool ok=false; jobject connection=NULL,input=NULL;
+    jclass url_class=(*env)->FindClass(env,"java/net/URL");
+    jclass http_class=(*env)->FindClass(env,"java/net/HttpURLConnection");
+    jclass input_class=(*env)->FindClass(env,"java/io/InputStream");
+    if(!url_class || !http_class || !input_class) goto done;
+    jmethodID constructor=(*env)->GetMethodID(env,url_class,"<init>","(Ljava/lang/String;)V");
+    jmethodID open=(*env)->GetMethodID(env,url_class,"openConnection","()Ljava/net/URLConnection;");
+    jmethodID connect_timeout=(*env)->GetMethodID(env,http_class,"setConnectTimeout","(I)V");
+    jmethodID read_timeout=(*env)->GetMethodID(env,http_class,"setReadTimeout","(I)V");
+    jmethodID header=(*env)->GetMethodID(env,http_class,"setRequestProperty","(Ljava/lang/String;Ljava/lang/String;)V");
+    jmethodID response=(*env)->GetMethodID(env,http_class,"getResponseCode","()I");
+    jmethodID get_input=(*env)->GetMethodID(env,http_class,"getInputStream","()Ljava/io/InputStream;");
+    jmethodID read=(*env)->GetMethodID(env,input_class,"read","([BII)I");
+    if((*env)->ExceptionCheck(env)) goto done;
+    jstring address=(*env)->NewStringUTF(env,url);
+    if(!address) goto done;
+    jobject object=(*env)->NewObject(env,url_class,constructor,address);
+    if(!object || (*env)->ExceptionCheck(env)) goto done;
+    connection=(*env)->CallObjectMethod(env,object,open);
+    if(!connection || (*env)->ExceptionCheck(env) || !(*env)->IsInstanceOf(env,connection,http_class)) goto done;
+    (*env)->CallVoidMethod(env,connection,connect_timeout,5000);
+    (*env)->CallVoidMethod(env,connection,read_timeout,5000);
+    jstring key=(*env)->NewStringUTF(env,"User-Agent"),value=(*env)->NewStringUTF(env,"VXPlayer");
+    if(!key || !value || (*env)->ExceptionCheck(env)) goto done;
+    (*env)->CallVoidMethod(env,connection,header,key,value);
+    if((*env)->ExceptionCheck(env)) goto done;
+    const jint code=(*env)->CallIntMethod(env,connection,response);
+    if((*env)->ExceptionCheck(env) || code<200 || code>=300 || !current(generation)) goto done;
+    input=(*env)->CallObjectMethod(env,connection,get_input);
+    if(!input || (*env)->ExceptionCheck(env)) goto done;
+    jbyteArray bytes=(*env)->NewByteArray(env,4096); if(!bytes) goto done;
+    size_t total=0; const long started=now_ms();
+    while(total<FETCH_BYTES && current(generation) && now_ms()-started<5000L) {
+        const jint wanted=(jint)(FETCH_BYTES-total>4096u ? 4096u : FETCH_BYTES-total);
+        const jint n=(*env)->CallIntMethod(env,input,read,bytes,0,wanted);
+        if((*env)->ExceptionCheck(env) || n<0) break;
+        if(!n) continue;
+        if(n>wanted) break;
+        jbyte buffer[4096]; (*env)->GetByteArrayRegion(env,bytes,0,n,buffer);
+        if((*env)->ExceptionCheck(env) || fwrite(buffer,1,(size_t)n,file)!=(size_t)n) goto done;
+        total+=(size_t)n;
+    }
+    ok=total>0u && current(generation) && fflush(file)==0;
+    LOGI("clip fetch: %zu bytes in %ld ms",total,now_ms()-started);
+done:
+    if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if(input && input_class) {
+        jmethodID close=(*env)->GetMethodID(env,input_class,"close","()V");
+        if(close) (*env)->CallVoidMethod(env,input,close);
+        if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
+    if(connection && http_class) {
+        jmethodID disconnect=(*env)->GetMethodID(env,http_class,"disconnect","()V");
+        if(disconnect) (*env)->CallVoidMethod(env,connection,disconnect);
+        if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    }
+    (*env)->PopLocalFrame(env,NULL); return ok;
+}
+static size_t append_pcm(int16_t *pcm,size_t count,const uint8_t *data,size_t bytes,
+                         int rate,int channels,int encoding,double *phase,float *previous) {
+    if(rate<4000 || rate>192000 || channels<1 || channels>32 || (encoding!=2 && encoding!=4)) return count;
+    const size_t width=encoding==4 ? sizeof(float) : sizeof(int16_t);
+    const size_t frames=bytes/(width*(size_t)channels);
+    const double step=(double)rate/(double)FV_FRAGMENT_RATE;
+    for(size_t i=0;i<frames && count<FV_FRAGMENT_CLIP_FRAMES;i++) {
+        float mono=0.0f;
+        for(int c=0;c<channels;c++) {
+            const uint8_t *at=data+(i*(size_t)channels+(size_t)c)*width;
+            if(encoding==4) { float value;memcpy(&value,at,width);mono+=isfinite(value)?value:0.0f; }
+            else { int16_t value;memcpy(&value,at,width);mono+=(float)value/32768.0f; }
         }
-    }
-    if (track < 0) {
-        LOGW("deck %d: no audio track in %s", (int)(deck - g_decks), entry->callsign);
-        AMediaExtractor_delete(extractor);
-        return false;
-    }
-
-    AMediaExtractor_selectTrack(extractor, (size_t)track);
-    codec = AMediaCodec_createDecoderByType(mime);
-    if (!codec || AMediaCodec_configure(codec, format, NULL, NULL, 0) != AMEDIA_OK ||
-        AMediaCodec_start(codec) != AMEDIA_OK) {
-        LOGW("deck %d: decoder setup failed for %s (%s)", (int)(deck - g_decks), entry->callsign, mime);
-        if (codec) AMediaCodec_delete(codec);
-        AMediaFormat_delete(format);
-        AMediaExtractor_delete(extractor);
-        return false;
-    }
-
-    deck->in_rate = OUT_RATE;
-    deck->in_channels = 1;
-    read_output_format(deck, format);
-    AMediaFormat_delete(format);
-    deck->phase = 0.0;
-    deck->prev = 0.0f;
-    ring_reset(deck, station);
-
-    /* The first dwell is staggered per deck so the decks never all rotate out at the same time. */
-    const long stagger = deck->dwell_count++ == 0 ? (long)(deck - g_decks) * (DWELL_MIN_MS / FV_RADIO_DECKS) : 0L;
-    pthread_mutex_lock(&g_pick_mutex); /* g_rand is shared by every deck thread */
-    const long jitter = (long)(next_rand() % (uint32_t)DWELL_JITTER_MS);
-    pthread_mutex_unlock(&g_pick_mutex);
-    const long dwell_until = now_ms() + DWELL_MIN_MS + stagger + jitter;
-    long last_audio_ms = now_ms();
-    long max_gap_ms = 0;
-    bool input_eos = false;
-    LOGI("deck %d: connected %s [slot %d] %s in %ld ms", (int)(deck - g_decks), entry->callsign, station, mime,
-         now_ms() - open_started);
-
-    while (atomic_load(&g_enabled)) {
-        const long now = now_ms();
-        /* Rotate only while another deck is live, so the sweep never goes silent during a hop. */
-        if (now >= dwell_until && got_audio && try_rotate_out(deck)) break;
-        if (now - last_audio_ms > NO_AUDIO_TIMEOUT_MS) {
-            LOGW("deck %d: %s stalled, rotating", (int)(deck - g_decks), entry->callsign);
-            break;
+        mono/=(float)channels;
+        while(*phase<=1.0 && count<FV_FRAGMENT_CLIP_FRAMES) {
+            const float sample=*previous+(mono-*previous)*(float)*phase;
+            pcm[count++]=(int16_t)(fmaxf(-1.0f,fminf(1.0f,sample))*32767.0f);
+            *phase+=step;
         }
-
-        if (!input_eos) {
-            const ssize_t in_idx = AMediaCodec_dequeueInputBuffer(codec, 10000);
-            if (in_idx >= 0) {
-                size_t cap = 0;
-                uint8_t *buf = AMediaCodec_getInputBuffer(codec, (size_t)in_idx, &cap);
-                const ssize_t n = buf ? AMediaExtractor_readSampleData(extractor, buf, cap) : -1;
-                if (n < 0) {
-                    AMediaCodec_queueInputBuffer(codec, (size_t)in_idx, 0, 0, 0,
-                                                 AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
-                    input_eos = true;
-                } else {
-                    AMediaCodec_queueInputBuffer(codec, (size_t)in_idx, 0, (size_t)n,
-                                                 (uint64_t)AMediaExtractor_getSampleTime(extractor), 0);
-                    AMediaExtractor_advance(extractor);
-                }
+        *phase-=1.0;*previous=mono;
+    }
+    return count;
+}
+static int16_t *decode(const char *path,unsigned generation,size_t *frames) {
+    AMediaExtractor *extractor=AMediaExtractor_new(); AMediaCodec *codec=NULL;
+    AMediaFormat *format=NULL; int16_t *pcm=NULL; *frames=0;
+    if(!extractor) return NULL;
+    const int fd=open(path,O_RDONLY|O_CLOEXEC); if(fd<0) goto done;
+    const off_t bytes=lseek(fd,0,SEEK_END);
+    const media_status_t status=AMediaExtractor_setDataSourceFd(extractor,fd,0,bytes); close(fd);
+    if(status!=AMEDIA_OK) goto done;
+    const size_t tracks=AMediaExtractor_getTrackCount(extractor); int track=-1;char mime[80]={0};
+    for(size_t i=0;i<tracks;i++) {
+        AMediaFormat *candidate=AMediaExtractor_getTrackFormat(extractor,i); const char *type=NULL;
+        if(candidate && AMediaFormat_getString(candidate,AMEDIAFORMAT_KEY_MIME,&type) && type && strncmp(type,"audio/",6)==0) {
+            format=candidate;track=(int)i;snprintf(mime,sizeof(mime),"%s",type);break;
+        }
+        if(candidate) AMediaFormat_delete(candidate);
+    }
+    if(track<0) goto done;
+    codec=AMediaCodec_createDecoderByType(mime);
+    if(!codec || AMediaCodec_configure(codec,format,NULL,NULL,0)!=AMEDIA_OK || AMediaCodec_start(codec)!=AMEDIA_OK) goto done;
+    pcm=malloc(FV_FRAGMENT_CLIP_FRAMES*sizeof(*pcm)); if(!pcm) goto done;
+    AMediaExtractor_selectTrack(extractor,(size_t)track);
+    int32_t rate=48000,channels=1,encoding=2; double phase=0.0;float previous=0.0f;
+    AMediaFormat_getInt32(format,AMEDIAFORMAT_KEY_SAMPLE_RATE,&rate);
+    AMediaFormat_getInt32(format,AMEDIAFORMAT_KEY_CHANNEL_COUNT,&channels);
+    bool input_eos=false; const long started=now_ms();
+    while(current(generation) && now_ms()-started<5000L && *frames<FV_FRAGMENT_CLIP_FRAMES) {
+        if(!input_eos) {
+            const ssize_t index=AMediaCodec_dequeueInputBuffer(codec,10000);
+            if(index>=0) {
+                size_t capacity=0;uint8_t *buffer=AMediaCodec_getInputBuffer(codec,(size_t)index,&capacity);
+                const ssize_t n=buffer ? AMediaExtractor_readSampleData(extractor,buffer,capacity) : -1;
+                input_eos=n<0;
+                AMediaCodec_queueInputBuffer(codec,(size_t)index,0,n<0 ? 0u : (size_t)n,
+                    n<0 ? 0u : (uint64_t)AMediaExtractor_getSampleTime(extractor),
+                    n<0 ? AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM : 0u);
+                if(n>=0) AMediaExtractor_advance(extractor);
             }
         }
-
-        AMediaCodecBufferInfo info;
-        const ssize_t out_idx = AMediaCodec_dequeueOutputBuffer(codec, &info, 10000);
-        if (out_idx >= 0) {
-            if (info.size > 0) {
-                size_t cap = 0;
-                const uint8_t *buf = AMediaCodec_getOutputBuffer(codec, (size_t)out_idx, &cap);
-                if (buf && info.offset >= 0 && info.size > 0 && (size_t)info.offset + (size_t)info.size <= cap) {
-                    push_decoded(deck, buf + info.offset, (size_t)info.size);
-                    const long arrival = now_ms();
-                    const long gap_ms = arrival - last_audio_ms;
-                    if (got_audio && gap_ms > max_gap_ms) {
-                        // A new longest wait between chunks: size the prebuffer to ride out the next one.
-                        max_gap_ms = gap_ms;
-                        long want = gap_ms * (OUT_RATE / 1000) * 13 / 10;
-                        if (want < PREBUFFER_MIN_FRAMES) want = PREBUFFER_MIN_FRAMES;
-                        if (want > PREBUFFER_MAX_FRAMES) want = PREBUFFER_MAX_FRAMES;
-                        pthread_mutex_lock(&deck->lock);
-                        deck->prime_frames = (uint32_t)want;
-                        pthread_mutex_unlock(&deck->lock);
-                    }
-                    last_audio_ms = arrival;
-                    if (!got_audio) {
-                        got_audio = true;
-                        atomic_store(&deck->state, FV_RADIO_LIVE);
-                    }
-                }
+        AMediaCodecBufferInfo info;const ssize_t index=AMediaCodec_dequeueOutputBuffer(codec,&info,10000);
+        if(index>=0) {
+            size_t capacity=0;const uint8_t *buffer=AMediaCodec_getOutputBuffer(codec,(size_t)index,&capacity);
+            if(buffer && info.offset>=0 && info.size>0 && (size_t)info.offset<=capacity && (size_t)info.size<=capacity-(size_t)info.offset)
+                *frames=append_pcm(pcm,*frames,buffer+info.offset,(size_t)info.size,rate,channels,encoding,&phase,&previous);
+            AMediaCodec_releaseOutputBuffer(codec,(size_t)index,false);
+            if(info.flags&AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) break;
+        } else if(index==AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+            AMediaFormat *output=AMediaCodec_getOutputFormat(codec);
+            if(output) {
+                AMediaFormat_getInt32(output,AMEDIAFORMAT_KEY_SAMPLE_RATE,&rate);
+                AMediaFormat_getInt32(output,AMEDIAFORMAT_KEY_CHANNEL_COUNT,&channels);
+                AMediaFormat_getInt32(output,AMEDIAFORMAT_KEY_PCM_ENCODING,&encoding);AMediaFormat_delete(output);
             }
-            AMediaCodec_releaseOutputBuffer(codec, (size_t)out_idx, false);
-            if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) break;
-        } else if (out_idx == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
-            AMediaFormat *out_format = AMediaCodec_getOutputFormat(codec);
-            if (out_format) {
-                read_output_format(deck, out_format);
-                AMediaFormat_delete(out_format);
-            }
-        }
+        } else if(index!=AMEDIACODEC_INFO_TRY_AGAIN_LATER && index!=AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) break;
     }
-
-    atomic_store(&deck->state, FV_RADIO_CONNECTING);
-    AMediaCodec_stop(codec);
-    AMediaCodec_delete(codec);
+done:
+    if(codec) { AMediaCodec_stop(codec);AMediaCodec_delete(codec); }
+    if(format) AMediaFormat_delete(format);
     AMediaExtractor_delete(extractor);
-    ring_reset(deck, -1);
-    return got_audio;
+    if(!*frames || !current(generation)) { free(pcm);pcm=NULL;*frames=0; }
+    return pcm;
 }
-
-static void *deck_thread(void *arg) {
-    FvRadioDeck *deck = (FvRadioDeck *)arg;
-    const int self = (int)(deck - g_decks);
-    JNIEnv *env = NULL;
-    /* AMediaExtractor_setDataSource(url) uses the platform HTTP service, which needs a JVM-attached thread. */
-    if ((*g_vm)->AttachCurrentThread(g_vm, &env, NULL) != JNI_OK) {
-        LOGW("deck %d: JVM attach failed; live radio unavailable", self);
-        return NULL;
+static void *worker(void *unused) {
+    (void)unused;JNIEnv *env=NULL;
+    if((*radio.vm)->AttachCurrentThread(radio.vm,&env,NULL)!=JNI_OK) {
+        pthread_mutex_lock(&radio.mutex);
+        radio.started=false;radio.busy=false;
+        if(radio.queued && radio.enabled && radio.job_generation==radio.generation) {
+            radio.result_station=radio.station;radio.result_trigger=radio.trigger;radio.ready=true;
+        }
+        radio.queued=false;
+        pthread_mutex_unlock(&radio.mutex);return NULL;
     }
-    for (;;) {
-        if (!atomic_load(&g_enabled)) {
-            atomic_store(&deck->state, FV_RADIO_IDLE);
-            atomic_store(&deck->station, -1);
-            usleep(150000);
-            continue;
+    for(;;) {
+        pthread_mutex_lock(&radio.mutex);
+        while(!radio.queued) pthread_cond_wait(&radio.changed,&radio.mutex);
+        const int station=radio.station;const unsigned generation=radio.job_generation;
+        const FvVoxDecimalTrigger trigger=radio.trigger;radio.queued=false;
+        char path[560];snprintf(path,sizeof(path),"%s/radio-slice-XXXXXX",radio.directory);
+        pthread_mutex_unlock(&radio.mutex);
+        int16_t *pcm=NULL;size_t frames=0;
+        const FvBlobStationEntry *entry=entry_at(station);
+        const int fd=mkstemp(path);FILE *file=fd>=0 ? fdopen(fd,"wb") : NULL;
+        if(fd>=0 && !file) close(fd);
+        if(file && entry) {
+            char url[161];memcpy(url,entry->url,160);url[160]=0;
+            const bool fetched=download(env,url,file,generation);
+            const bool closed=fclose(file)==0;file=NULL;
+            if(fetched && closed) pcm=decode(path,generation,&frames);
         }
-        atomic_store(&deck->state, FV_RADIO_CONNECTING);
-        const int station = pick_station(self);
-        if (station < 0) {
-            atomic_store(&deck->station, -1);
-            usleep(500000);
-            continue;
-        }
-        if (!stream_station(deck, station)) {
-            mark_failed(station);
-            usleep(250000);
-        }
-        atomic_store(&deck->station, -1);
+        if(file) fclose(file);
+        if(fd>=0) unlink(path);
+        LOGI("clip result: station=%d frames=%zu duration=%.3fs",station,frames,(double)frames/48000.0);
+        pthread_mutex_lock(&radio.mutex);
+        radio.busy=false;
+        if(radio.enabled && radio.generation==generation) {
+            radio.pcm=pcm;radio.frames=frames;radio.result_station=station;radio.result_trigger=trigger;radio.ready=true;
+        } else free(pcm);
+        pthread_mutex_unlock(&radio.mutex);
     }
     return NULL;
 }
-
-bool fv_radio_start(JavaVM *vm, int station_count) {
-    if (!vm || station_count <= 0) return false;
-    bool expected = false;
-    if (!atomic_compare_exchange_strong(&g_started, &expected, true)) return true;
-    g_vm = vm;
-    g_station_count = station_count > (int)FV_STATION_BLOB_COUNT ? (int)FV_STATION_BLOB_COUNT : station_count;
-    g_rand ^= (uint32_t)now_ms();
-    g_cursor = -1;
-    int started = 0;
-    for (int d = 0; d < FV_RADIO_DECKS; d++) {
-        pthread_mutex_init(&g_decks[d].lock, NULL);
-        g_decks[d].pcm_station = -1;
-        atomic_init(&g_decks[d].state, FV_RADIO_IDLE);
-        atomic_init(&g_decks[d].station, -1);
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        /* Decks live for the process and may be blocked in network I/O, so they are never joined. */
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&g_decks[d].thread, &attr, deck_thread, &g_decks[d]) == 0) started++;
-        pthread_attr_destroy(&attr);
-    }
-    LOGI("live radio engine started: %d decks over %d stations", started, g_station_count);
-    return started > 0;
+bool fv_radio_start(JavaVM *vm,const char *app_directory,const char *language,int station_count) {
+    if(!vm || !app_directory || !language || station_count<1 || station_count>(int)FV_STATION_BLOB_COUNT) return false;
+    pthread_mutex_lock(&radio.mutex);
+    if(radio.started) { pthread_mutex_unlock(&radio.mutex);return true; }
+    const int n=snprintf(radio.directory,sizeof(radio.directory),"%s",app_directory);
+    if(n<0 || (size_t)n>=sizeof(radio.directory)) { pthread_mutex_unlock(&radio.mutex);return false; }
+    char languages[FV_STATION_BLOB_COUNT][4];
+    for(int i=0;i<station_count;i++) memcpy(languages[i],entry_at(i)->lang,4);
+    radio.group_count=fv_station_group(languages,(size_t)station_count,language,(uint32_t)now_ms(),radio.group);
+    radio.vm=vm;pthread_t thread;pthread_attr_t attr;pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr,PTHREAD_CREATE_DETACHED);
+    radio.started=pthread_create(&thread,&attr,worker,NULL)==0;pthread_attr_destroy(&attr);
+    const bool started=radio.started;
+    LOGI("on-demand radio: language=%s group=%zu",language,radio.group_count);
+    for(size_t i=0;i<radio.group_count;i++) LOGI("source %zu: station=%u %s",i,radio.group[i],entry_at((int)radio.group[i])->callsign);
+    pthread_mutex_unlock(&radio.mutex);return started;
 }
-
 void fv_radio_set_enabled(bool enabled) {
-    atomic_store(&g_enabled, enabled);
-}
-
-void fv_radio_set_direction(int direction) {
-    atomic_store(&g_direction, direction > 0 ? 1 : (direction < 0 ? -1 : 0));
-}
-
-int fv_radio_pull_with_station(int deck_index, int16_t *out, int frames, int *station) {
-    if (station) *station = -1;
-    if (!out || frames <= 0) return 0;
-    memset(out, 0, (size_t)frames * sizeof(int16_t));
-    if (deck_index < 0 || deck_index >= FV_RADIO_DECKS || !atomic_load(&g_started)) return 0;
-    FvRadioDeck *deck = &g_decks[deck_index];
-    pthread_mutex_lock(&deck->lock);
-    if (deck->count > MAX_BUFFERED_FRAMES) {
-        const uint32_t drop = deck->count - TRIM_TO_FRAMES;
-        deck->read_pos = (deck->read_pos + drop) % RING_FRAMES;
-        deck->count -= drop;
+    pthread_mutex_lock(&radio.mutex);
+    if(radio.enabled!=enabled) {
+        radio.enabled=enabled;radio.generation++;
+        free(radio.pcm);radio.pcm=NULL;radio.frames=0;radio.ready=false;
     }
-    if (!deck->primed && deck->count >= deck->prime_frames) deck->primed = true;
-    if (!deck->primed || (int)deck->count < frames) {
-        /* Prebuffering, or an underrun: keep the partial audio and rebuild the cushion before playing. */
-        deck->primed = false;
-        pthread_mutex_unlock(&deck->lock);
-        return 0;
+    pthread_mutex_unlock(&radio.mutex);
+}
+int fv_radio_selected_station(int channel) {
+    pthread_mutex_lock(&radio.mutex);
+    const int station=channel>=0 && radio.group_count ? (int)radio.group[(size_t)(unsigned)channel%radio.group_count] : -1;
+    pthread_mutex_unlock(&radio.mutex);return station;
+}
+bool fv_radio_request(int channel,const FvVoxDecimalTrigger *trigger) {
+    if(!trigger || channel<0) return false;
+    pthread_mutex_lock(&radio.mutex);
+    const bool ok=radio.started && radio.enabled && !radio.busy && !radio.ready && radio.group_count;
+    if(ok) {
+        radio.station=(int)radio.group[(size_t)(unsigned)channel%radio.group_count];radio.trigger=*trigger;
+        radio.job_generation=radio.generation;radio.queued=radio.busy=true;pthread_cond_signal(&radio.changed);
     }
-    const int n = frames;
-    for (int i = 0; i < n; i++) {
-        out[i] = deck->ring[deck->read_pos];
-        deck->read_pos = (deck->read_pos + 1) % RING_FRAMES;
+    pthread_mutex_unlock(&radio.mutex);return ok;
+}
+bool fv_radio_take_result(int16_t **pcm,size_t *frames,int *station,FvVoxDecimalTrigger *trigger) {
+    if(!pcm || !frames || !station || !trigger) return false;
+    pthread_mutex_lock(&radio.mutex);const bool ready=radio.ready;
+    if(ready) {
+        *pcm=radio.pcm;*frames=radio.frames;*station=radio.result_station;*trigger=radio.result_trigger;
+        radio.pcm=NULL;radio.frames=0;radio.ready=false;
     }
-    deck->count -= (uint32_t)n;
-    if (station) *station = deck->pcm_station;
-    pthread_mutex_unlock(&deck->lock);
-    return n;
+    pthread_mutex_unlock(&radio.mutex);return ready;
 }
-
-int fv_radio_pull(int deck_index, int16_t *out, int frames) {
-    return fv_radio_pull_with_station(deck_index, out, frames, NULL);
-}
-
-int fv_radio_deck_state(int deck) {
-    if (deck < 0 || deck >= FV_RADIO_DECKS || !atomic_load(&g_started)) return FV_RADIO_IDLE;
-    return atomic_load(&g_decks[deck].state);
-}
-
-int fv_radio_deck_station(int deck) {
-    if (deck < 0 || deck >= FV_RADIO_DECKS || !atomic_load(&g_started)) return -1;
-    return atomic_load(&g_decks[deck].station);
-}
-
-bool fv_radio_deck_ready(int deck, int frames) {
-    if (fv_radio_deck_state(deck) != FV_RADIO_LIVE) return false;
-    pthread_mutex_lock(&g_decks[deck].lock);
-    const bool ready = g_decks[deck].count >= (uint32_t)frames;
-    pthread_mutex_unlock(&g_decks[deck].lock);
-    return ready;
-}
-
-int fv_radio_live_count(void) {
-    int live = 0;
-    for (int d = 0; d < FV_RADIO_DECKS; d++) {
-        if (fv_radio_deck_state(d) == FV_RADIO_LIVE) live++;
-    }
-    return live;
-}
-
-int fv_radio_deck_buffered(int deck) {
-    if (deck < 0 || deck >= FV_RADIO_DECKS || !atomic_load(&g_started)) return 0;
-    pthread_mutex_lock(&g_decks[deck].lock);
-    const int count = (int)g_decks[deck].count;
-    pthread_mutex_unlock(&g_decks[deck].lock);
-    return count;
+bool fv_radio_busy(void) {
+    pthread_mutex_lock(&radio.mutex);const bool busy=radio.busy;pthread_mutex_unlock(&radio.mutex);return busy;
 }

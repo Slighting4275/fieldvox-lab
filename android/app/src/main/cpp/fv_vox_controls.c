@@ -15,33 +15,53 @@ int fv_vox_slider_percent(float x, float left, float width) {
     return (int)(position * 100.0f + 0.5f);
 }
 
+static double packed_bin(const double *re, const double *im, unsigned n, unsigned index) {
+    if (index == 0u) return re[0];
+    if (index == 1u) return re[n/2u];
+    return index & 1u ? im[index/2u] : re[index/2u];
+}
 float fv_vox_calc_speech_band_energy(const int16_t *mic, int frames, uint32_t sample_rate) {
     if (!mic || frames < 64 || !sample_rate) return 0.0f;
-    const int n = frames;
-    const double delta_f = (double)sample_rate / (double)n;
-    int k_start = (int)ceil(80.0 / delta_f);
-    int k_end = (int)floor(300.0 / delta_f);
-    if (k_start < 1) k_start = 1;
-    if (k_end >= n / 2) k_end = n / 2 - 1;
-    if (k_start > k_end) return 0.0f;
-
+    unsigned n = 64u;
+    while (n < 4096u && n*2u <= (unsigned)frames) n *= 2u;
+    double re[4096], im[4096];
     static constexpr double pi2 = 6.28318530717958647692;
-    double total_mag = 0.0;
-    int bin_count = 0;
-    for (int k = k_start; k <= k_end; k++) {
-        double re = 0.0, im = 0.0;
-        const double omega = (pi2 * (double)k) / (double)n;
-        for (int i = 0; i < n; i++) {
-            const double w = 0.5 * (1.0 - cos((pi2 * (double)i) / (double)(n - 1)));
-            const double s = ((double)mic[i] / 32768.0) * w;
-            const double angle = omega * (double)i;
-            re += s * cos(angle);
-            im -= s * sin(angle);
-        }
-        total_mag += sqrt(re * re + im * im);
-        bin_count++;
+    for (unsigned i=0;i<n;i++) {
+        re[i] = ((double)mic[i]/32768.0)*0.5*(1.0-cos(pi2*(double)i/(double)(n-1u)));
+        im[i] = 0.0;
     }
-    return bin_count > 0 ? (float)(total_mag / (double)bin_count) : 0.0f;
+    for (unsigned i=1u,j=0u;i<n;i++) {
+        unsigned bit=n/2u;
+        while (j & bit) { j ^= bit; bit >>= 1u; }
+        j ^= bit;
+        if (i<j) { const double value=re[i]; re[i]=re[j]; re[j]=value; }
+    }
+    for (unsigned length=2u;length<=n;length*=2u) {
+        const double ar=cos(-pi2/(double)length), ai=sin(-pi2/(double)length);
+        for (unsigned off=0;off<n;off+=length) {
+            double wr=1.0,wi=0.0;
+            for (unsigned i=0;i<length/2u;i++) {
+                const unsigned a=off+i,b=a+length/2u;
+                const double tr=wr*re[b]-wi*im[b],ti=wr*im[b]+wi*re[b];
+                re[b]=re[a]-tr; im[b]=im[a]-ti; re[a]+=tr; im[a]+=ti;
+                const double next=wr*ar-wi*ai; wi=wr*ai+wi*ar; wr=next;
+            }
+        }
+    }
+    /* Preserve the packed-real FFT sampling convention and its overlapping
+     * real/imaginary pairs; a conventional bin average gives another threshold. */
+    const double step=(double)sample_rate/(2.0*(double)n);
+    double total=0.0;
+    const unsigned count=(unsigned)floor(220.0/step)+1u;
+    for (unsigned bin=0;bin<count;bin++) {
+        const double frequency=80.0+(double)bin*step;
+        const unsigned index=(unsigned)floor(frequency/step);
+        if (index+1u<n) {
+            const double a=packed_bin(re,im,n,index),b=packed_bin(re,im,n,index+1u);
+            total+=hypot(a,b);
+        }
+    }
+    return count ? (float)(total/(double)count) : 0.0f;
 }
 
 bool fv_vox_detect_voice(FvVoxDucker *state, const int16_t *mic, int frames,

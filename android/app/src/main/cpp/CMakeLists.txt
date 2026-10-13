@@ -6,6 +6,15 @@ set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+file(GLOB FV_LVM_SOURCES CONFIGURE_DEPENDS
+    third_party/lvm/Reverb/src/*.c third_party/lvm/Common/src/*.c)
+add_library(fieldvox_audio_algorithms STATIC ${FV_LVM_SOURCES} third_party/sonic/sonic.c)
+set_target_properties(fieldvox_audio_algorithms PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+target_compile_definitions(fieldvox_audio_algorithms PUBLIC BUILD_FLOAT HIGHER_FS)
+target_include_directories(fieldvox_audio_algorithms PUBLIC
+    third_party/lvm/Reverb/lib third_party/lvm/Reverb/src
+    third_party/lvm/Common/lib third_party/lvm/Common/src)
+
 add_library(
     fieldvox_native
     SHARED
@@ -27,6 +36,8 @@ add_library(
     fv_local_bank.c
     fv_fragment_engine.c
     fv_fragment_store.c
+    fv_station_policy.c
+    fv_environment_reverb.c
 )
 
 target_compile_options(fieldvox_native PRIVATE
@@ -45,4 +56,5 @@ target_link_libraries(
     camera2ndk
     mediandk
     m
+    fieldvox_audio_algorithms
 )

@@ -39,3 +39,5 @@ source/fv-fragment-test
 
 # Local analyzer databases, fuzzing artifacts, and device captures.
 .bug-check/
+
+source/.audio-build/

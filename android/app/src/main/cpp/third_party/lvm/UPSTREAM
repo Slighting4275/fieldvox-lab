@@ -1,0 +1,6 @@
+Android Open Source Project LVREV C implementation
+https://android.googlesource.com/platform/frameworks/av/+/android-9.0.0_r1/media/libeffects/lvm/lib/
+Apache-2.0; copyright notices retained in each source.
+Built with BUILD_FLOAT and HIGHER_FS as C23.
+Local changes: clarify unconditional mixer output indentation; normalize trailing whitespace.
+Only the transitive LVREV dependencies are included.

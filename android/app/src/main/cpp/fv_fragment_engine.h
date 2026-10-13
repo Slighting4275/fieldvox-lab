@@ -9,7 +9,7 @@
 #define FV_FRAGMENT_DECKS 10
 #define FV_FRAGMENT_CACHE_MAX 100
 #define FV_FRAGMENT_VOICES 10
-#define FV_FRAGMENT_CLIP_FRAMES (FV_FRAGMENT_RATE * 4u)
+#define FV_FRAGMENT_CLIP_FRAMES (FV_FRAGMENT_RATE * 30u)
 
 typedef struct FvFragmentEngine FvFragmentEngine;
 typedef struct {
@@ -41,6 +41,12 @@ bool fv_fragment_trigger(FvFragmentEngine *engine, const FvVoxDecimalTrigger *tr
                          bool local_only, uint64_t clock, bool speech);
 bool fv_fragment_trigger_pcm(FvFragmentEngine *engine, const FvVoxDecimalTrigger *trigger,
                              const int16_t *pcm, size_t frames, int station, uint64_t clock, bool speech);
+/* Reserve the cooldown before a network request. Completion never restarts it. */
+bool fv_fragment_begin_live(FvFragmentEngine *engine, const FvVoxDecimalTrigger *trigger,
+                            int station, uint64_t clock, bool speech);
+bool fv_fragment_finish_live(FvFragmentEngine *engine, const int16_t *pcm, size_t frames,
+                             uint64_t clock, bool speech);
+bool fv_fragment_live_pending(const FvFragmentEngine *engine);
 void fv_fragment_render(FvFragmentEngine *engine, int16_t *clean, int16_t *processed,
                         size_t frames, uint64_t clock, FvFragmentStatus *status);
 /* Deterministic, independent pitch/tempo conversion used by production voices. */

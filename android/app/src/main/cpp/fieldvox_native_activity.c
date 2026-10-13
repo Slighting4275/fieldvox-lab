@@ -1,16 +1,5 @@
-/*
- * FIELDVOX LAB - NATIVE ACTIVITY (C23 + BINARY BLOBS)
- *
- * Pure C replacement for the Java MainActivity. The screen layout, the phonetic-grain station
- * sweep and the sensor gates follow the Java version:
- *   - Layout: title, logo glyph, FFT/waterfall panel, EMF meter, channel badge, CAL/cadence/
- *     direction/pitch pills, ECHO/REVERB/NOISE/REV pills, a rounded bottom button row, status
- *     line, a hidden Ctrl panel and the big MARK HIT button; drawn with fv_gfx (Roboto text).
- *   - Sound: one live station at a time plays muted and opens only in short grain packets
- *     (fv_grain_gate), triggered by an auto-scan timer and by magnetometer, gyroscope, vibration
- *     and proximity spikes. The carrier moves to the next station after each packet and every
- *     6 s of dwell. fv_native_radio keeps the next stations buffered so the hop is instant.
- */
+/* FieldVox Lab C23 NativeActivity: sensor-derived fragments, on-demand radio
+ * clips, persistent offline playback, camera monitoring and aligned recording. */
 
 #include <android/configuration.h>
 #include <android/input.h>
@@ -148,7 +137,7 @@ typedef struct {
     float pending_delta[FV_GATE_REASON_COUNT];
     FvVoxDecimalTrigger pending_fragment;
     FvGateReason pending_fragment_reason;
-    bool fragment_pending, local_only, cached_source;
+    bool fragment_pending, fragment_fetching, local_only, cached_source;
     unsigned fragment_cache_count;
 
     /* Controls */
@@ -1047,7 +1036,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
                      s.gate_open ? fv_gate_reason_name(s.gate_reason) : "listening");
         } else {
             snprintf(status_line, sizeof(status_line), "%s • %s",
-                     s.local_only ? "LOCAL" : "LIVE", s.local_only ? "Choose a WAV with BANK in LIBRARY" : "connecting to live streams…");
+                     s.local_only ? "LOCAL" : "LIVE", s.local_only ? "Choose a WAV with BANK in LIBRARY" : "waiting for a sensor fragment…");
         }
         const float ss = fit_size(FVG_FONT_SANS, (landscape ? 9.5f : 11.0f) * d, status_line, ui.w, false);
         fvg_text_center(&canvas, FVG_FONT_SANS, ss, ui.x0, status_y, ui.w, status_h, status_line, 0xFFFFE6A0, false);
@@ -1198,7 +1187,6 @@ static void handle_widget(WidgetId id) {
             break;
         case W_DIRECTION:
             g_app.direction = g_app.direction > 0 ? -1 : (g_app.direction < 0 ? 0 : 1);
-            fv_radio_set_direction(g_app.direction);
             break;
         case W_PITCH:
             g_app.pitch_override = (g_app.pitch_override + 1) % 4;
@@ -1735,7 +1723,7 @@ static void *sensor_thread_func(void *arg) {
                 const float dist = (float)g_app.distortion_percent / 100.0f;
                 const int cache_cnt = (int)g_app.fragment_cache_count;
                 bool vox_pass = false;
-                if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending) {
+                if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching) {
                     vox_pass = fv_vox_eval_decimal_trigger_ex(mx, my, mz, true, dist, cache_cnt, &trig);
 
                 }
@@ -1775,7 +1763,7 @@ static void *sensor_thread_func(void *arg) {
                 const float dist = (float)g_app.distortion_percent / 100.0f;
                 const int cache_cnt = (int)g_app.fragment_cache_count;
                 bool vox_pass = false;
-                if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending) {
+                if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching) {
                     vox_pass = fv_vox_eval_decimal_trigger_ex((double)ev.acceleration.x,
                                                              (double)ev.acceleration.y,
                                                              (double)ev.acceleration.z,
@@ -1799,8 +1787,19 @@ static void *sensor_thread_func(void *arg) {
                         g_app.gyro_baseline = g_app.gyro_baseline * 0.965f + mag * 0.035f;
                         delta = fabsf(mag - g_app.gyro_baseline);
                     }
-                    /* Gyro is movement sensitive: a secondary trigger with a longer cooldown. */
-                    if (delta >= 0.18f) raise_gate(FV_GATE_GYROSCOPE, delta);
+                    /* Gyroscope values participate in the same decimal gate as
+                     * the other vector sensors, without a baseline threshold. */
+                    (void)delta;
+                    if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching) {
+                        FvVoxDecimalTrigger trig;
+                        if (fv_vox_eval_decimal_trigger_ex((double)ev.vector.x, (double)ev.vector.y,
+                                (double)ev.vector.z, false, (float)g_app.distortion_percent/100.0f,
+                                (int)g_app.fragment_cache_count, &trig)) {
+                            g_app.pending_fragment=trig;
+                            g_app.pending_fragment_reason=FV_GATE_GYROSCOPE;
+                            g_app.fragment_pending=true;
+                        }
+                    }
                 }
             } else if (ev.type == ASENSOR_TYPE_PROXIMITY_ID) {
                 const float v = ev.distance;
@@ -2031,7 +2030,6 @@ static void *audio_thread_func(void *arg) {
     int16_t clean[BUFFER_FRAMES];
     int16_t mic[BUFFER_FRAMES];
     int16_t stereo[BUFFER_FRAMES * 2];
-    static int16_t deck_buf[FV_RADIO_DECKS][BUFFER_FRAMES];
     uint64_t clock = 0;
     uint64_t next_auto = 0;
     FvGateReason fragment_reason = FV_GATE_MAGNETOMETER;
@@ -2066,7 +2064,7 @@ static void *audio_thread_func(void *arg) {
         FvVoxDecimalTrigger fragment = g_app.pending_fragment;
         const FvGateReason request_reason = g_app.pending_fragment_reason;
         g_app.fragment_pending = false; g_app.pending_gates = 0;
-        /* Visible channel counter ticks at the cadence, independent of the audio (Java stage1UL). */
+        /* Visible channel counter ticks at the cadence, independent of the audio. */
         if (sweep && now - g_app.last_channel_tick_ms >= FV_SWEEP_CADENCE_MS[g_app.cadence_idx]) {
             g_app.channel_counter = direction == 0 ? (int)((uint32_t)rand() % CHANNEL_RING)
                                                    : (g_app.channel_counter + direction + CHANNEL_RING) % CHANNEL_RING;
@@ -2078,19 +2076,8 @@ static void *audio_thread_func(void *arg) {
             .echo = (float)echo_level/100.0f, .reverb = (float)reverb_level/100.0f,
             .noise = noise, .paused = !sweep, .sweep_ms = (unsigned)grain_ms});
         fv_radio_set_enabled(sweep && !local_only);
-        int live = 0;
-        for (int dk = 0; dk < FV_RADIO_DECKS; dk++) {
-            int station = -1;
-            const int got = sweep && !local_only ? fv_radio_pull_with_station(dk, deck_buf[dk], BUFFER_FRAMES, &station) : 0;
-            if (got > 0 && station >= 0) {
-                live++;
-                if (fv_fragment_feed(fragments, dk, station, deck_buf[dk], (size_t)got)) {
-                    size_t frames = 0; int source = -1;
-                    const int16_t *pcm = fv_fragment_cache_latest(fragments, &frames, &source);
-                    fv_fragment_store_submit(pcm, frames, source);
-                }
-            }
-        }
+        if (local_only && fv_fragment_live_pending(fragments)) fv_fragment_finish_live(fragments, NULL, 0, clock, true);
+        const int live = fv_radio_busy() ? 1 : 0;
         memset(mono, 0, sizeof(mono));
         if (!input && need_input && now >= next_input_retry_ms) {
             next_input_retry_ms = now + 1000L;
@@ -2125,15 +2112,26 @@ static void *audio_thread_func(void *arg) {
         const bool ducked = voice_duck && fv_vox_detect_voice(&ducker, microphone_frames ? mic : NULL,
                                                             microphone_frames, clock, SAMPLE_RATE);
         bool admitted = false;
+        bool request_started = false;
+        int16_t *downloaded = NULL; size_t downloaded_frames = 0; int downloaded_station = -1;
+        FvVoxDecimalTrigger downloaded_trigger = {0};
+        if (fv_radio_take_result(&downloaded, &downloaded_frames, &downloaded_station, &downloaded_trigger)) {
+            if (sweep && !local_only && fv_fragment_live_pending(fragments)) {
+                if (downloaded && downloaded_frames) fv_fragment_store_submit(downloaded, downloaded_frames, downloaded_station);
+                admitted = fv_fragment_finish_live(fragments, downloaded, downloaded_frames, clock, ducked);
+                fragment = downloaded_trigger;
+            }
+            free(downloaded);
+        }
         bool auto_request = false;
-        if (sweep && auto_gate && !requested && clock >= next_auto) {
+        if (sweep && auto_gate && !requested && !admitted && !fv_fragment_live_pending(fragments) && clock >= next_auto) {
             auto_request = true;
             fragment = (FvVoxDecimalTrigger){.passed=true, .pitch_factor=1.0f, .speed_factor=1.0f,
                 .grain_duration_ms=grain_ms, .seek_offset=0.3f, .prefer_live=true,
                 .channel_hop=(int)((clock/48000u)%FV_FRAGMENT_DECKS)};
             next_auto = clock + (uint64_t)(2000 + 80*reverb_level)*48u;
         }
-        if (sweep && (requested || auto_request) && !ducked) {
+        if (sweep && (requested || auto_request) && !admitted && !fv_fragment_live_pending(fragments) && !ducked) {
             if (pitch_override) fragment.pitch_factor = pitch_override == 1 ? 0.6f : (pitch_override == 2 ? 1.0f : 1.2f);
             if (local_only) {
                 static int16_t local_pcm[48000];
@@ -2144,8 +2142,16 @@ static void *audio_thread_func(void *arg) {
                     admitted = fv_fragment_trigger_pcm(fragments, &local_trigger, local_pcm, local_frames, -1, clock, false);
                 }
             }
-            if (!admitted) admitted = fv_fragment_trigger(fragments, &fragment, local_only, clock, ducked);
-            if (admitted) fragment_reason = auto_request ? FV_GATE_AUTO_SCAN : request_reason;
+            if (!admitted) {
+                if (!local_only && fragment.prefer_live) {
+                    const int station = fv_radio_selected_station(fragment.channel_hop);
+                    if (!fv_radio_busy() && fv_fragment_begin_live(fragments, &fragment, station, clock, ducked)) {
+                        request_started = fv_radio_request(fragment.channel_hop, &fragment);
+                        if (!request_started) fv_fragment_finish_live(fragments, NULL, 0, clock, true);
+                    }
+                } else admitted = fv_fragment_trigger(fragments, &fragment, local_only, clock, ducked);
+            }
+            if (admitted || request_started) fragment_reason = auto_request ? FV_GATE_AUTO_SCAN : request_reason;
         }
         FvFragmentStatus fragment_status = {0};
         fv_fragment_render(fragments, clean, mono, BUFFER_FRAMES, clock, &fragment_status);
@@ -2215,10 +2221,11 @@ static void *audio_thread_func(void *arg) {
         g_app.gate_open = fragment_status.playing;
         g_app.gate_reason = fragment_reason;
         g_app.fragment_cache_count = fragment_status.cache_count;
+        g_app.fragment_fetching = fv_fragment_live_pending(fragments);
         g_app.cached_source = fragment_status.cached;
         g_app.packets_opened = fragment_status.admitted;
+        if (request_started || (admitted && !downloaded_trigger.passed)) g_app.last_vox_trigger_ms = now;
         if (admitted) {
-            g_app.last_vox_trigger_ms = now;
             g_app.pitch_semitones = hit_block.pitch_semitones;
         }
         pthread_mutex_unlock(&g_state_mutex);
@@ -2510,8 +2517,15 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     const int valid_blob = fv_verify_blob_checksum(FV_STATION_PLAN_BINARY_DATA, sizeof(FV_STATION_PLAN_BINARY_DATA));
     LOGI("Verified C23 Binary Station Blob: %s (%u stations)", valid_blob ? "VALID" : "INVALID",
          (unsigned)FV_STATION_BLOB_COUNT);
-    fv_radio_set_direction(g_app.direction);
-    if (!fv_radio_start(activity->vm, (int)FV_STATION_BLOB_COUNT)) {
+    char radio_language[4] = "en";
+    AConfiguration *radio_config = AConfiguration_new();
+    if (radio_config) {
+        AConfiguration_fromAssetManager(radio_config, activity->assetManager);
+        AConfiguration_getLanguage(radio_config, radio_language);
+        if (!radio_language[0]) memcpy(radio_language, "en", 3);
+        AConfiguration_delete(radio_config);
+    }
+    if (!fv_radio_start(activity->vm, activity->internalDataPath, radio_language, (int)FV_STATION_BLOB_COUNT)) {
         LOGE("Live radio engine failed to start");
     }
 

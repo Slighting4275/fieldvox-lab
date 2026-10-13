@@ -1,0 +1,4 @@
+Android Open Source Project external/sonic
+https://android.googlesource.com/platform/external/sonic/+/a09959c311150ae1fe42c4d0fd6960e995d4d7b2
+Compiled as C23; no C++ sources.
+Local C23 fixes: wide sinc accumulation, defined negative coefficient scaling, defined unsigned-PCM scaling.

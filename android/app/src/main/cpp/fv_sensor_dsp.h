@@ -24,7 +24,7 @@ typedef enum {
 
 typedef struct {
     bool passed;             /* True if digits [1:4] <= 50 || >= 950 */
-    double magnitude;        /* sqrt(x^2 + y^2 + z^2) */
+    double magnitude;        /* sqrt(sum of squares) for magnetometer; sum of squares for motion sensors. */
     int gate_code;           /* Digits [1:4] integer (0..999) */
     FvVoxPitch pitch;
     float pitch_factor;      /* 0.6f, 1.0f, 1.2f */
@@ -40,7 +40,7 @@ typedef struct {
 
 /*
  * FieldVox decimal sensor gate evaluator.
- * Evaluates a 3D sensor vector (magnetometer or accelerometer) with distortion level (0.0..1.0, default 0.5).
+ * Evaluates a magnetometer, accelerometer, or gyroscope vector with distortion level (0.0..1.0, default 0.5).
  * Modulates pitch and speed digit thresholds according to distortion level.
  * Calculates speed-compensated playback duration.
  * Returns true if the 10% gate window passed.

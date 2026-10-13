@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "../../android/app/src/main/cpp/fv_station_policy.h"
+#include "../../android/app/src/main/cpp/fv_environment_reverb.h"
 
 static constexpr double pi = 3.14159265358979323846;
 static int16_t source[48000], output[96000], clean[96000];
@@ -115,7 +117,7 @@ static void test_pause_silences_static_and_tails(void) {
     assert(fv_fragment_trigger(e,&t,true,0,false));
     FvFragmentStatus status;
     fv_fragment_render(e,clean,output,1024,0,&status);
-    assert(status.playing && status.voices==5 && output[100]!=0);
+    assert(status.playing && status.voices==1 && output[100]!=0);
     settings.paused=true; fv_fragment_set_settings(e,settings);
     assert(!fv_fragment_trigger(e,&t,true,10u*48000u,false));
     fv_fragment_render(e,clean,output,48000,1024,&status);
@@ -138,9 +140,72 @@ static void test_speech_band(void) {
     assert(fv_vox_detect_voice(&state,NULL,0,97023,48000));
     assert(!fv_vox_detect_voice(&state,NULL,0,97024,48000));
 }
+static void test_request_selection_and_timing(void) {
+    FvFragmentEngine *e=fv_fragment_create(); assert(e);
+    fv_fragment_set_settings(e,(FvFragmentSettings){.echo=0.75f,.reverb=0.0f,.sweep_ms=200});
+    memset(source,0,sizeof(source)); source[0]=10000;
+    FvVoxDecimalTrigger t=normal();
+    assert(fv_fragment_cache_add(e,source,19200,7));
+    assert(fv_fragment_cache_add(e,source,19200,8));
+    /* An unavailable selected live deck must not walk to another deck or cache. */
+    assert(!fv_fragment_feed(e,3,42,source,19200));
+    t.channel_hop=2;
+    assert(!fv_fragment_trigger(e,&t,false,0,false));
+    assert(fv_fragment_begin_live(e,&t,42,0,false));
+    assert(fv_fragment_live_pending(e));
+    assert(!fv_fragment_trigger(e,&t,true,48000,false));
+    assert(fv_fragment_finish_live(e,source,19200,48000,false));
+    assert(!fv_fragment_live_pending(e));
+    /* Cooldown is measured from request time, not completion time. */
+    assert(fv_fragment_begin_live(e,&t,43,2u*48000u,false));
+    assert(!fv_fragment_finish_live(e,NULL,0,2u*48000u,false));
+    assert(!fv_fragment_begin_live(e,&t,44,3u*48000u,false));
+    assert(fv_fragment_begin_live(e,&t,44,4u*48000u,false));
+    fv_fragment_finish_live(e,NULL,0,4u*48000u,true);
+    fv_fragment_reset_playback(e);
+    t.channel_hop=0;
+    for(unsigned i=0;i<5;i++) assert(fv_fragment_trigger(e,&t,true,(uint64_t)(10u+i*2u)*48000u,false));
+    /* The selected exhausted cache slot does not walk to the unused slot. */
+    assert(!fv_fragment_trigger(e,&t,true,20u*48000u,false));
+    t.channel_hop=1; assert(fv_fragment_trigger(e,&t,true,20u*48000u,false));
+    fv_fragment_destroy(e);
+
+    e=fv_fragment_create(); assert(e);t=normal();
+    fv_fragment_set_settings(e,(FvFragmentSettings){.echo=0.75f,.sweep_ms=200});
+    assert(fv_fragment_trigger_pcm(e,&t,source,19200,1,0,false));
+    FvFragmentStatus status;
+    fv_fragment_render(e,clean,output,7200,0,&status); assert(status.voices==1);
+    fv_fragment_render(e,clean,output,1,7200,&status); assert(status.voices==2 && output[0]==600);
+    fv_fragment_reset_playback(e);
+    fv_fragment_render(e,clean,output,30000,7201,&status);
+    for(size_t i=0;i<30000;i++) assert(output[i]==0);
+    fv_fragment_destroy(e);
+}
+static void test_language_group_and_reverb(void) {
+    char languages[24][4]; for(unsigned i=0;i<24;i++) memcpy(languages[i],i<12 ? "en\0" : "es\0",4);
+    unsigned a[10],b[10];
+    assert(fv_station_group(languages,24,"en",123,a)==10u);
+    assert(fv_station_group(languages,24,"en",456,b)==10u);
+    assert(memcmp(a,b,sizeof(a))!=0);
+    for(unsigned i=0;i<10;i++) { assert(a[i]<12u); for(unsigned j=0;j<i;j++) assert(a[i]!=a[j]); }
+    FvEnvironmentReverb *r=fv_environment_reverb_create(); assert(r);
+    float send[64]={0},wet[64]; send[0]=16000;
+    fv_environment_reverb_set_mix(r,1.0f);
+    bool tail=false;
+    for(unsigned block=0;block<200;block++) {
+        fv_environment_reverb_process(r,send,wet,64);
+        for(unsigned i=0;i<64;i++) { assert(isfinite(wet[i])); if(block<37u) assert(wet[i]==0.0f);tail|=fabsf(wet[i])>0.01f; }
+        memset(send,0,sizeof(send));
+    }
+    assert(tail);
+    fv_environment_reverb_reset(r);fv_environment_reverb_set_mix(r,0.0f);
+    fv_environment_reverb_process(r,send,wet,64);for(unsigned i=0;i<64;i++) assert(wet[i]==0.0f);
+    fv_environment_reverb_destroy(r);
+}
 int main(void) {
     test_pitch_and_tempo(); test_scheduling(); test_bank_and_live(); test_store(); test_speech_band();
     test_pause_silences_static_and_tails();
+    test_request_selection_and_timing(); test_language_group_and_reverb();
     puts("Fragment engine: pitch/tempo, four echoes, station/global cooldown, speech suppression, cache limits/reuse, live feed, persistent offline reload and stopped-playback silence passed.");
     return 0;
 }
