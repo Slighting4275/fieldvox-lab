@@ -21,6 +21,7 @@ Audio comes from broadcast streams or selected WAV files. FieldVox does not use 
 
 ## Camera, sensors, and display
 
+- **Screen stays awake in the foreground.** Camera monitoring, controls, recording, and library replay remain visible without the normal display timeout. Leaving the app restores normal timeout behavior; the power button can still lock the phone. Estes mode retains its intentional dark display.
 - Camera2 NDK viewfinder with orientation correction, low-light luma boost, and a stalled-frame watchdog.
 - PHOSPHOR, THERMAL, CYAN, and STEALTH display filters. These are visual treatments of ordinary camera images; THERMAL is a false-color display, not a temperature measurement.
 - Magnetometer, accelerometer, gyroscope, proximity, and barometer telemetry, where supported by the device.
@@ -76,7 +77,7 @@ Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speakin
 
 ## Download the APK
 
-[Download FieldVox Lab 0.3.0-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `3`.
+[Download FieldVox Lab 0.3.1-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `4`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 

@@ -18,6 +18,7 @@
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android/sensor.h>
+#include <android/window.h>
 #include <aaudio/AAudio.h>
 
 #include <dirent.h>
@@ -2404,7 +2405,7 @@ static void onInputQueueDestroyed(ANativeActivity *activity, AInputQueue *queue)
 }
 
 static void onPause(ANativeActivity *activity) {
-    (void)activity;
+    ANativeActivity_setWindowFlags(activity, 0u, AWINDOW_FLAG_KEEP_SCREEN_ON);
     fv_local_player_pause();
     atomic_store(&g_app.resumed, false);
     pthread_mutex_lock(&g_state_mutex);
@@ -2419,12 +2420,13 @@ static void onPause(ANativeActivity *activity) {
 }
 
 static void onResume(ANativeActivity *activity) {
+    ANativeActivity_setWindowFlags(activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0u);
     atomic_store(&g_app.resumed, true);
     fv_android_request_runtime_permissions(activity);
 }
 
 static void onDestroy(ANativeActivity *activity) {
-    (void)activity;
+    ANativeActivity_setWindowFlags(activity, 0u, AWINDOW_FLAG_KEEP_SCREEN_ON);
     LOGI("ANativeActivity onDestroy");
     atomic_store(&g_app.running, false);
     atomic_store(&g_app.resumed, false);
@@ -2473,6 +2475,8 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
 
     memset(&g_app, 0, sizeof(g_app));
     g_app.activity = activity;
+    /* Keep the foreground workstation visible without changing device settings. */
+    ANativeActivity_setWindowFlags(activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0u);
     atomic_init(&g_app.running, true);
     atomic_init(&g_app.resumed, true);
     atomic_init(&g_app.mark_hit_requests, 0u);
