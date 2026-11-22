@@ -105,7 +105,7 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n org.fieldvox.lab/android.app.NativeActivity
 ```
 
-Add `--offline` to the Gradle command when its dependencies are already cached. Installing with `-r` preserves app data. The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
+Only pass `--offline` after an online build has cached Gradle plugins and dependencies locally. Installing with `-r` preserves app data. The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Verification
 

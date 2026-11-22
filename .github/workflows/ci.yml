@@ -1,0 +1,17 @@
+name: FieldVox C23 Check
+
+on:
+  push:
+    branches: [main, "fix/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  host-c23:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install font for typography tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core
+      - name: Run static checks and host C23 test suite
+        run: ./scripts/check.sh --fast
