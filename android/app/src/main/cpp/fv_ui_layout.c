@@ -113,8 +113,13 @@ static void layout_bottom_action_bar(WidgetRect rects[static W_COUNT], float x, 
 
 static void layout_vox_drawer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
     fv_ui_place(rects, W_CLOSE_DRAWER, x + w - 42.0f * d, y + 4.0f * d, 36.0f * d, 32.0f * d);
-    const bool wide = w > 600.0f * d || (h < 216.0f * d && w >= 440.0f * d);
-    const float row = fmaxf(0.0f, h - 44.0f * d) / (wide ? 4.0f : 6.0f);
+    const bool compact = h < 216.0f * d && w >= 320.0f * d;
+    const bool wide = w > 600.0f * d || compact;
+    const float row_count = wide ? 4.0f : 6.0f;
+    const float rows_h = fmaxf(0.0f, h - 44.0f * d);
+    const float equal_row = rows_h / row_count;
+    const float action_row = compact ? fmaxf(equal_row, fminf(32.0f * d, rows_h * 0.5f)) : equal_row;
+    const float row = (rows_h - action_row) / (row_count - 1.0f);
     const float slider_w = wide ? (w - 24.0f * d) * 0.5f : w - 16.0f * d;
     const float slider_x = x + 8.0f * d, second_x = slider_x + slider_w + 8.0f * d;
     float ry = y + 40.0f * d;
@@ -133,7 +138,9 @@ static void layout_vox_drawer(WidgetRect rects[static W_COUNT], float x, float y
     const float inset = fminf(4.0f * d, row * 0.15f);
     layout_row(rects, x + 8.0f * d, ry + inset, w - 16.0f * d, row - 2.0f * inset, 4.0f * d, row_a, 3u);
     ry += row;
-    layout_row(rects, x + 8.0f * d, ry + inset, w - 16.0f * d, row - 2.0f * inset, 4.0f * d, row_b, 4u);
+    const float action_inset = fminf(4.0f * d, action_row * 0.15f);
+    layout_row(rects, x + 8.0f * d, ry + action_inset, w - 16.0f * d,
+               action_row - 2.0f * action_inset, 4.0f * d, row_b, 4u);
 }
 
 static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
@@ -143,7 +150,7 @@ static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, fl
 
     float cur_y = y + header_h + 4.0f * d;
     const float gap = 3.0f * d;
-    const float pill_h = (h - header_h - 28.0f * d) / 5.0f;
+    const float pill_h = fmaxf(0.0f, h - header_h - 28.0f * d) / 5.0f;
     const float row_w = w - 16.0f * d;
     const float row_x = x + 8.0f * d;
 
@@ -181,7 +188,8 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
     const float badge_h = (landscape ? 24.0f : 30.0f) * d;
     const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
     const float bottom_bar_y = (float)screen_h - bottom_inset - bottom_bar_h;
-    const bool inline_modes = landscape && (float)screen_h < 300.0f * d && ui_w >= 370.0f * d;
+    const bool short_landscape = landscape && (float)screen_h < 300.0f * d;
+    const bool inline_modes = short_landscape && ui_w >= 320.0f * d;
     const float capture_h = inline_modes ? 0.0f : 48.0f * d;
     const float capture_y = bottom_bar_y - 8.0f * d - capture_h;
     const float capture_w = fminf(ui_w, 214.0f * d);
@@ -194,9 +202,10 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
     const float vis_h = max_vis_span >= 40.0f * d ? fminf(base_vis_h, max_vis_span) : 0.0f;
     const float vis_top = vis_layout == FV_VIS_LAYOUT_TOP ? vis_min_y : vis_bottom - vis_h;
     const float drawer_bottom = vis_bottom;
-    const float drawer_h = fminf(drawer_bottom - top_inset - 12.0f * d,
+    const float drawer_top = short_landscape ? 24.0f * d : top_inset + 12.0f * d;
+    const float drawer_h = fmaxf(0.0f, fminf(drawer_bottom - drawer_top,
                                  (advanced_controls ? (landscape ? 216.0f : 280.0f)
-                                                    : (landscape ? 260.0f : 380.0f)) * d);
+                                                    : (landscape ? 260.0f : 380.0f)) * d));
     const float drawer_y = drawer_bottom - drawer_h;
 
     layout_top_header(rects, ui_x0, top_inset, ui_w, header_h, d);

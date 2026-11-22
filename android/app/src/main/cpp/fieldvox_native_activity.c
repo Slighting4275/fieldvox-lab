@@ -279,6 +279,16 @@ static void clear_clean_start_locked(void) {
     g_app.awaiting_camera_permission = false;
 }
 
+static bool clean_start_pending(const FieldVoxApp *app) {
+    return app->awaiting_camera_permission || app->clean_start_deadline_ms != 0;
+}
+
+static void wait_for_clean_camera_locked(void) {
+    g_app.awaiting_camera_permission = false;
+    g_app.clean_start_deadline_ms = get_time_ms() + 7000L;
+    set_status_locked("Camera starting • tap the shutter to cancel");
+}
+
 static void start_video_recording_locked(void) {
     clear_clean_start_locked();
     pthread_mutex_lock(&g_window_mutex);
@@ -696,7 +706,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
             fvg_circle(c, cx, cy, r_inner, 0xFFFF1744, 0x44000000, fmaxf(1.0f, 1.2f * d));
             /* Subtle glossy 3D sheen */
             fvg_circle(c, cx, cy - r_inner * 0.35f, r_inner * 0.45f, 0x22FFFFFF, 0, 0);
-            const char *label = s->clean_start_deadline_ms ? "WAIT" : "REC";
+            const char *label = clean_start_pending(s) ? "WAIT" : "REC";
             fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), cx - r_inner, cy - r_inner,
                             r_inner * 2.0f, r_inner * 2.0f, label, 0xFFFFFFFF, true);
         } else {
@@ -1069,7 +1079,10 @@ static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const Fv
     draw_placed_pill(ui,W_PLAY_BACK,"< LIBRARY",PILL_IDLE);
     draw_placed_pill(ui,W_PLAY_MUTE,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+84.0f*d,top,w-152.0f*d,34.0f*d,"LOCAL PLAYBACK",0xFFFFFFFF,true);
-    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),p->name,w,false),x,top+38.0f*d,w,25.0f*d,p->name,0xFFDDDDDD,false);
+    const char *caption = p->bookmark_notice ? p->bookmark_notice : p->name;
+    const uint32_t caption_color = p->bookmark_notice ? 0xFFFFAA88u : 0xFFDDDDDDu;
+    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),caption,w,false),
+                    x,top+38.0f*d,w,25.0f*d,caption,caption_color,false);
     fvg_round_rect(c,x,wave_y,w,wave_h,8.0f*d,0xFF141414,0xFF444444,d);
     if (!p->video && !p->error && wave_h > 120.0f * d) {
         fvg_text_center(c, FVG_FONT_SANS, text_sp(ui, 12.0f), x, wave_y + 10.0f * d, w, 20.0f * d,
@@ -1563,7 +1576,7 @@ static void handle_widget(WidgetId id) {
                 char saved_path[512] = {0};
                 stop_video_recording_locked(saved_path, sizeof(saved_path));
                 set_status_locked(saved_path[0] ? "Video saved to Library" : "Video recording stopped");
-            } else if (g_app.clean_start_deadline_ms) {
+            } else if (clean_start_pending(&g_app)) {
                 clear_clean_start_locked();
                 set_status_locked("Recording request canceled");
             } else if (g_app.video_source == FV_VIDEO_SCREEN) {
@@ -1574,12 +1587,13 @@ static void handle_widget(WidgetId id) {
                 const bool allowed = fv_android_has_permission(g_app.activity, "android.permission.CAMERA");
                 if (allowed && fv_camera_has_frame(2000)) {
                     start_video_recording_locked();
+                } else if (allowed) {
+                    wait_for_clean_camera_locked();
                 } else {
-                    g_app.awaiting_camera_permission = !allowed;
-                    g_app.clean_start_deadline_ms = get_time_ms() + (allowed ? 7000L : 30000L);
-                    set_status_locked(allowed ? "Camera starting • tap the shutter to cancel"
-                                              : "Allow camera access to start Clean MP4");
-                    if (!allowed) fv_android_request_permission(g_app.activity, "android.permission.CAMERA", 61);
+                    g_app.awaiting_camera_permission = true;
+                    g_app.clean_start_deadline_ms = get_time_ms() + 30000L;
+                    set_status_locked("Allow camera access to start Clean MP4");
+                    fv_android_request_permission(g_app.activity, "android.permission.CAMERA", 61);
                 }
             }
             break;
@@ -2556,8 +2570,8 @@ static void *camera_thread_func(void *arg) {
                 set_status_locked(g_app.awaiting_camera_permission ? "Clean MP4 needs camera permission"
                                                                    : "Camera did not start • try Screen MP4");
                 clear_clean_start_locked();
-            } else if (atomic_load(&g_app.resumed) && g_app.window_focused &&
-                       !g_app.awaiting_camera_permission && has_perm && fv_camera_has_frame(2000)) {
+            } else if (!g_app.awaiting_camera_permission && atomic_load(&g_app.resumed) && g_app.window_focused &&
+                       has_perm && fv_camera_has_frame(2000)) {
                 start_video_recording_locked();
             }
         }
@@ -2664,16 +2678,19 @@ static void onWindowFocusChanged(ANativeActivity *activity, int focused) {
     pthread_mutex_lock(&g_state_mutex);
     g_app.window_focused = focused != 0;
     if (focused && g_app.awaiting_camera_permission) {
-        g_app.awaiting_camera_permission = false;
         if (fv_android_has_permission(activity, "android.permission.CAMERA")) {
-            g_app.clean_start_deadline_ms = get_time_ms() + 7000L;
-            set_status_locked("Camera starting • tap the shutter to cancel");
+            wait_for_clean_camera_locked();
         } else {
             clear_clean_start_locked();
             set_status_locked("Clean MP4 needs camera permission");
         }
-    } else if (!focused && !g_app.awaiting_camera_permission) {
-        clear_clean_start_locked();
+    } else if (!focused) {
+        if (g_app.awaiting_camera_permission) {
+            /* Limit the wait for a prompt to open. The user can take time to answer it. */
+            g_app.clean_start_deadline_ms = 0;
+        } else {
+            clear_clean_start_locked();
+        }
     }
     pthread_mutex_unlock(&g_state_mutex);
 }

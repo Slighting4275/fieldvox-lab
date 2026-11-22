@@ -10,6 +10,7 @@ typedef struct {
     bool waveform_unavailable;
     int64_t position_ms, duration_ms;
     char name[256], status[128];
+    const char *bookmark_notice;
     float waveform[FV_PLAYBACK_BINS];
     FvTimeline timeline;
     FvTimelineMarker cue;

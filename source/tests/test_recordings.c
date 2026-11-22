@@ -124,6 +124,11 @@ int main(void) {
     assert(recorder.timeline.markers[0].kinds == (FV_MARK_FRAGMENT | FV_MARK_HIT));
     assert(recorder.timeline.markers[1].ms == 1000);
     assert(recorder.timeline.markers[FV_TIMELINE_MAX - 1].ms == 200000);
+    assert(fv_marker_recorder_record(&recorder, 750, FV_MARK_HIT));
+    assert(recorder.timeline.count == FV_TIMELINE_MAX);
+    assert(recorder.timeline.markers[1].ms == 750);
+    assert(recorder.timeline.markers[1].kinds == FV_MARK_HIT);
+    assert(recorder.timeline.markers[2].ms == 1500);
 
     /* Compressed/AAC waveform binning & quiet-signal peak normalization */
     float norm_bins[FV_PLAYBACK_BINS] = {0};

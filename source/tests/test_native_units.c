@@ -265,6 +265,19 @@ static void test_ui_controller_and_layout(void) {
     assert(advanced_button.h >= 12.0f * 3.0f);
     assert(fv_ui_resolve_tap(rects, advanced_button.x + advanced_button.w / 2,
                             advanced_button.y + advanced_button.h / 2) == W_ADVANCED);
+    /* A narrow split-screen height still gives Advanced a full action row. */
+    for (int height = 210; height <= 220; height += 10) {
+        capture = (FvUiState){.controls_visible = true};
+        fv_ui_layout_active(rects, 432 * 3, height * 3, 3.0f, &capture, 0, is_video, &layout);
+        const WidgetRect button = rects[W_ADVANCED];
+        assert(button.h >= 24.0f * 3.0f);
+        assert(button.y + button.h <= layout.drawer_y + layout.drawer_h);
+        assert(fv_ui_handle_tap(&capture, rects, button.x + button.w / 2,
+                               button.y + button.h / 2, 3.0f, NULL) == W_ADVANCED);
+        assert(rects[W_CAPTURE_CLEAN].y == rects[W_CAPTURE_SCREEN].y);
+        assert(rects[W_CAPTURE_CLEAN].x + rects[W_CAPTURE_CLEAN].w < rects[W_RECORD].x);
+        assert(rects[W_RECORD].x + rects[W_RECORD].w < rects[W_CAPTURE_SCREEN].x);
+    }
 
     /* Landscape with standard VOX drawer & advanced drawer open */
     FvUiState st = {.controls_visible = true, .advanced_controls = false};
