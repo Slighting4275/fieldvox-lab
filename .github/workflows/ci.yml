@@ -12,6 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install font and test dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core ffmpeg jq gcc-14
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core ffmpeg jq
       - name: Run static checks and host C23 test suite
-        run: CC=gcc-14 ./scripts/check.sh --fast
+        run: cc --version && ./scripts/check.sh --fast
