@@ -380,11 +380,11 @@ void fv_local_player_jump_mark(bool forward) {
 bool fv_local_player_active(void) { pthread_mutex_lock(&p.mutex);const bool active=p.state.visible;pthread_mutex_unlock(&p.mutex);return active; }
 void fv_local_player_snapshot(FvLocalPlayerSnapshot *out) { if (out) { pthread_mutex_lock(&p.mutex);*out=p.state;pthread_mutex_unlock(&p.mutex); } }
 void fv_local_player_draw_video(FvCanvas *c,float x,float y,float w,float h) {
+    (void)x;(void)y;
+    if (!c || w<=0.0f || h<=0.0f) return;
     pthread_mutex_lock(&p.mutex);
-    if (p.pixels && p.state.video_frames && p.pixel_w>0 && p.pixel_h>0 && w>0 && h>0) {
-        const float scale=fminf(w/(float)p.pixel_w,h/(float)p.pixel_h);
-        const float dw=(float)p.pixel_w*scale,dh=(float)p.pixel_h*scale;
-        fvg_blit_scaled(c,p.pixels,p.pixel_w,p.pixel_h,x+(w-dw)*0.5f,y+(h-dh)*0.5f,dw,dh);
+    if (p.pixels && p.state.video_frames && p.pixel_w>0 && p.pixel_h>0) {
+        fvg_blit_cover(c,p.pixels,p.pixel_w,p.pixel_h);
     }
     pthread_mutex_unlock(&p.mutex);
 }

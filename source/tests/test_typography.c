@@ -37,6 +37,29 @@ int main(int argc,char **argv) {
     bool drawn=false; for (size_t i=0;i<256u*128u;i++) drawn|=pixels[i]!=0; assert(drawn);
     free(pixels); fvg_text_shutdown();
     assert(!fvg_font_ready(FVG_FONT_SANS));
+
+    /* Cover-mode video blit fills every pixel and preserves left/right half orientation. */
+    uint32_t src_p[18u * 32u];
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 18; x++) {
+            src_p[(size_t)y * 18u + (size_t)x] = x < 9 ? 0xFF00FF00u : 0xFFFFFFFFu;
+        }
+    }
+    uint32_t *dst_p = calloc(27u * 60u, sizeof(*dst_p));
+    assert(dst_p);
+    fvg_canvas_init(&canvas, dst_p, 27, 60, 27);
+    fvg_blit_cover(&canvas, src_p, 18, 32);
+    for (size_t i = 0; i < 27u * 60u; i++) assert((dst_p[i] & 0xFF00FF00u) == 0xFF00FF00u);
+    assert(dst_p[30u * 27u + 1u] == 0xFF00FF00u && dst_p[30u * 27u + 25u] == 0xFFFFFFFFu);
+    free(dst_p);
+
+    uint32_t *dst_l = calloc(60u * 27u, sizeof(*dst_l));
+    assert(dst_l);
+    fvg_canvas_init(&canvas, dst_l, 60, 27, 60);
+    fvg_blit_cover(&canvas, src_p, 32, 18);
+    for (size_t i = 0; i < 60u * 27u; i++) assert((dst_l[i] >> 24) == 0xFFu);
+    free(dst_l);
+
     puts("Typography: em scaling, kerning, UTF-8 elision, cache replacement, rendering and cleanup passed");
     return 0;
 }

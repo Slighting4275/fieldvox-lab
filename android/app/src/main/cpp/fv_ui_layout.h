@@ -54,6 +54,7 @@ typedef struct {
     float help_y, help_h;
     float evidence_y, evidence_h, evidence_row_y, evidence_row_h;
     float play_top, play_preview_y, play_preview_h, play_wave_y, play_wave_h, play_buttons_y;
+    float play_header_end, play_footer_start;
 } FvUiScreenLayout;
 
 int fv_ui_grain_ms_to_percent(int grain_ms);

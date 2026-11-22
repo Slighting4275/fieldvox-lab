@@ -814,17 +814,22 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,const FvUi
     const bool landscape=layout->landscape;
     const float top=layout->play_top,preview_y=layout->play_preview_y,preview_h=layout->play_preview_h;
     const float wave_y=layout->play_wave_y,wave_h=layout->play_wave_h,buttons_y=layout->play_buttons_y;
+    const float header_end=layout->play_header_end;
+    const float footer_start=layout->play_footer_start;
+    const float mid_h=fmaxf(40.0f*d,footer_start-header_end);
     fvg_clear(c,0xFF080808);
+    if (p->video) {
+        fv_local_player_draw_video(c,0.0f,preview_y,(float)c->w,preview_h);
+        fvg_fill_rect(c,0.0f,0.0f,(float)c->w,header_end,0x99000000);
+        fvg_fill_rect(c,0.0f,footer_start,(float)c->w,(float)c->h-footer_start,0xB8000000);
+        if (!p->video_frames && !p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,header_end,w,mid_h,"Loading local video…",0xFFAAAAAA,false);
+    } else {
+        fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,landscape ? 16.0f : 20.0f),x,header_end,w,mid_h,p->error ? "RECORDING UNAVAILABLE" : "SAVED AUDIO",0xFFDDDDDD,true);
+    }
     draw_placed_pill(ui,W_PLAY_BACK,"< LIBRARY",PILL_IDLE);
     draw_placed_pill(ui,W_PLAY_MUTE,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+84.0f*d,top,w-152.0f*d,34.0f*d,"LOCAL PLAYBACK",0xFFFFFFFF,true);
     fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),p->name,w,false),x,top+38.0f*d,w,25.0f*d,p->name,0xFFDDDDDD,false);
-    if (p->video) {
-        fv_local_player_draw_video(c,x,preview_y,w,preview_h);
-        if (!p->video_frames && !p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,preview_y,w,preview_h,"Loading local video…",0xFFAAAAAA,false);
-    } else {
-        fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,landscape ? 16.0f : 20.0f),x,preview_y,w,preview_h,p->error ? "RECORDING UNAVAILABLE" : "SAVED AUDIO",0xFFDDDDDD,true);
-    }
     fvg_round_rect(c,x,wave_y,w,wave_h,8.0f*d,0xFF141414,0xFF444444,d);
     const float mid=wave_y+wave_h*0.5f;
     fvg_line(c,x,mid,x+w,mid,d,0xFF555555);

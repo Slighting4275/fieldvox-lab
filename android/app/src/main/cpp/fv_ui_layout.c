@@ -261,9 +261,7 @@ static void layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x
 }
 
 static void layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                                  float width, float height, float d,
-                                  float *out_top, float *out_preview_y, float *out_preview_h,
-                                  float *out_wave_y, float *out_wave_h, float *out_buttons_y) {
+                                  float width, float height, float d, FvUiScreenLayout *out_layout) {
     memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
     const bool landscape = width > height;
     const float top = (landscape ? 36.0f : 58.0f) * d;
@@ -273,20 +271,26 @@ static void layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0,
     const float buttons_y = height - bottom - 90.0f * d;
     const float wave_h = (landscape ? 56.0f : 100.0f) * d;
     const float wave_y = buttons_y - wave_h - 42.0f * d;
-    const float preview_y = top + 70.0f * d;
-    const float preview_h = fmaxf(0.0f, wave_y - preview_y - 8.0f * d);
+    const float preview_y = 0.0f;
+    const float preview_h = height;
+    const float header_end = top + 66.0f * d;
+    const float footer_start = fmaxf(header_end, wave_y - 10.0f * d);
     fv_ui_place(rects, W_PLAY_SEEK, ui_x0, wave_y, ui_w, wave_h);
     const float gap = 5.0f * d;
     const WidgetId play_ids[4] = {W_PLAY_REWIND_10, W_PLAY_REWIND_5, W_PLAY_TOGGLE, W_PLAY_FORWARD_5};
     const WidgetId mark_ids[3] = {W_PLAY_MARK_PREV, W_PLAY_MARK, W_PLAY_MARK_NEXT};
     layout_row(rects, ui_x0, buttons_y, ui_w, 40.0f * d, gap, play_ids, 4u);
     layout_row(rects, ui_x0, buttons_y + 46.0f * d, ui_w, 40.0f * d, gap, mark_ids, 3u);
-    if (out_top) *out_top = top;
-    if (out_preview_y) *out_preview_y = preview_y;
-    if (out_preview_h) *out_preview_h = preview_h;
-    if (out_wave_y) *out_wave_y = wave_y;
-    if (out_wave_h) *out_wave_h = wave_h;
-    if (out_buttons_y) *out_buttons_y = buttons_y;
+    if (out_layout) {
+        out_layout->play_top = top;
+        out_layout->play_preview_y = preview_y;
+        out_layout->play_preview_h = preview_h;
+        out_layout->play_wave_y = wave_y;
+        out_layout->play_wave_h = wave_h;
+        out_layout->play_buttons_y = buttons_y;
+        out_layout->play_header_end = header_end;
+        out_layout->play_footer_start = footer_start;
+    }
 }
 
 void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
@@ -302,9 +306,7 @@ void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int scr
             const float bw = 150.0f * d, bh = 44.0f * d;
             fv_ui_place(rects, W_ESTES_EXIT, (float)screen_w - bw - 16.0f * d, 60.0f * d, bw, bh);
         } else if (state->playback_visible) {
-            layout_local_playback(rects, layout.ui_x0, layout.ui_w, (float)screen_w, (float)screen_h, d,
-                                  &layout.play_top, &layout.play_preview_y, &layout.play_preview_h,
-                                  &layout.play_wave_y, &layout.play_wave_h, &layout.play_buttons_y);
+            layout_local_playback(rects, layout.ui_x0, layout.ui_w, (float)screen_w, (float)screen_h, d, &layout);
         } else if (state->help_visible) {
             layout_help_overlay(rects, layout.ui_x0, layout.ui_w, (float)screen_h, d,
                                 &layout.help_y, &layout.help_h);
