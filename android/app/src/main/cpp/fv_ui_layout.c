@@ -126,10 +126,10 @@ static void layout_vox_drawer(WidgetRect rects[static W_COUNT], float x, float y
     ry += row;
 
     const WidgetId row_a[3] = {W_START, W_NOISE, W_VOICE_DUCK};
-    const WidgetId row_b[3] = {W_AUTO_GATE, W_ADVANCED, W_SOURCE_MODE};
+    const WidgetId row_b[4] = {W_AUTO_GATE, W_RADIO_TUNER, W_ADVANCED, W_SOURCE_MODE};
     layout_row(rects, x + 8.0f * d, ry + 4.0f * d, w - 16.0f * d, row - 8.0f * d, 4.0f * d, row_a, 3u);
     ry += row;
-    layout_row(rects, x + 8.0f * d, ry + 4.0f * d, w - 16.0f * d, row - 8.0f * d, 4.0f * d, row_b, 3u);
+    layout_row(rects, x + 8.0f * d, ry + 4.0f * d, w - 16.0f * d, row - 8.0f * d, 4.0f * d, row_b, 4u);
 }
 
 static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
@@ -260,6 +260,30 @@ static void layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x
     if (out_row_h) *out_row_h = row_h;
 }
 
+static void layout_tuner_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                                 float screen_h, float d, int item_count,
+                                 float *out_y, float *out_h) {
+    memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
+    const float h = fminf(screen_h - 36.0f * d, 430.0f * d);
+    const float y = (screen_h - h) * 0.5f;
+    fv_ui_place(rects, W_CLOSE_TUNER, ui_x0 + ui_w - 48.0f * d, y + 9.0f * d, 38.0f * d, 25.0f * d);
+    const float row_x = ui_x0 + 12.0f * d, row_w = ui_w - 24.0f * d;
+    const WidgetId top_ids[3] = {W_TUNER_BANK, W_TUNER_SHUFFLE, W_TUNER_REFRESH};
+    layout_row(rects, row_x, y + 42.0f * d, row_w, 30.0f * d, 6.0f * d, top_ids, 3u);
+    const float start_row_y = y + 80.0f * d;
+    /* Reserve 4 gaps of 4dp, 18dp page caption, and 44dp footer button band. */
+    const float row_h = fminf(52.0f * d, (h - 164.0f * d) / 5.0f);
+    float row_y = start_row_y;
+    for (int i = 0; i < item_count && i < 5; i++) {
+        fv_ui_place(rects, (WidgetId)(W_TUNER_PLAY_0 + i), row_x, row_y, row_w, row_h);
+        row_y += row_h + 4.0f * d;
+    }
+    const WidgetId nav_ids[2] = {W_TUNER_PREV, W_TUNER_NEXT};
+    layout_row(rects, row_x, y + h - 44.0f * d, row_w, 34.0f * d, 6.0f * d, nav_ids, 2u);
+    if (out_y) *out_y = y;
+    if (out_h) *out_h = h;
+}
+
 static void layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
                                   float width, float height, float d,
                                   const FvUiState *state, FvUiScreenLayout *out_layout) {
@@ -301,7 +325,7 @@ static void layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0,
 }
 
 void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
-                         const FvUiState *state, int evidence_count, const bool evidence_is_video[4],
+                         const FvUiState *state, int overlay_item_count, const bool evidence_is_video[4],
                          FvUiScreenLayout *out_layout) {
     FvUiScreenLayout layout = {0};
     fv_ui_layout_main_screen(rects, screen_w, screen_h, d,
@@ -317,10 +341,13 @@ void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int scr
         } else if (state->help_visible) {
             layout_help_overlay(rects, layout.ui_x0, layout.ui_w, (float)screen_h, d,
                                 &layout.help_y, &layout.help_h);
+        } else if (state->tuner_visible) {
+            layout_tuner_overlay(rects, layout.ui_x0, layout.ui_w, (float)screen_h, d,
+                                 overlay_item_count, &layout.tuner_y, &layout.tuner_h);
         } else if (state->evidence_visible) {
             static const bool empty_video[4] = {false, false, false, false};
             layout_evidence_overlay(rects, layout.ui_x0, layout.ui_w, (float)screen_h, d,
-                                    evidence_count, evidence_is_video ? evidence_is_video : empty_video,
+                                    overlay_item_count, evidence_is_video ? evidence_is_video : empty_video,
                                     &layout.evidence_y, &layout.evidence_h,
                                     &layout.evidence_row_y, &layout.evidence_row_h);
         }
@@ -349,6 +376,10 @@ int fv_ui_handle_tap(FvUiState *state, const WidgetRect rects[static W_COUNT],
         state->evidence_visible = false;
         return -1;
     }
+    if (state->tuner_visible && hit < 0) {
+        state->tuner_visible = false;
+        return -1;
+    }
     if (state->playback_visible) {
         if (hit < 0 && !state->playback_audio_only) {
             state->playback_controls_hidden = !state->playback_controls_hidden;
@@ -375,6 +406,7 @@ bool fv_ui_back_pressed(FvUiState *state, bool *out_close_playback) {
         return true;
     }
     if (state->evidence_visible) { state->evidence_visible = false; return true; }
+    if (state->tuner_visible) { state->tuner_visible = false; return true; }
     if (state->help_visible) { state->help_visible = false; return true; }
     if (state->estes_mode) { state->estes_mode = false; return true; }
     if (state->controls_visible) { state->controls_visible = false; return true; }

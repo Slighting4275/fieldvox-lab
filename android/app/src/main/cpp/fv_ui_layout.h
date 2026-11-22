@@ -23,6 +23,9 @@ typedef enum {
     W_PLAY_BACK, W_PLAY_TOGGLE, W_PLAY_REWIND_5, W_PLAY_REWIND_10, W_PLAY_FORWARD_5,
     W_PLAY_SEEK, W_PLAY_MUTE, W_PLAY_MARK, W_PLAY_MARK_PREV, W_PLAY_MARK_NEXT,
     W_SOURCE_MODE, W_EVIDENCE_BANK_0, W_EVIDENCE_BANK_1, W_EVIDENCE_BANK_2, W_EVIDENCE_BANK_3,
+    W_RADIO_TUNER, W_CLOSE_TUNER, W_TUNER_BANK, W_TUNER_SHUFFLE, W_TUNER_REFRESH,
+    W_TUNER_PREV, W_TUNER_NEXT,
+    W_TUNER_PLAY_0, W_TUNER_PLAY_1, W_TUNER_PLAY_2, W_TUNER_PLAY_3, W_TUNER_PLAY_4,
     W_ESTES_EXIT,
     W_COUNT
 } WidgetId;
@@ -37,6 +40,7 @@ typedef struct {
     bool advanced_controls;
     bool help_visible;
     bool evidence_visible;
+    bool tuner_visible;
     bool playback_visible;
     bool playback_audio_only;
     bool playback_controls_hidden;
@@ -55,6 +59,7 @@ typedef struct {
     float drawer_y, drawer_h;
     float help_y, help_h;
     float evidence_y, evidence_h, evidence_row_y, evidence_row_h;
+    float tuner_y, tuner_h;
     float play_top, play_wave_y, play_wave_h, play_buttons_y;
     float play_header_end, play_footer_start, play_mid_h;
 } FvUiScreenLayout;
@@ -72,7 +77,7 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
                               bool controls_visible, bool advanced_controls,
                               FvUiScreenLayout *out_layout);
 void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
-                         const FvUiState *state, int evidence_count, const bool evidence_is_video[4],
+                         const FvUiState *state, int overlay_item_count, const bool evidence_is_video[4],
                          FvUiScreenLayout *out_layout);
 
 /* Handles modal/drawer dismissal and returns the triggered WidgetId (>= 0), or -1 if already handled. */

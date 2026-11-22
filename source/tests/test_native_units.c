@@ -231,10 +231,32 @@ static void test_ui_controller_and_layout(void) {
     fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 0, is_video, &layout);
     assert(layout.landscape);
     assert(rects[W_START].visible && rects[W_ECHO_LEVEL].visible && rects[W_CLOSE_DRAWER].visible);
+    assert(rects[W_RADIO_TUNER].visible);
 
     st.advanced_controls = true;
     fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 0, is_video, &layout);
     assert(rects[W_CADENCE].visible && rects[W_ADVANCED].visible && rects[W_CLOSE_DRAWER].visible);
+
+    /* Radio Tuner modal overlay in portrait and landscape */
+    st = (FvUiState){.tuner_visible = true};
+    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 5, is_video, &layout);
+    assert(rects[W_CLOSE_TUNER].visible && rects[W_TUNER_BANK].visible);
+    assert(rects[W_TUNER_SHUFFLE].visible && rects[W_TUNER_REFRESH].visible);
+    assert(rects[W_TUNER_PREV].visible && rects[W_TUNER_NEXT].visible);
+    for (int i = 0; i < 5; i++) {
+        const WidgetRect *r = &rects[W_TUNER_PLAY_0 + i];
+        assert(r->visible && r->y >= layout.tuner_y && r->y + r->h <= layout.tuner_y + layout.tuner_h);
+    }
+    fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 5, is_video, &layout);
+    assert(rects[W_CLOSE_TUNER].visible && rects[W_TUNER_PLAY_4].visible);
+    assert(layout.tuner_y >= 0.0f && layout.tuner_y + layout.tuner_h <= 1080.0f);
+    assert(rects[W_TUNER_PLAY_4].y + rects[W_TUNER_PLAY_4].h <= rects[W_TUNER_PREV].y - 18.0f * 3.0f);
+
+    bool tuner_estes = false;
+    assert(fv_ui_handle_tap(&st, rects, 5.0f, 5.0f, 3.0f, &tuner_estes) == -1 && !st.tuner_visible);
+    st.tuner_visible = true;
+    bool tuner_close_pb = false;
+    assert(fv_ui_back_pressed(&st, &tuner_close_pb) && !st.tuner_visible && !tuner_close_pb);
 
     /* Help modal overlay + close button + outside tap dismissal */
     st = (FvUiState){.help_visible = true};

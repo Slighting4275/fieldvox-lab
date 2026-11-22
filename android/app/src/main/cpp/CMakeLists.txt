@@ -39,6 +39,7 @@ add_library(
     fv_fragment_engine.c
     fv_fragment_store.c
     fv_station_policy.c
+    fv_radio_playlist.c
     fv_environment_reverb.c
 )
 

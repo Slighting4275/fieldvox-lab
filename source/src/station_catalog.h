@@ -19,7 +19,7 @@ static const FvCatalogStation fv_station_catalog[] = {
     {11u, "Radio Koprivnica", "Radio Koprivnica", "", "hr", "216387b8f2471448c6a5e8da114a134", "https://443-1.reliastream.com/51/;"},
     {12u, "Radio 100", "Radio 100", "", "da", "b4efe4563eff59324cd325344d15b21", "https://live-bauerdk.sharp-stream.com/radio100_dk_mp3"},
     {13u, "RadioVesti", "RadioVesti", "", "ru", "c9776606a3a22e6f97ee85e6ed8cf57", "https://icecast-vgtrk.cdnvideo.ru/vestifm_aac_32kbps"},
-    {14u, "Times Radio UK", "Times Radio UK", "GB", "en_uk", "041c21b55a2648c98857f576f584461", "https://www.radio-browser.info/null"},
+    {14u, "KIRO 97.3", "KIRO Newsradio Seattle 97.3", "US", "en_us", "7e1f2259ce173f4622211fa221c4b7d", "https://bonneville.cdnstream1.com/2643_48.aac"},
     {15u, "RTM Langkawi", "RTM Langkawi", "", "ms", "3cbf151fc909cc38995662888e99221", "https://playerservices.streamtheworld.com/api/livestream-redirect/LANGKAWI_FM.mp3"},
     {16u, "Elpas", "Elpas", "", "id", "8e1a66a25beb4136058da1e4abd7705", "http://live.serverstreaming.net:8888/elpasfm"},
     {17u, "Radio Dei", "Radio Dei", "", "fi", "b2daeea4de1c456e4c36b2dfc6a648a", "https://stream.dei.fi:8443/yleisohjelma"},

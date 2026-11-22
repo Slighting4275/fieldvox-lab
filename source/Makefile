@@ -69,7 +69,7 @@ test: all
 >./fv-camera-test
 >./tests/test_smoke.sh
 
-FRAGMENT_SRC := tests/test_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_store.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_station_policy.c ../android/app/src/main/cpp/fv_environment_reverb.c
+FRAGMENT_SRC := tests/test_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_fragment_store.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_station_policy.c ../android/app/src/main/cpp/fv_radio_playlist.c ../android/app/src/main/cpp/fv_environment_reverb.c
 LVM_ROOT := ../android/app/src/main/cpp/third_party/lvm
 ALGORITHM_SRC := $(wildcard $(LVM_ROOT)/Reverb/src/*.c $(LVM_ROOT)/Common/src/*.c) ../android/app/src/main/cpp/third_party/sonic/sonic.c
 ALGORITHM_FLAGS := -DBUILD_FLOAT -DHIGHER_FS -I$(LVM_ROOT)/Reverb/lib -I$(LVM_ROOT)/Reverb/src -I$(LVM_ROOT)/Common/lib -I$(LVM_ROOT)/Common/src

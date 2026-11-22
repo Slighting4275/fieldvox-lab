@@ -40,6 +40,7 @@ struct FvFragmentEngine {
     FvGateReason sensor_reason, last_reason;
     int live_station;
     unsigned admitted;
+    uint64_t audition_until;
     int last_station;
     bool last_cached;
     uint32_t rng;
@@ -110,6 +111,7 @@ void fv_fragment_reset_playback(FvFragmentEngine *e) {
     e->live_pending = false;
     e->proximity_pending = false;
     e->sensor_pending = false;
+    e->audition_until = 0u;
 }
 
 void fv_fragment_destroy(FvFragmentEngine *e) {
@@ -279,6 +281,24 @@ bool fv_fragment_trigger_pcm(FvFragmentEngine *e, const FvVoxDecimalTrigger *t, 
     if (!e || !valid_trigger(t, clock) || !eligible_ex(e, station, clock, speech, false)) return false;
     if (!admit(e, t, pcm, frames, station, clock, false, -1)) return false;
     mark_trigger(e, station, clock);
+    return true;
+}
+
+bool fv_fragment_audition_pcm(FvFragmentEngine *e, const int16_t *pcm, size_t frames,
+                              int station, int source_fd, uint64_t clock) {
+    if (!e || !pcm || !frames || frames > FV_FRAGMENT_CLIP_FRAMES) return false;
+    const FvVoxDecimalTrigger t = {
+        .passed = true,
+        .pitch_factor = 1.0f,
+        .speed_factor = 1.0f,
+        .grain_duration_ms = 1000,
+        .seek_offset = 0.0f,
+        .prefer_live = true,
+        .channel_hop = 0
+    };
+    if (!admit(e, &t, pcm, frames, station, clock, false, source_fd)) return false;
+    mark_trigger(e, station, clock);
+    e->audition_until = clock + FV_FRAGMENT_RATE + (uint64_t)(432000.0f * e->settings.reverb);
     return true;
 }
 
@@ -485,7 +505,7 @@ void fv_fragment_render(FvFragmentEngine *e, int16_t *clean, int16_t *processed,
         .seek_fraction = e->seek_fraction,
         .reason = e->last_reason
     };
-    if (e->settings.paused) {
+    if (e->settings.paused && clock >= e->audition_until) {
         memset(clean, 0, frames * sizeof(*clean));
         memset(processed, 0, frames * sizeof(*processed));
         if (aux) memset(aux, 0, frames * sizeof(*aux));
@@ -519,7 +539,7 @@ void fv_fragment_render(FvFragmentEngine *e, int16_t *clean, int16_t *processed,
             sends[i] = send;
             float noise = 0.0f;
             const uint64_t ms = now / 48u;
-            if (e->settings.noise && ms % ((uint64_t)e->settings.sweep_ms + 40u) < e->settings.sweep_ms) {
+            if (!e->settings.paused && e->settings.noise && ms % ((uint64_t)e->settings.sweep_ms + 40u) < e->settings.sweep_ms) {
                 e->rng ^= e->rng << 13u;
                 e->rng ^= e->rng >> 17u;
                 e->rng ^= e->rng << 5u;

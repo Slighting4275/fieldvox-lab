@@ -88,6 +88,8 @@ bool fv_fragment_trigger(FvFragmentEngine *engine, const FvVoxDecimalTrigger *tr
                          bool local_only, uint64_t clock, bool speech);
 bool fv_fragment_trigger_pcm(FvFragmentEngine *engine, const FvVoxDecimalTrigger *trigger,
                              const int16_t *pcm, size_t frames, int station, uint64_t clock, bool speech);
+bool fv_fragment_audition_pcm(FvFragmentEngine *engine, const int16_t *pcm, size_t frames,
+                              int station, int source_fd, uint64_t clock);
 bool fv_fragment_live_pending(const FvFragmentEngine *engine);
 void fv_fragment_render(FvFragmentEngine *engine, int16_t *clean, int16_t *processed, int16_t *aux,
                         size_t frames, uint64_t clock, FvFragmentStatus *status);

@@ -59,6 +59,7 @@
 #define ASENSOR_TYPE_PRESSURE_ID 6
 #define ASENSOR_TYPE_PROXIMITY_ID 8
 #define EVIDENCE_MAX 4
+#define TUNER_PAGE_SIZE 5
 
 static const int FV_SWEEP_CADENCE_MS[4] = {100, 250, 500, 1000};
 
@@ -154,6 +155,7 @@ typedef struct {
     long last_spike_vibrate_ms;
     int evidence_count;
     size_t evidence_page, evidence_total;
+    int tuner_page;
     int64_t playback_duration_ms;
     EvidenceEntry evidence[EVIDENCE_MAX];
     float threshold;         /* uT, Java default 1.65 */
@@ -217,6 +219,12 @@ static const FvBlobStationEntry *station_at(int index) {
     if (index < 0) index = 0;
     index %= (int)FV_STATION_BLOB_COUNT;
     return (const FvBlobStationEntry *)(FV_STATION_PLAN_BINARY_DATA + 16 + (size_t)index * sizeof(FvBlobStationEntry));
+}
+
+static void station_callsign_at(int index, char *out, size_t cap) {
+    if (!out || !cap) return;
+    if (fv_radio_station_info(index, out, cap, NULL, 0u)) return;
+    snprintf(out, cap, "%s", station_at(index)->callsign);
 }
 
 /* Caller must hold g_state_mutex. */
@@ -431,13 +439,15 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
     draw_placed_pill(ui, W_TORCH, "TORCH", s->torch_active ? PILL_ACTIVE : PILL_IDLE);
     draw_placed_pill(ui, W_HELP, "?", PILL_IDLE);
     char detail[160];
+    char callsign[32] = {0};
+    if (s->carrier_station >= 0) station_callsign_at(s->carrier_station, callsign, sizeof(callsign));
     if (s->video_recording_active) {
         const uint32_t seconds = fv_video_recorder_get_duration_ms()/1000u;
         snprintf(detail, sizeof(detail), "REC %02u:%02u  |  %s", seconds/60u, seconds%60u,
-                 s->carrier_ready ? station_at(s->carrier_station)->callsign : "CONNECTING");
+                 s->carrier_ready && callsign[0] ? callsign : "CONNECTING");
     } else {
         snprintf(detail, sizeof(detail), "%s  |  %s%s", s->recording_active ? "WAV REC" : (s->local_only ? "LOCAL" : (s->cached_source ? "CACHED RADIO" : "LIVE RADIO")),
-                 !s->sweep_active ? "PAUSED" : (s->carrier_station >= 0 ? station_at(s->carrier_station)->callsign : (s->local_only ? "WAV / CACHE" : "CONNECTING")),
+                 !s->sweep_active ? "PAUSED" : (callsign[0] ? callsign : (s->local_only ? "WAV / CACHE" : "CONNECTING")),
                  s->voice_detected ? "  |  SPEAKING MUTE" : "");
     }
     const float size = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), detail, w-16.0f*d, false);
@@ -655,6 +665,7 @@ static void draw_vox_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, floa
     draw_placed_pill(ui, W_NOISE, "WHITE NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
     draw_placed_pill(ui, W_VOICE_DUCK, "SPEAKING MUTE", s->voice_duck ? PILL_ACTIVE : PILL_IDLE);
     draw_placed_pill(ui, W_AUTO_GATE, s->auto_gate ? "AUTO" : "SENSOR", !s->auto_gate ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_RADIO_TUNER, "TUNER", s->ui.tuner_visible ? PILL_ACTIVE : PILL_IDLE);
     draw_placed_pill(ui, W_ADVANCED, "ADVANCED", PILL_IDLE);
     draw_placed_pill(ui, W_SOURCE_MODE, s->local_only ? "LOCAL" : "LIVE", s->local_only ? PILL_ACTIVE : PILL_IDLE);
 }
@@ -803,6 +814,75 @@ static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, const FvUiScreen
     char count[96];const size_t pages=(s->evidence_total+EVIDENCE_MAX-1)/EVIDENCE_MAX;
     snprintf(count,sizeof(count),"Page %zu / %zu • %zu recordings",pages ? s->evidence_page+1 : 0,pages,s->evidence_total);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x,footer-20.0f*d,row_w,18.0f*d,count,0xFFBBBBBB,false);
+}
+
+static void draw_tuner_overlay(Ui *ui, const FieldVoxApp *s, const FvUiScreenLayout *layout,
+                               const FvRadioTunerSnapshot *tuner, float screen_h) {
+    FvCanvas *c = ui->c;
+    const float d = ui->d, x = ui->x0, w = ui->w;
+    const float y = layout->tuner_y, h = layout->tuner_h;
+    fvg_fill_rect(c, 0, 0, (float)c->w, screen_h, 0xD0000000);
+    fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xFA101010, 0xFF6FE7FF, d);
+    char header[96];
+    snprintf(header, sizeof(header), "RADIO TUNER • %zu STATIONS", tuner->total_stations);
+    fvg_text(c, FVG_FONT_SANS, text_sp(ui, 14.0f), x + 14.0f * d, y + 27.0f * d, header, 0xFFFFFFFF, true);
+    draw_placed_pill(ui, W_CLOSE_TUNER, "X", PILL_IDLE);
+
+    char bank_lbl[32];
+    snprintf(bank_lbl, sizeof(bank_lbl), "BANK: %s", fv_station_bank_label(tuner->bank));
+    draw_placed_pill(ui, W_TUNER_BANK, bank_lbl, PILL_ACTIVE);
+    draw_placed_pill(ui, W_TUNER_SHUFFLE, "SHUFFLE", PILL_IDLE);
+    draw_placed_pill(ui, W_TUNER_REFRESH, tuner->refreshing ? "SYNCING…" : "SYNC LIVE",
+                     tuner->refreshing ? PILL_ACTIVE : PILL_IDLE);
+
+    const float row_x = ui->rects[W_TUNER_BANK].x;
+    const float row_w = ui->rects[W_TUNER_NEXT].x + ui->rects[W_TUNER_NEXT].w - row_x;
+    const int start = s->tuner_page * TUNER_PAGE_SIZE;
+    for (int i = 0; i < TUNER_PAGE_SIZE && start + i < (int)tuner->group_count; i++) {
+        const WidgetRect *r = &ui->rects[W_TUNER_PLAY_0 + i];
+        if (!r->visible) continue;
+        const int slot = start + i;
+        const FvRadioSlotSnapshot *st = &tuner->slots[slot];
+        const bool testing_this = tuner->testing && tuner->last_tested_slot == slot;
+        fvg_round_rect(c, r->x, r->y, r->w, r->h, 8.0f * d, 0xEE181B22, 0xFF444A58, d);
+        char title[96];
+        snprintf(title, sizeof(title), "%d. %s [%s]", slot + 1, st->callsign, st->lang);
+        char title_elided[100];
+        fvg_text_elide(FVG_FONT_SANS, text_sp(ui, 13.0f), title, r->w - 92.0f * d, false,
+                       title_elided, sizeof(title_elided));
+        fvg_text(c, FVG_FONT_SANS, text_sp(ui, 13.0f), r->x + 10.0f * d, r->y + r->h * 0.43f,
+                 title_elided, 0xFFFFFFFF, false);
+        char sub[96];
+        fvg_text_elide(FVG_FONT_SANS, text_sp(ui, 10.0f), st->name, r->w - 92.0f * d, false,
+                       sub, sizeof(sub));
+        fvg_text(c, FVG_FONT_SANS, text_sp(ui, 10.0f), r->x + 10.0f * d, r->y + r->h * 0.79f,
+                 sub, 0xFF9AA3B2, false);
+
+        const char *badge = "TAP TEST";
+        uint32_t bcol = 0xFFBBBBBB;
+        if (testing_this) {
+            badge = "TESTING…";
+            bcol = 0xFF6FE7FF;
+        } else if (st->health == FV_STATION_OK) {
+            badge = "OK";
+            bcol = 0xFF00E676;
+        } else if (st->health == FV_STATION_FAILED) {
+            badge = "FAILED";
+            bcol = 0xFFFF5252;
+        }
+        fvg_text_center(c, FVG_FONT_SANS, text_sp(ui, 11.0f),
+                        r->x + r->w - 78.0f * d, r->y, 70.0f * d, r->h, badge, bcol, true);
+    }
+
+    const int pages = (int)((tuner->group_count + TUNER_PAGE_SIZE - 1u) / TUNER_PAGE_SIZE);
+    char pstr[64];
+    snprintf(pstr, sizeof(pstr), "Page %d / %d • Tap any station to audition",
+             pages > 0 ? s->tuner_page + 1 : 0, pages);
+    const float footer = ui->rects[W_TUNER_PREV].y;
+    fvg_text_center(c, FVG_FONT_SANS, text_sp(ui, 11.0f), row_x, footer - 18.0f * d, row_w, 16.0f * d,
+                    pstr, 0xFFBBBBBB, false);
+    draw_placed_pill(ui, W_TUNER_PREV, "< PREV", PILL_IDLE);
+    draw_placed_pill(ui, W_TUNER_NEXT, "NEXT >", PILL_IDLE);
 }
 
 static void playback_time(char *out,size_t capacity,int64_t ms) {
@@ -1002,9 +1082,17 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     }
 
     /* Modal overlays are drawn last and their touch handlers mask everything beneath. */
-    if (s.ui.evidence_visible || s.ui.help_visible) {
-        fv_ui_layout_active(rects, w, h, d, &s.ui, s.evidence_count, is_video, &layout);
-        if (s.ui.evidence_visible) draw_evidence_overlay(&ui, &s, &layout, is_video, (float)h);
+    if (s.ui.tuner_visible || s.ui.evidence_visible || s.ui.help_visible) {
+        FvRadioTunerSnapshot tuner = {0};
+        int overlay_items = s.evidence_count;
+        if (s.ui.tuner_visible) {
+            fv_radio_tuner_snapshot(&tuner);
+            const int rem = (int)tuner.group_count - s.tuner_page * TUNER_PAGE_SIZE;
+            overlay_items = rem > 0 ? (rem > TUNER_PAGE_SIZE ? TUNER_PAGE_SIZE : rem) : 0;
+        }
+        fv_ui_layout_active(rects, w, h, d, &s.ui, overlay_items, is_video, &layout);
+        if (s.ui.tuner_visible) draw_tuner_overlay(&ui, &s, &layout, &tuner, (float)h);
+        else if (s.ui.evidence_visible) draw_evidence_overlay(&ui, &s, &layout, is_video, (float)h);
         if (s.ui.help_visible) draw_help_overlay(&ui, &layout, (float)h);
     }
 
@@ -1347,6 +1435,56 @@ static void handle_widget(WidgetId id) {
         case W_PLAY_MARK_NEXT: fv_local_player_jump_mark(true);break;
         case W_CLOSE_EVIDENCE: g_app.ui.evidence_visible = false; break;
         case W_CLOSE_HELP: g_app.ui.help_visible = false; break;
+        case W_RADIO_TUNER:
+            g_app.tuner_page = 0;
+            g_app.ui.tuner_visible = true;
+            g_app.ui.controls_visible = false;
+            g_app.ui.help_visible = false;
+            g_app.ui.evidence_visible = false;
+            break;
+        case W_CLOSE_TUNER:
+            g_app.ui.tuner_visible = false;
+            break;
+        case W_TUNER_BANK:
+            fv_radio_cycle_bank();
+            g_app.tuner_page = 0;
+            snprintf(msg, sizeof(msg), "Radio bank: %s", fv_station_bank_label(fv_radio_get_bank()));
+            set_status_locked(msg);
+            break;
+        case W_TUNER_SHUFFLE:
+            fv_radio_reshuffle();
+            g_app.tuner_page = 0;
+            set_status_locked("Radio station bank re-shuffled");
+            break;
+        case W_TUNER_REFRESH:
+            set_status_locked(fv_radio_refresh_catalog() ? "Syncing live news/talk directory…"
+                                                         : "Directory sync already in progress");
+            break;
+        case W_TUNER_PREV:
+            if (g_app.tuner_page > 0) g_app.tuner_page--;
+            break;
+        case W_TUNER_NEXT: {
+            FvRadioTunerSnapshot snap = {0};
+            fv_radio_tuner_snapshot(&snap);
+            if ((g_app.tuner_page + 1) * TUNER_PAGE_SIZE < (int)snap.group_count) {
+                g_app.tuner_page++;
+            }
+            break;
+        }
+        case W_TUNER_PLAY_0:
+        case W_TUNER_PLAY_1:
+        case W_TUNER_PLAY_2:
+        case W_TUNER_PLAY_3:
+        case W_TUNER_PLAY_4: {
+            const int slot = g_app.tuner_page * TUNER_PAGE_SIZE + (int)(id - W_TUNER_PLAY_0);
+            if (fv_radio_test_slot(slot)) {
+                snprintf(msg, sizeof(msg), "Testing radio slot %d…", slot + 1);
+            } else {
+                snprintf(msg, sizeof(msg), "Radio test busy • wait a moment");
+            }
+            set_status_locked(msg);
+            break;
+        }
         default: break;
     }
 }
@@ -1398,7 +1536,7 @@ static void handle_tap(float x, float y_screen) {
         handle_widget((WidgetId)hit);
         if (hit == W_PLAY_BACK) fullscreen_cmd = -1;
         vib_ms = g_app.ui.playback_visible ? 15 : 18;
-    } else if (g_app.ui.help_visible || g_app.ui.evidence_visible) {
+    } else if (g_app.ui.help_visible || g_app.ui.evidence_visible || g_app.ui.tuner_visible) {
         vib_ms = 15;
     }
     pthread_mutex_unlock(&g_state_mutex);
@@ -1417,7 +1555,7 @@ static int hit_slider_locked(float x, float y) {
         return -1;
     }
     if (!g_app.ui.controls_visible || g_app.ui.advanced_controls || g_app.ui.help_visible ||
-        g_app.ui.evidence_visible || g_app.ui.estes_mode) return -1;
+        g_app.ui.evidence_visible || g_app.ui.tuner_visible || g_app.ui.estes_mode) return -1;
     for (int id=W_ECHO_LEVEL; id<=W_GRAIN_LEVEL; id++) {
         const WidgetRect *r = &g_app.widgets[id];
         if (r->visible && x>=r->x && x<=r->x+r->w && y>=r->y && y<=r->y+r->h) return id;
@@ -1447,7 +1585,7 @@ static bool camera_swipe_eligible_locked(void) {
     return atomic_load(&g_app.resumed) && g_app.cam_filter!=FV_CAM_FILTER_OFF &&
         !g_app.recording_active && !g_app.video_recording_active && !g_app.ui.estes_mode &&
         !g_app.ui.controls_visible && !g_app.ui.help_visible && !g_app.ui.evidence_visible &&
-        !g_app.ui.playback_visible && fv_camera_is_healthy(2000);
+        !g_app.ui.tuner_visible && !g_app.ui.playback_visible && fv_camera_is_healthy(2000);
 }
 static bool camera_swipe_start_locked(float x, float y) {
     if (!camera_swipe_eligible_locked()) return false;
@@ -1542,7 +1680,7 @@ static void *input_thread_func(void *arg) {
                 bool exited_playback = false;
                 pthread_mutex_lock(&g_state_mutex);
                 const bool up = AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP;
-                if (g_app.ui.playback_visible || g_app.ui.evidence_visible ||
+                if (g_app.ui.playback_visible || g_app.ui.evidence_visible || g_app.ui.tuner_visible ||
                     g_app.ui.help_visible || g_app.ui.estes_mode || g_app.ui.controls_visible) {
                     handled = 1;
                     bool close_playback = false;
@@ -1942,6 +2080,7 @@ static void *audio_thread_func(void *arg) {
     }
     AAudioStream *input = NULL;
     long next_input_retry_ms = 0;
+    long audition_until_ms = 0;
     fv_audio_dsp_reset();
     fv_hit_capture_reset();
 
@@ -2008,6 +2147,13 @@ static void *audio_thread_func(void *arg) {
             .local_only = local_only,
             .sweep_ms = (unsigned)grain_ms});
         fv_radio_set_enabled(sweep && !local_only);
+        int16_t *test_pcm = NULL;
+        size_t test_frames = 0u;
+        int test_station = -1, test_fd = -1;
+        const bool has_test = fv_radio_take_test_result(&test_pcm, &test_frames, &test_station, &test_fd);
+        if (has_test && test_pcm && test_frames > 0u) {
+            audition_until_ms = now + (long)(test_frames * 1000u / SAMPLE_RATE) + 500L;
+        }
         const int live = fv_radio_busy() ? 1 : 0;
         memset(mono, 0, sizeof(mono));
         if (!input && need_input && now >= next_input_retry_ms) {
@@ -2045,8 +2191,27 @@ static void *audio_thread_func(void *arg) {
         /* Optional PCM tools select the native speaker path. Recordings always
          * retain the native reconstruction; platform playback is not loopback. */
         const bool platform_speaker=fv_platform_voices_healthy(platform) && !vocal && !reverse && !pan && !rem_pod;
-        fv_platform_voices_control(platform,platform_speaker && sweep,muted || ducked || playback || !resumed,(float)reverb_level/100.0f);
+        const bool audition_active = now < audition_until_ms;
+        fv_platform_voices_control(platform,platform_speaker && (sweep || audition_active),
+                                   muted || ducked || playback || !resumed,(float)reverb_level/100.0f);
         fv_fragment_set_speaker(fragments,platform_speaker ? fv_platform_voices_submit : NULL,platform);
+        if (has_test) {
+            if (test_pcm && test_frames > 0u) {
+                if (fv_fragment_audition_pcm(fragments, test_pcm, test_frames, test_station, test_fd, clock)) {
+                    char cname[32] = {0};
+                    station_callsign_at(test_station, cname, sizeof(cname));
+                    char smsg[96];
+                    snprintf(smsg, sizeof(smsg), "Playing %s (%.1fs)", cname[0] ? cname : "station",
+                             (double)test_frames / 48000.0);
+                    set_status(smsg);
+                } else {
+                    audition_until_ms = 0;
+                    set_status("Audition playback unavailable");
+                }
+            }
+            free(test_pcm);
+            if (test_fd >= 0) close(test_fd);
+        }
         if (sweep) {
             if (prox_requested) fv_fragment_submit_trigger(fragments, FV_GATE_PROXIMITY, &prox_fragment);
             if (requested) fv_fragment_submit_trigger(fragments, request_reason, &fragment);
@@ -2089,9 +2254,13 @@ static void *audio_thread_func(void *arg) {
         };
         hit_block.audible_a = fragment_status.playing;
         if (fragment_status.station >= 0) {
-            const FvBlobStationEntry *st = station_at(fragment_status.station);
-            memcpy(hit_block.label_a, st->callsign, sizeof(hit_block.label_a));
-            memcpy(hit_block.url_a, st->url, sizeof(hit_block.url_a));
+            if (!fv_radio_station_info(fragment_status.station, hit_block.label_a,
+                                       sizeof(hit_block.label_a), hit_block.url_a,
+                                       sizeof(hit_block.url_a))) {
+                const FvBlobStationEntry *st = station_at(fragment_status.station);
+                memcpy(hit_block.label_a, st->callsign, sizeof(hit_block.label_a));
+                memcpy(hit_block.url_a, st->url, sizeof(hit_block.url_a));
+            }
         } else if (fragment_status.playing) {
             snprintf(hit_block.label_a, sizeof(hit_block.label_a), "LOCAL WAV");
             snprintf(hit_block.url_a, sizeof(hit_block.url_a), "local:selected-wav");

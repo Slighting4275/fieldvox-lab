@@ -3,6 +3,7 @@
 #include "../../android/app/src/main/cpp/fv_fragment_store.h"
 #include "../../android/app/src/main/cpp/fv_vox_controls.h"
 #include "../../android/app/src/main/cpp/fv_station_policy.h"
+#include "../../android/app/src/main/cpp/fv_radio_playlist.h"
 #include "../../android/app/src/main/cpp/fv_environment_reverb.h"
 #include <assert.h>
 #include <dirent.h>
@@ -218,6 +219,11 @@ static void test_scheduling_and_live_seams(void) {
     cached_trig.channel_hop = 0;
     assert(!fv_fragment_trigger(e, &cached_trig, true, 105000u, false));
 
+    /* Direct tuner audition bypasses cooldown and forwards source_fd. */
+    const int audition_fd = open("/dev/null", O_RDONLY);
+    assert(fv_fragment_audition_pcm(e, clip, FV_FRAGMENT_RATE, 7, audition_fd, 105000u));
+    if (audition_fd >= 0) close(audition_fd);
+
     int16_t clean[512], proc[512], aux[512];
     FvFragmentStatus status = {0};
     fv_fragment_render(e, clean, proc, aux, 512u, 103000u, &status);
@@ -288,6 +294,13 @@ static void test_speaker_local_and_pause(void) {
     assert(abs_sum_samples(proc, 256u) == 0u);
     assert(abs_sum_samples(aux, 256u) == 0u);
 
+    /* Auditioning a station clip while paused still renders non-zero PCM, then returns to silence. */
+    assert(fv_fragment_audition_pcm(e, clip, FV_FRAGMENT_RATE, 7, -1, 481000u));
+    fv_fragment_render(e, clean, proc, aux, 256u, 481000u, &status);
+    assert(status.playing && abs_sum_samples(clean, 256u) > 0u);
+    fv_fragment_render(e, clean, proc, aux, 256u, 481000u + 20u * FV_FRAGMENT_RATE, &status);
+    assert(!status.playing && abs_sum_samples(clean, 256u) == 0u);
+
     fv_fragment_destroy(e);
 }
 
@@ -345,12 +358,134 @@ static void test_speech_and_station_reverb(void) {
     fv_environment_reverb_destroy(rev);
 }
 
+static void test_radio_playlist_resolution(void) {
+    assert(fv_radio_is_playlist_url("https://rtsradio-live.morescreens.com/RTS_2_001/audio/chunklist.m3u8", NULL));
+    assert(fv_radio_is_playlist_url("https://example.com/stream.M3U?token=abc", NULL));
+    assert(fv_radio_is_playlist_url("https://example.com/listen", "application/vnd.apple.mpegurl; charset=utf-8"));
+    assert(!fv_radio_is_playlist_url("https://npr-ice.streamguys1.com/live.mp3", "audio/mpeg"));
+
+    const char *m3u8_media =
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        "#EXT-X-TARGETDURATION:6\n"
+        "#EXTINF:6.0,\n"
+        "media_1042.aac\n"
+        "#EXTINF:6.0,\n"
+        "media_1043.aac\n";
+    assert(fv_radio_body_is_playlist(m3u8_media, strlen(m3u8_media)));
+
+    char resolved[FV_RADIO_URL_MAX];
+    bool nested = true;
+    assert(fv_radio_extract_stream_url(
+        "https://rtsradio-live.morescreens.com/RTS_2_001/audio/chunklist.m3u8?foo=bar",
+        m3u8_media, strlen(m3u8_media), resolved, sizeof(resolved), &nested));
+    assert(!nested);
+    assert(strcmp(resolved, "https://rtsradio-live.morescreens.com/RTS_2_001/audio/media_1042.aac") == 0);
+
+    const char *m3u8_master =
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"\n"
+        "/live/audio_128/playlist.m3u8\n";
+    assert(fv_radio_extract_stream_url(
+        "https://radio.example.org/master.m3u8",
+        m3u8_master, strlen(m3u8_master), resolved, sizeof(resolved), &nested));
+    assert(nested);
+    assert(strcmp(resolved, "https://radio.example.org/live/audio_128/playlist.m3u8") == 0);
+
+    const char *pls =
+        "[playlist]\r\n"
+        "NumberOfEntries=1\r\n"
+        "File1=http://stream.example.net:8000/live\r\n"
+        "Title1=Talk\r\n";
+    assert(fv_radio_body_is_playlist(pls, strlen(pls)));
+    assert(fv_radio_extract_stream_url("https://stream.example.net/listen.pls",
+                                       pls, strlen(pls), resolved, sizeof(resolved), &nested));
+    assert(!nested);
+    assert(strcmp(resolved, "http://stream.example.net:8000/live") == 0);
+
+    assert(!fv_radio_extract_stream_url("https://example.com/a.m3u8",
+                                        "#EXTM3U\n#EXT-X-ENDLIST\n", 26u,
+                                        resolved, sizeof(resolved), &nested));
+}
+
+static void test_station_health_and_dynamic_json(void) {
+    assert(strcmp(fv_station_bank_code(FV_RADIO_BANK_EN_US), "en_us") == 0);
+    assert(strcmp(fv_station_bank_code(FV_RADIO_BANK_ALL), "all") == 0);
+    assert(strcmp(fv_station_bank_label(FV_RADIO_BANK_EN_UK), "UK") == 0);
+
+    assert(!fv_station_url_is_valid(NULL));
+    assert(!fv_station_url_is_valid("https://www.radio-browser.info/null"));
+    assert(!fv_station_url_is_valid("ftp://example.com/stream"));
+    assert(fv_station_url_is_valid("https://npr-ice.streamguys1.com/live.mp3"));
+
+    const char langs[5][8] = {"en_us", "en_us", "en_us", "es", "en_us"};
+    const char *urls[5] = {
+        "https://www.radio-browser.info/null",
+        "https://live1.example.com/a.mp3",
+        "https://live2.example.com/b.mp3",
+        "https://live3.example.com/es.mp3",
+        "https://live4.example.com/c.mp3",
+    };
+    uint8_t health[5] = {
+        FV_STATION_UNTESTED,
+        FV_STATION_FAILED,
+        FV_STATION_OK,
+        FV_STATION_OK,
+        FV_STATION_UNTESTED,
+    };
+    unsigned group[FV_STATION_GROUP_SIZE] = {0};
+    const size_t n = fv_station_group_healthy(langs, urls, health, 5u, "en_us", 42u, group);
+    assert(n == 4u);
+    /* Invalid /null URL must never enter group; healthy stations precede failed. */
+    for (size_t i = 0; i < n; i++) assert(group[i] != 0u);
+    assert(group[0] != 1u && group[1] != 1u);
+
+    /* "all" includes every valid language */
+    unsigned all_group[FV_STATION_GROUP_SIZE] = {0};
+    const size_t n_all = fv_station_group_healthy(langs, urls, health, 5u, "all", 7u, all_group);
+    assert(n_all == 4u);
+
+    /* Replace failed station inside an active group */
+    unsigned active[FV_STATION_GROUP_SIZE] = {2u, 1u};
+    health[1] = FV_STATION_FAILED;
+    const int rep = fv_station_replace_failed(langs, urls, health, 5u, "en_us", 9u, active, 2u, 1);
+    assert(rep == 4);
+    assert(active[1] == 4u);
+
+    /* Parse Radio-Browser style JSON array including nested string arrays and URLs >= 160 chars */
+    const char *long_url =
+        "https://stream-balancer.example.com/radio/live/aac/high_bitrate/channel_zero/"
+        "token_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/"
+        "segment_feed_primary/stream.aac";
+    assert(strlen(long_url) > 160u);
+    char rb_json[1200];
+    snprintf(rb_json, sizeof(rb_json),
+             "[{\"name\":\"KIRO Newsradio 97.3\",\"tags\":[\"news\",\"talk\"],"
+             "\"url_resolved\":\"https:\\/\\/bonneville.cdnstream1.com\\/2697_48.aac\","
+             "\"countrycode\":\"US\",\"languagecodes\":\"en\"},"
+             "{\"name\":\"Broken\",\"url_resolved\":\"https://www.radio-browser.info/null\",\"countrycode\":\"US\",\"languagecodes\":\"en\"},"
+             "{\"name\":\"KOMO Newsradio\",\"tags\":[\"seattle\",\"talk\"],\"url\":\"%s\","
+             "\"countrycode\":\"US\",\"languagecodes\":\"en_us\"}]",
+             long_url);
+    FvDynamicStation dyn[8] = {0};
+    const size_t parsed = fv_station_parse_radiobrowser_json(rb_json, strlen(rb_json), dyn, 8u);
+    assert(parsed == 2u);
+    assert(strcmp(dyn[0].callsign, "KIRO Newsradio 97.3") == 0);
+    assert(strcmp(dyn[0].url, "https://bonneville.cdnstream1.com/2697_48.aac") == 0);
+    assert(strcmp(dyn[0].country, "US") == 0);
+    assert(strcmp(dyn[1].name, "KOMO Newsradio") == 0);
+    assert(strcmp(dyn[1].lang, "en_us") == 0);
+    assert(strcmp(dyn[1].url, long_url) == 0);
+}
+
 int main(void) {
     test_pitch_and_tempo();
     test_scheduling_and_live_seams();
     test_speaker_local_and_pause();
     test_store_roundtrip();
     test_speech_and_station_reverb();
+    test_radio_playlist_resolution();
+    test_station_health_and_dynamic_json();
     printf("All fragment engine C23 unit tests PASSED.\n");
     return 0;
 }
