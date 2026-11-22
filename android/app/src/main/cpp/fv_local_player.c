@@ -24,6 +24,7 @@
 typedef struct {
     char path[512];
     uint64_t generation;
+    int64_t fallback_duration_us;
     atomic_bool cancel;
     pthread_t thread;
     bool started;
@@ -79,8 +80,9 @@ static bool compressed_waveform(const WaveformJob *job,float peaks[FV_PLAYBACK_B
     AMediaExtractor *extractor=NULL; AMediaCodec *codec=NULL;
     int64_t duration_us=0;
     if (fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_size<=0 ||
-        !fv_media_open_audio_track(fd,st.st_size,true,&extractor,&codec,&sample_rate,&channels,&duration_us) ||
-        duration_us<=0 || duration_us>INT64_MAX/FV_PLAYBACK_BINS) goto done;
+        !fv_media_open_audio_track(fd,st.st_size,true,&extractor,&codec,&sample_rate,&channels,&duration_us)) goto done;
+    if (duration_us<=0) duration_us=job->fallback_duration_us;
+    if (duration_us<=0 || duration_us>INT64_MAX/FV_PLAYBACK_BINS) goto done;
     while (!output_eos && !cancelled(job) && idle<200) {
         bool progress=false;
         if (!input_eos) {
@@ -114,19 +116,18 @@ static bool compressed_waveform(const WaveformJob *job,float peaks[FV_PLAYBACK_B
                        (encoding==2 || encoding==4) && info.offset>=0 && info.size>=0 &&
                        (size_t)info.offset<=cap && (size_t)info.size<=cap-(size_t)info.offset &&
                        (!info.size || output!=NULL) && (size_t)info.size%((size_t)channels*sample_bytes)==0;
-            if (valid && info.size>0) {
+            if (valid && info.size>0 && info.presentationTimeUs>=0 &&
+                info.presentationTimeUs<=duration_us+250000LL) {
                 const size_t frames=(size_t)info.size/((size_t)channels*sample_bytes);
                 for (size_t i=0;i<frames;i++) {
                     const int64_t delta=(int64_t)((uint64_t)i*1000000u/(uint64_t)sample_rate);
-                    if (info.presentationTimeUs<0 || info.presentationTimeUs>=duration_us || delta>=duration_us-info.presentationTimeUs) continue;
                     const int64_t pts=info.presentationTimeUs+delta;
-                    const size_t bin=(size_t)((uint64_t)pts*FV_PLAYBACK_BINS/(uint64_t)duration_us);
                     for (int ch=0;ch<channels;ch++) {
                         const uint8_t *sample=output+(size_t)info.offset+(i*(size_t)channels+(size_t)ch)*sample_bytes;
                         float level;
                         if (encoding==4) { float v;memcpy(&v,sample,4);level=isfinite(v) ? fminf(1.0f,fabsf(v)) : 0.0f; }
                         else { int16_t v;memcpy(&v,sample,2);level=fabsf((float)v)/32768.0f; }
-                        if (level>peaks[bin]) peaks[bin]=level;
+                        fv_waveform_accumulate_sample(peaks,pts,duration_us,level);
                     }
                 }
                 samples+=frames;
@@ -139,6 +140,7 @@ static bool compressed_waveform(const WaveformJob *job,float peaks[FV_PLAYBACK_B
         idle=progress ? 0 : idle+1;
     }
     ok=output_eos && samples>0 && !cancelled(job);
+    if (ok) fv_waveform_normalize(peaks);
 done:
     if (codec) { AMediaCodec_stop(codec); AMediaCodec_delete(codec); }
     if (extractor) AMediaExtractor_delete(extractor);
@@ -154,8 +156,13 @@ static void *analyze_waveform(void *arg) {
     if (attached && p.vm) (*p.vm)->DetachCurrentThread(p.vm);
     pthread_mutex_lock(&p.mutex);
     if (!cancelled(job) && job->generation==p.generation) {
-        if (ok) { memcpy(p.state.waveform,peaks,sizeof(peaks));p.state.waveform_ready=true; }
-        else LOGE("Waveform unavailable for local recording");
+        if (ok) {
+            memcpy(p.state.waveform,peaks,sizeof(peaks));
+            p.state.waveform_ready=true;
+        } else {
+            p.state.waveform_unavailable=true;
+            LOGI("Waveform unavailable for local recording");
+        }
     }
     pthread_mutex_unlock(&p.mutex);
     return NULL;
@@ -231,9 +238,15 @@ static bool open_media(JNIEnv *env,const PlayerMethods *m,const char *path,uint6
     for (size_t i=0;i<count;i++) if (marks[i]<=duration) fv_bookmark_add(p.state.bookmarks,&p.state.bookmark_count,marks[i]);
     snprintf(p.state.status,sizeof(p.state.status),"%s",marks_ok ? "Local recording • waveform loading" : "Local recording • bookmark file unreadable");
     snprintf(p.analysis.path,sizeof(p.analysis.path),"%s",path);p.analysis.generation=p.generation;
+    p.analysis.fallback_duration_us=(int64_t)duration*1000LL;
     pthread_mutex_unlock(&p.mutex);
     atomic_store(&p.analysis.cancel,false);
     p.analysis.started=pthread_create(&p.analysis.thread,NULL,analyze_waveform,&p.analysis)==0;
+    if (!p.analysis.started) {
+        pthread_mutex_lock(&p.mutex);
+        if (generation==p.generation) p.state.waveform_unavailable=true;
+        pthread_mutex_unlock(&p.mutex);
+    }
     LOGI("Prepared local recording: %s duration=%d ms video=%dx%d",path,duration,width,height);
     return true;
 }

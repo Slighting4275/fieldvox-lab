@@ -112,6 +112,44 @@ int main(void) {
         irow[0] = 2; assert(!fv_yuv420_to_argb(image, 2, 2, 2, 2, -1, 0, 2, 2, iplanes, ilengths, irow, ipixel));
     }
 
+    /* Front-facing orientation compensation and horizontal mirror */
+    assert(fv_camera_compensation_degrees_facing(270, 0, true) == 270);
+    assert(fv_camera_compensation_degrees_facing(270, 90, true) == 0);
+    assert(fv_camera_compensation_degrees_facing(270, 270, true) == 180);
+    {
+        const uint32_t lr[2] = {0xFF112233u, 0xFF445566u};
+        uint32_t out_m[2] = {0};
+        assert(fv_camera_filter_frame_ex(lr, 2, 1, out_m, 2, 0, true, FV_CAM_FILTER_NORMAL, false, NULL, NULL));
+        assert(out_m[0] == 0xFF445566u && out_m[1] == 0xFF112233u);
+    }
+
+    /* Multi-lens discovery ordering and human-readable labels */
+    FvCameraLensInfo lenses[4] = {
+        {.id = "1", .focal_mm = 2.5f, .front_facing = true},
+        {.id = "2", .focal_mm = 1.9f, .front_facing = false},
+        {.id = "0", .focal_mm = 6.9f, .front_facing = false},
+        {.id = "3", .focal_mm = 18.0f, .front_facing = false},
+    };
+    fv_camera_build_lens_labels(lenses, 4u);
+    assert(strcmp(lenses[0].id, "0") == 0 && strcmp(lenses[0].label, "WIDE") == 0);
+    assert(strcmp(lenses[1].id, "2") == 0 && strcmp(lenses[1].label, "ULTRA") == 0);
+    assert(strcmp(lenses[2].id, "3") == 0 && strcmp(lenses[2].label, "TELE") == 0);
+    assert(strcmp(lenses[3].id, "1") == 0 && strcmp(lenses[3].label, "FRONT") == 0);
+
+    FvCameraLensInfo logical[5] = {
+        {.id = "3", .parent_id = "0", .focal_mm = 2.0f},
+        {.id = "2", .parent_id = "0", .focal_mm = 6.9f},
+        {.id = "4", .parent_id = "0", .focal_mm = 17.9f},
+        {.id = "1", .focal_mm = 2.7f, .front_facing = true},
+        {.id = "0", .focal_mm = 6.9f},
+    };
+    fv_camera_build_lens_labels(logical, 5u);
+    assert(strcmp(logical[0].label, "BACK") == 0 && !logical[0].parent_id[0]);
+    assert(strcmp(logical[1].label, "ULTRA") == 0);
+    assert(strcmp(logical[2].label, "WIDE") == 0);
+    assert(strcmp(logical[3].label, "TELE") == 0);
+    assert(strcmp(logical[4].label, "FRONT") == 0);
+
     puts("Camera: six RGB filters, torch scaling, YUV chroma, rotation/bounds, wraparound and swipe admission passed");
     return 0;
 }

@@ -26,4 +26,18 @@ bool fv_vox_detect_voice(FvVoxDucker *state, const int16_t *mic, int frames,
 /* Shared slider geometry: the first/last 12% of the row are endpoint padding. */
 int fv_vox_slider_percent(float x, float left, float width);
 
+typedef struct {
+    bool tracking;
+    bool triggered;
+    float start_x, start_y;
+    long start_ms;
+} FvHoldGesture;
+void fv_hold_begin(FvHoldGesture *g, float x, float y, long now_ms, bool eligible);
+bool fv_hold_update(FvHoldGesture *g, float x, float y, float slop_px, long now_ms);
+void fv_hold_cancel(FvHoldGesture *g);
+bool fv_hold_end(FvHoldGesture *g);
+
+void fv_vis_siri_lobes(const float spectrum[64], float time_sec, int columns,
+                       float *out_low, float *out_mid, float *out_high);
+
 #endif

@@ -132,6 +132,7 @@ typedef struct {
     /* Controls */
     bool sweep_active;
     bool auto_gate;
+    FvHoldGesture vis_hold;
     bool voice_duck, voice_detected, voice_input_ready;
     int echo_percent, reverb_percent, distortion_percent, grain_ms;
     int visualizer_style, visualizer_color;
@@ -175,6 +176,7 @@ typedef struct {
 
     /* Visuals */
     float spectrum[FV_NATIVE_SPECTRUM_BINS];
+    float vis_smooth[FV_NATIVE_SPECTRUM_BINS];
     float waveform[FV_NATIVE_SPECTRUM_BINS];
     uint32_t waterfall[WF_WIDTH * WF_HEIGHT];
     bool audio_running;
@@ -200,8 +202,46 @@ static FILE *g_record_file;
 static uint32_t g_record_frames;
 static uint32_t g_record_checkpoint_frames;
 static char g_last_artifact[256]; /* audio thread only */
+static FvMarkerRecorder g_wav_markers;
+static FvMarkerRecorder g_vid_markers;
+static long g_vid_rec_start_ms;
+static bool g_vid_markers_active;
 static uint32_t g_camera_source[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
 static uint32_t g_camera_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
+
+static void save_recording_markers(const char *path, const FvMarkerRecorder *rec) {
+    if (path && path[0] && rec->count > 0u) {
+        if (!fv_bookmarks_save(path, rec->marks, rec->count)) {
+            LOGW("Could not save auto-markers for %s", path);
+        } else {
+            LOGI("Saved %zu timeline markers for %s", rec->count, path);
+        }
+    }
+}
+
+static void stop_video_recording_locked(char *out_path, size_t out_cap) {
+    pthread_mutex_lock(&g_record_mutex);
+    FvMarkerRecorder markers = g_vid_markers;
+    g_vid_markers_active = false;
+    pthread_mutex_unlock(&g_record_mutex);
+    char saved_path[512] = {0};
+    fv_video_recorder_stop(saved_path, sizeof(saved_path));
+    g_app.video_recording_active = false;
+    save_recording_markers(saved_path, &markers);
+    if (out_path && out_cap) snprintf(out_path, out_cap, "%s", saved_path);
+}
+
+static void record_active_timeline_marker(long now_ms, int64_t min_gap_ms) {
+    pthread_mutex_lock(&g_record_mutex);
+    if (g_record_file) {
+        const int64_t wav_ms = (int64_t)g_record_frames * 1000 / SAMPLE_RATE;
+        fv_marker_recorder_record(&g_wav_markers, wav_ms, min_gap_ms);
+    }
+    if (g_vid_markers_active) {
+        fv_marker_recorder_record(&g_vid_markers, (int64_t)(now_ms - g_vid_rec_start_ms), min_gap_ms);
+    }
+    pthread_mutex_unlock(&g_record_mutex);
+}
 
 static long get_time_ms(void) {
     struct timespec ts;
@@ -322,21 +362,55 @@ static void __attribute__((unused)) draw_logo(Ui *ui, float cx, float cy, float 
     fvg_circle(c, cx - r * 0.34f, cy + r * 0.48f, r * 0.04f, white, 0, 0);
 }
 
-/* Original three-style audio visualizer; every trace is measured processed PCM. */
-static const char *const visualizer_names[] = {"SPECTRUM", "WAVEFORM", "HISTORY"};
+/* Four-style audio visualizer; every trace is measured processed PCM. */
+static const char *const visualizer_names[] = {"SPECTRUM", "WAVEFORM", "HISTORY", "WAVE FX"};
 static const uint32_t visualizer_colors[] = {0xFFFFFFFFu, 0xFF6FE7FFu, 0xFFFFD166u, 0xFF76E7A2u};
 static const char *const visualizer_color_names[] = {"WHITE", "CYAN", "GOLD", "GREEN"};
 
+static void draw_siri_lobe(FvCanvas *c, float plot_x, float mid, float plot_w, float half_h,
+                           const float *amps, int cols, uint32_t stroke_col, float d) {
+    const float step = plot_w / (float)(cols > 1 ? cols - 1 : 1);
+    float prev_x = plot_x;
+    float prev_y_top = mid - amps[0] * half_h;
+    float prev_y_bot = mid + amps[0] * half_h;
+    for (int i = 1; i < cols; i++) {
+        const float cx = plot_x + (float)i * step;
+        const float y_top = mid - amps[i] * half_h;
+        const float y_bot = mid + amps[i] * half_h;
+        fvg_line(c, prev_x, prev_y_top, cx, y_top, 1.8f * d, stroke_col);
+        fvg_line(c, prev_x, prev_y_bot, cx, y_bot, 1.8f * d, stroke_col);
+        prev_x = cx;
+        prev_y_top = y_top;
+        prev_y_bot = y_bot;
+    }
+}
+
 static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
-    (void)now_ms;
     const float d = ui->d;
     FvCanvas *c = ui->c;
     const uint32_t color = visualizer_colors[s->visualizer_color % 4];
-    fvg_round_rect(c, x, y, w, h, 14.0f*d, 0xB8000000, 0x44FFFFFF, d);
+    const bool burst = s->vis_hold.tracking && s->vis_hold.triggered;
+    const bool compact_clear = s->ui.vis_layout == FV_VIS_LAYOUT_COMPACT && !burst;
+    const uint32_t card_fill = compact_clear ? 0u : 0xB8000000u;
+    const uint32_t card_stroke = burst ? 0xFF6FE7FFu : (compact_clear ? 0x28FFFFFFu : 0x44FFFFFFu);
+    fvg_round_rect(c, x, y, w, h, 14.0f*d, card_fill, card_stroke, burst ? 2.0f * d : d);
     const WidgetRect *pr = &ui->rects[W_CAM_PREVIEW];
     const WidgetRect *cr = &ui->rects[W_VIS_COLOR];
     const float plot_x = pr->x, plot_y = pr->y, plot_w = pr->w, plot_h = pr->h;
-    if (s->visualizer_style == 2) {
+    if (s->visualizer_style == 3) {
+        enum { SIRI_COLS = 48 };
+        float low[SIRI_COLS], mid_l[SIRI_COLS], high[SIRI_COLS];
+        static long animation_start_ms;
+        if (!animation_start_ms) animation_start_ms = now_ms;
+        fv_vis_siri_lobes(s->vis_smooth, (float)(now_ms - animation_start_ms) / 1000.0f,
+                          SIRI_COLS, low, mid_l, high);
+        const float mid = plot_y + plot_h * 0.5f;
+        const float half_h = plot_h * 0.46f;
+        fvg_line(c, plot_x, mid, plot_x + plot_w, mid, d, 0x88FFFFFFu);
+        draw_siri_lobe(c, plot_x, mid, plot_w, half_h, low, SIRI_COLS, (color & 0x00FFFFFFu) | 0xAA000000u, d);
+        draw_siri_lobe(c, plot_x, mid, plot_w, half_h, mid_l, SIRI_COLS, 0xCC6FE7FFu, d);
+        draw_siri_lobe(c, plot_x, mid, plot_w, half_h, high, SIRI_COLS, 0xEEFFFFFFu, d);
+    } else if (s->visualizer_style == 2) {
         static uint32_t tinted_history[WF_WIDTH*WF_HEIGHT];
         for (int i=0; i<WF_WIDTH*WF_HEIGHT; i++) {
             const uint32_t level = s->waterfall[i]&255u;
@@ -365,25 +439,29 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
     }
     draw_placed_pill(ui, W_VIS_PREV, "<", PILL_IDLE);
     draw_placed_pill(ui, W_VIS_NEXT, ">", PILL_IDLE);
+    const char *vis_lbl = burst ? "HOLD BURST" : visualizer_names[s->visualizer_style % 4];
     fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), plot_x, cr->y, plot_w*0.60f, cr->h,
-                    visualizer_names[s->visualizer_style % 3], color, false);
+                    vis_lbl, burst ? 0xFF6FE7FFu : color, burst);
     draw_placed_pill(ui, W_VIS_COLOR, visualizer_color_names[s->visualizer_color % 4], PILL_IDLE);
 }
 
 static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w, int h, float d, long now) {
     if (s->cam_filter != FV_CAM_FILTER_OFF) {
-        const bool frame = fv_camera_copy_argb(g_camera_source);
+        int rot_deg = 0;
+        bool front_facing = false, torch_on = false;
+        const bool frame = fv_camera_copy_argb(g_camera_source, s->display_rotation_deg,
+                                               &rot_deg, &front_facing, &torch_on);
         if (frame) {
             int cam_w = FV_CAMERA_WIDTH;
             int cam_h = FV_CAMERA_HEIGHT;
-            const int rot_deg = fv_camera_get_compensation_for_display(s->display_rotation_deg);
             static int s_view_logged = 0;
             if (s_view_logged++ < 3) {
                 LOGI("viewfinder: w=%d, h=%d, rot_deg=%d", w, h, rot_deg);
             }
-            if (fv_camera_filter_frame(g_camera_source,FV_CAMERA_WIDTH,FV_CAMERA_HEIGHT,
-                                      g_camera_argb,(size_t)FV_CAMERA_WIDTH*(size_t)FV_CAMERA_HEIGHT,rot_deg,
-                                      s->cam_filter,fv_camera_is_torch_on(),&cam_w,&cam_h)) {
+            if (fv_camera_filter_frame_ex(g_camera_source,FV_CAMERA_WIDTH,FV_CAMERA_HEIGHT,
+                                          g_camera_argb,(size_t)FV_CAMERA_WIDTH*(size_t)FV_CAMERA_HEIGHT,rot_deg,
+                                          front_facing,s->cam_filter,torch_on,
+                                          &cam_w,&cam_h)) {
                 fvg_blit_cover(c,g_camera_argb,cam_w,cam_h);
             }
         } else {
@@ -733,10 +811,20 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
         draw_placed_pill(ui, W_COOL_CYCLE, c_str, PILL_IDLE);
     }
 
-    /* Row 5: Camera switch, audio session and recording tools. */
+    /* Row 5-6: Camera switch, HUD layout, audio session and recording tools. */
     {
         draw_placed_pill(ui, W_CAMHUD, s->cam_filter==FV_CAM_FILTER_OFF ? "CAM OFF" : "CAM ON",
                          s->cam_filter==FV_CAM_FILTER_OFF ? PILL_IDLE : PILL_ACTIVE);
+        char cam_lbl[24], lens_name[16];
+        fv_camera_copy_lens_label(fv_camera_current_lens(), lens_name, sizeof(lens_name));
+        snprintf(cam_lbl, sizeof(cam_lbl), "CAM: %s", lens_name);
+        draw_placed_pill(ui, W_CAM_LENS, cam_lbl, fv_camera_is_front_facing() ? PILL_ACTIVE : PILL_IDLE);
+        static const char *const hud_labels[FV_VIS_LAYOUT_COUNT] = {"HUD: BTM", "HUD: TOP", "HUD: CLR"};
+        const FvVisLayoutPreset preset = (unsigned)s->ui.vis_layout < FV_VIS_LAYOUT_COUNT
+                                             ? s->ui.vis_layout
+                                             : FV_VIS_LAYOUT_BOTTOM;
+        draw_placed_pill(ui, W_VIS_LAYOUT, hud_labels[preset],
+                         preset == FV_VIS_LAYOUT_BOTTOM ? PILL_IDLE : PILL_ACTIVE);
         draw_placed_pill(ui, W_MIC, s->monitor_active ? "MIC ON" : "MIC OFF",
                          s->monitor_active ? PILL_ACTIVE : PILL_IDLE);
         draw_placed_pill(ui, W_REC, s->recording_active ? "WAV ON" : "SESS WAV",
@@ -935,11 +1023,17 @@ static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const Fv
     fvg_line(c,x,mid,x+w,mid,d,0xFF555555);
     if (p->waveform_ready) {
         const float step=w/(float)FV_PLAYBACK_BINS;
+        const float play_x = p->duration_ms > 0 ? x+w*(float)((double)p->position_ms/(double)p->duration_ms) : x;
         for (int i=0;i<FV_PLAYBACK_BINS;i++) {
+            const float bx=x+((float)i+0.5f)*step;
             const float amplitude=p->waveform[i]*wave_h*0.45f;
-            fvg_line(c,x+((float)i+0.5f)*step,mid-amplitude,x+((float)i+0.5f)*step,mid+amplitude,fmaxf(d,step*0.65f),0xFFCCCCCC);
+            const uint32_t bar_col = bx <= play_x ? 0xFF6FE7FFu : 0xFFAAAAAAu;
+            fvg_line(c,bx,mid-amplitude,bx,mid+amplitude,fmaxf(d,step*0.65f),bar_col);
         }
-    } else if (!p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,wave_y,w,wave_h,"Decoding local waveform…",0xFFBBBBBB,false);
+    } else if (!p->error) {
+        const char *label = p->waveform_unavailable ? "Waveform unavailable" : "Decoding local waveform…";
+        fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,12.0f),x,wave_y,w,wave_h,label,0xFFBBBBBB,false);
+    }
     if (p->duration_ms>0) {
         for (size_t i=0;i<p->bookmark_count;i++) {
             const float bx=x+w*(float)((double)p->bookmarks[i]/(double)p->duration_ms);
@@ -985,12 +1079,15 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     fvg_canvas_init(&canvas, (uint32_t *)buf->bits, w, h, buf->stride);
 
     static FieldVoxApp s;
+    const long now = get_time_ms();
     pthread_mutex_lock(&g_state_mutex);
+    if (g_app.vis_hold.tracking && !g_app.vis_hold.triggered) {
+        fv_hold_update(&g_app.vis_hold, g_app.vis_hold.start_x, g_app.vis_hold.start_y, 0.0f, now);
+    }
     memcpy(&s, &g_app, sizeof(s));
     pthread_mutex_unlock(&g_state_mutex);
 
     const float d = s.density > 0.5f ? s.density : 3.0f;
-    const long now = get_time_ms();
     bool is_video[EVIDENCE_MAX] = {false};
     for (int i = 0; i < s.evidence_count && i < EVIDENCE_MAX; i++) {
         is_video[i] = strcmp(s.evidence[i].mime, "video/mp4") == 0;
@@ -1001,7 +1098,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     if (s.ui.estes_mode || s.ui.playback_visible) {
         fv_ui_layout_active(rects, w, h, d, &s.ui, s.evidence_count, is_video, &layout);
     } else {
-        fv_ui_layout_main_screen(rects, w, h, d, s.ui.controls_visible, s.ui.advanced_controls, &layout);
+        fv_ui_layout_main_screen(rects, w, h, d, &s.ui, &layout);
     }
     const float top_inset = layout.top_inset;
     Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
@@ -1206,8 +1303,8 @@ static void handle_widget(WidgetId id) {
         case W_REVERB:
             g_app.reverb_percent = g_app.reverb_percent ? 0 : 50;
             g_app.reverb_fx = g_app.reverb_percent > 0; break;
-        case W_VIS_PREV: g_app.visualizer_style = (g_app.visualizer_style+2)%3; break;
-        case W_VIS_NEXT: g_app.visualizer_style = (g_app.visualizer_style+1)%3; break;
+        case W_VIS_PREV: g_app.visualizer_style = (g_app.visualizer_style+3)%4; break;
+        case W_VIS_NEXT: g_app.visualizer_style = (g_app.visualizer_style+1)%4; break;
         case W_VIS_COLOR: g_app.visualizer_color = (g_app.visualizer_color+1)%4; break;
         case W_ADVANCED: g_app.ui.advanced_controls = !g_app.ui.advanced_controls; break;
         case W_VOICE_DUCK:
@@ -1345,8 +1442,33 @@ static void handle_widget(WidgetId id) {
             set_status_locked(msg);
             break;
         case W_CAM_PREVIEW:
-            g_app.visualizer_style = (g_app.visualizer_style+1)%3;
+            g_app.visualizer_style = (g_app.visualizer_style+1)%4;
             break;
+        case W_CAM_LENS: {
+            if (g_app.video_recording_active) {
+                set_status_locked("Stop video recording before switching camera lens");
+                break;
+            }
+            if (fv_camera_cycle_lens()) {
+                if (g_app.cam_filter == FV_CAM_FILTER_OFF) g_app.cam_filter = FV_CAM_FILTER_NORMAL;
+                g_app.cam_hud_active = true;
+                char lbl[16];
+                fv_camera_copy_lens_label(fv_camera_current_lens(), lbl, sizeof(lbl));
+                snprintf(msg, sizeof(msg), "Camera lens: %s", lbl);
+                set_status_locked(msg);
+            } else {
+                set_status_locked("Only one camera lens reported by device");
+            }
+            break;
+        }
+        case W_VIS_LAYOUT: {
+            static const char *const layout_desc[FV_VIS_LAYOUT_COUNT] = {
+                "HUD layout: Bottom panel", "HUD layout: Top clear view", "HUD layout: Compact transparent"
+            };
+            g_app.ui.vis_layout = (FvVisLayoutPreset)(((int)g_app.ui.vis_layout + 1) % FV_VIS_LAYOUT_COUNT);
+            set_status_locked(layout_desc[g_app.ui.vis_layout]);
+            break;
+        }
         case W_VIDEO_REC: {
             if (!fv_video_recorder_is_active()) {
                 if (!fv_android_has_permission(g_app.activity, "android.permission.CAMERA") ||
@@ -1375,14 +1497,18 @@ static void handle_widget(WidgetId id) {
                 if (fv_video_recorder_start(path, vw, vh, SAMPLE_RATE, 1)) {
                     g_app.video_recording_active = true;
                     snprintf(g_app.video_artifact, sizeof(g_app.video_artifact), "%s", path);
+                    pthread_mutex_lock(&g_record_mutex);
+                    fv_marker_recorder_reset(&g_vid_markers);
+                    g_vid_rec_start_ms = get_time_ms();
+                    g_vid_markers_active = true;
+                    pthread_mutex_unlock(&g_record_mutex);
                     set_status_locked("Video recording started (H.264 + AAC MP4)");
                 } else {
                     set_status_locked("Video recording failed to start");
                 }
             } else {
-                char saved_path[512];
-                fv_video_recorder_stop(saved_path, sizeof(saved_path));
-                g_app.video_recording_active = false;
+                char saved_path[512] = {0};
+                stop_video_recording_locked(saved_path, sizeof(saved_path));
                 char vmsg[256];
                 if (saved_path[0] != '\0') {
                     snprintf(vmsg, sizeof(vmsg), "Video saved: %s", saved_path);
@@ -1634,19 +1760,29 @@ static void *input_thread_func(void *arg) {
                     dragging = false;
                     active_slider = hit_slider_locked(ex, ey);
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
+                    const bool on_vis = fv_ui_resolve_tap(g_app.widgets, ex, ey) == W_CAM_PREVIEW;
+                    fv_hold_begin(&g_app.vis_hold, ex, ey, AMotionEvent_getEventTime(event) / 1000000, on_vis);
                     fv_camera_gesture_begin(&camera_gesture,ex,ey,AMotionEvent_getEventTime(event),
                                              active_slider<0 && camera_swipe_start_locked(ex,ey));
                 } else if (action == AMOTION_EVENT_ACTION_MOVE && tracking) {
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
+                    if (g_app.vis_hold.tracking) {
+                        fv_hold_update(&g_app.vis_hold, ex, ey, slop,
+                                       AMotionEvent_getEventTime(event) / 1000000);
+                        if (!g_app.vis_hold.tracking) dragging = true;
+                    }
                     fv_camera_gesture_move(&camera_gesture,ex,AMotionEvent_getEventTime(event));
-            if (!dragging && fabsf(ey - down_y) > slop) dragging = true;
-            const bool horizontal = camera_gesture.active && fabsf(ex - down_x) > fabsf(ey - down_y);
-            if (dragging && !g_app.ui.estes_mode && !horizontal) {
-                float s = down_scroll - (ey - down_y);
-                g_app.scroll_y = s < 0.0f ? 0.0f : (s > g_app.max_scroll ? g_app.max_scroll : s);
-            }
+                    if (!dragging && fabsf(ey - down_y) > slop) dragging = true;
+                    const bool horizontal = camera_gesture.active && fabsf(ex - down_x) > fabsf(ey - down_y);
+                    if (dragging && !g_app.ui.estes_mode && !horizontal) {
+                        float s = down_scroll - (ey - down_y);
+                        g_app.scroll_y = s < 0.0f ? 0.0f : (s > g_app.max_scroll ? g_app.max_scroll : s);
+                    }
                 } else if (action == AMOTION_EVENT_ACTION_UP && tracking) {
                     tracking = false;
+                    fv_hold_update(&g_app.vis_hold, ex, ey, slop,
+                                   AMotionEvent_getEventTime(event) / 1000000);
+                    const bool hold_consumed = fv_hold_end(&g_app.vis_hold);
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
                     if (active_slider==W_PLAY_SEEK) fv_local_player_scrub_end();
                     const int swipe=fv_camera_gesture_end(&camera_gesture,ex,ey,AMotionEvent_getEventTime(event),
@@ -1659,7 +1795,8 @@ static void *input_thread_func(void *arg) {
                         set_status_locked(message);
                         LOGI("Camera filter: %d %s (%s swipe)",(int)g_app.cam_filter,
                              fv_camera_filter_name(g_app.cam_filter),swipe>0 ? "left" : "right");
-                    } else if (active_slider<0 && !dragging && fabsf(ex - down_x) <= slop) {
+                    } else if (!hold_consumed && active_slider<0 && !dragging &&
+                               fabsf(ex - down_x) <= slop && fabsf(ey - down_y) <= slop) {
                         tap = true;
                         tap_x = ex;
                         tap_y = ey;
@@ -1668,6 +1805,7 @@ static void *input_thread_func(void *arg) {
                 } else if (action == AMOTION_EVENT_ACTION_CANCEL || action == AMOTION_EVENT_ACTION_POINTER_DOWN ||
                            action == AMOTION_EVENT_ACTION_POINTER_UP) {
                     if (active_slider==W_PLAY_SEEK) fv_local_player_scrub_end();
+                    fv_hold_cancel(&g_app.vis_hold);
                     tracking = false;
                     active_slider = -1;
                     fv_camera_gesture_cancel(&camera_gesture);
@@ -1927,16 +2065,18 @@ static void write_wav_header(FILE *file, uint32_t frames) {
 
 static void finish_recording(void) {
     pthread_mutex_lock(&g_record_mutex);
-    if (g_record_file) {
+    const bool was_recording = g_record_file != NULL;
+    if (was_recording) {
         write_wav_header(g_record_file, g_record_frames);
         fclose(g_record_file);
         g_record_file = NULL;
+        save_recording_markers(g_last_artifact, &g_wav_markers);
         LOGI("Session recording saved: %s (%u frames)", g_last_artifact, g_record_frames);
-        set_status("Session WAV saved to app storage");
     }
     g_record_frames = 0;
     g_record_checkpoint_frames = 0;
     pthread_mutex_unlock(&g_record_mutex);
+    if (was_recording) set_status("Session WAV saved to app storage");
 }
 
 static void stop_recording_on_error(const char *message) {
@@ -1960,6 +2100,7 @@ static void begin_recording(void) {
     g_record_file = fopen(g_last_artifact, "wb+");
     g_record_frames = 0;
     g_record_checkpoint_frames = 0;
+    fv_marker_recorder_reset(&g_wav_markers);
     if (g_record_file) write_wav_header(g_record_file, 0);
     pthread_mutex_unlock(&g_record_mutex);
     if (!g_record_file) {
@@ -2093,6 +2234,7 @@ static void *audio_thread_func(void *arg) {
     FvVoxDucker ducker = {0};
     float duck_gain = 1.0f;
     int wf_divider = 0;
+    int previous_rem_tier = 0;
     long diag_last_ms = get_time_ms();
 
     while (atomic_load(&g_app.running)) {
@@ -2100,9 +2242,10 @@ static void *audio_thread_func(void *arg) {
         const bool playback = fv_local_player_active();
         pthread_mutex_lock(&g_state_mutex);
         const bool resumed = atomic_load(&g_app.resumed);
-        const bool sweep = g_app.sweep_active && resumed && !playback;
+        const bool burst_hold = g_app.vis_hold.tracking && g_app.vis_hold.triggered;
+        const bool sweep = (g_app.sweep_active || burst_hold) && resumed && !playback;
         const bool local_only = g_app.local_only;
-        const bool auto_gate = g_app.auto_gate;
+        const bool auto_gate = g_app.auto_gate || burst_hold;
         const bool monitor = g_app.monitor_active && resumed && !playback;
         const bool voice_duck = g_app.voice_duck && resumed && !playback;
         const bool need_input = monitor || voice_duck;
@@ -2115,7 +2258,9 @@ static void *audio_thread_func(void *arg) {
         const bool muted = g_app.audio_muted;
         const FvSweepDirection direction = g_app.direction;
         const FvPitchOverride pitch_override = g_app.pitch_override;
-        const int rem_tier = g_app.rem_pod_tier;
+        const int rem_tier = resumed && rem_pod ? g_app.rem_pod_tier : 0;
+        const bool rem_alert = rem_tier > previous_rem_tier;
+        previous_rem_tier = rem_tier;
         const float azimuth = g_app.compass_azimuth;
         const float emf_delta = g_app.emf_delta, emf_threshold = g_app.threshold;
         const bool requested = sweep && g_app.fragment_pending;
@@ -2274,6 +2419,11 @@ static void *audio_thread_func(void *arg) {
         fv_audio_get_spectrum(spectrum);
         pthread_mutex_lock(&g_state_mutex);
         memcpy(g_app.spectrum, spectrum, sizeof(spectrum));
+        for (int i = 0; i < FV_NATIVE_SPECTRUM_BINS; i++) {
+            const float target = isfinite(spectrum[i]) ? fmaxf(0.0f, fminf(1.0f, spectrum[i])) : 0.0f;
+            const float rate = target >= g_app.vis_smooth[i] ? 0.45f : 0.14f;
+            g_app.vis_smooth[i] += rate * (target - g_app.vis_smooth[i]);
+        }
         static_assert(BUFFER_FRAMES % FV_NATIVE_SPECTRUM_BINS == 0, "Waveform stride must be exact");
         for (int i = 0; i < FV_NATIVE_SPECTRUM_BINS; i++) {
             const int waveform_index = i * BUFFER_FRAMES / FV_NATIVE_SPECTRUM_BINS;
@@ -2312,6 +2462,11 @@ static void *audio_thread_func(void *arg) {
         }
 
         const unsigned hits = atomic_exchange(&g_app.mark_hit_requests, 0u);
+        if (recording && !g_record_file) begin_recording();
+        if (!recording && g_record_file) finish_recording();
+        if (admitted) record_active_timeline_marker(now, 500LL);
+        else if (rem_alert) record_active_timeline_marker(now, 750LL);
+        if (hits > 0u) record_active_timeline_marker(now, 0LL);
         for (unsigned k = 0; k < hits && g_app.activity && g_app.activity->internalDataPath; k++) {
             char dir[512];
             snprintf(dir, sizeof(dir), "%s/fieldvox-hits", g_app.activity->internalDataPath);
@@ -2331,8 +2486,6 @@ static void *audio_thread_func(void *arg) {
             }
         }
 
-        if (recording && !g_record_file) begin_recording();
-        if (!recording && g_record_file) finish_recording();
         write_recording_block(mono, BUFFER_FRAMES);
 
         if (fv_video_recorder_is_active()) {
@@ -2399,9 +2552,12 @@ static void *camera_thread_func(void *arg) {
         if (resumed && cam && has_perm) {
             const bool active = fv_camera_is_active();
             const bool healthy = fv_camera_is_healthy(2000);
-            if (!active || !healthy) {
+            const bool reopen = fv_camera_needs_reopen();
+            if (!active || !healthy || reopen) {
                 if (active && !healthy) {
                     LOGI("Camera frame watchdog triggered (> 2000 ms stall) - restarting camera pipeline");
+                } else if (reopen) {
+                    LOGI("Switching active camera lens");
                 }
                 fv_camera_stop();
                 if (!fv_camera_start()) {
@@ -2495,9 +2651,9 @@ static void onPause(ANativeActivity *activity) {
     g_app.monitor_active = false;
     g_app.recording_active = false;
     g_app.torch_active = false;
+    fv_hold_cancel(&g_app.vis_hold);
     if (g_app.video_recording_active) {
-        g_app.video_recording_active = false;
-        fv_video_recorder_stop(NULL, 0);
+        stop_video_recording_locked(NULL, 0);
     }
     pthread_mutex_unlock(&g_state_mutex);
 }
@@ -2515,8 +2671,7 @@ static void onDestroy(ANativeActivity *activity) {
     atomic_store(&g_app.resumed, false);
     pthread_mutex_lock(&g_state_mutex);
     if (g_app.video_recording_active) {
-        g_app.video_recording_active = false;
-        fv_video_recorder_stop(NULL, 0);
+        stop_video_recording_locked(NULL, 0);
     }
     pthread_mutex_unlock(&g_state_mutex);
     /* The camera worker exclusively owns camera start/stop.  Joining it first

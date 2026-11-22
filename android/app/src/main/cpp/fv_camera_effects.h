@@ -19,6 +19,9 @@ FvCameraFilter fv_camera_filter_step(FvCameraFilter filter, int direction);
 bool fv_camera_filter_frame(const uint32_t *src, int width, int height,
                             uint32_t *dst, size_t capacity, int rotation,
                             FvCameraFilter filter, bool torch, int *out_w, int *out_h);
+bool fv_camera_filter_frame_ex(const uint32_t *src, int width, int height,
+                               uint32_t *dst, size_t capacity, int rotation, bool mirror_x,
+                               FvCameraFilter filter, bool torch, int *out_w, int *out_h);
 
 enum { FV_CAMERA_GESTURE_SAMPLES = 16 };
 typedef struct { float x; int64_t ns; } FvCameraGestureSample;
@@ -40,4 +43,17 @@ bool fv_yuv420_to_argb(uint32_t *dst, int dst_w, int dst_h, int src_w, int src_h
                        const uint8_t *planes[3], const size_t lengths[3],
                        const int row_stride[3], const int pixel_stride[3]);
 int fv_camera_compensation_degrees(int sensor_orientation_deg, int display_rotation_deg);
+int fv_camera_compensation_degrees_facing(int sensor_orientation_deg, int display_rotation_deg,
+                                          bool front_facing);
+
+typedef struct {
+    char id[16];
+    char parent_id[16];
+    char label[16];
+    float focal_mm;
+    float sensor_width_mm;
+    bool front_facing;
+} FvCameraLensInfo;
+
+void fv_camera_build_lens_labels(FvCameraLensInfo *lenses, size_t count);
 #endif

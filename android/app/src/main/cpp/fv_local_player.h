@@ -7,6 +7,7 @@
 
 typedef struct {
     bool visible, ready, playing, video, muted, error, waveform_ready;
+    bool waveform_unavailable;
     int64_t position_ms, duration_ms;
     char name[256], status[128];
     float waveform[FV_PLAYBACK_BINS];

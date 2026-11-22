@@ -39,4 +39,17 @@ bool fv_bookmark_add(int64_t marks[FV_BOOKMARKS_MAX], size_t *count, int64_t ms)
 int64_t fv_bookmark_next(const int64_t *marks, size_t count, int64_t ms, bool forward);
 bool fv_bookmarks_load(const char *recording, int64_t marks[FV_BOOKMARKS_MAX], size_t *count);
 bool fv_bookmarks_save(const char *recording, const int64_t *marks, size_t count);
+
+typedef struct {
+    int64_t marks[FV_BOOKMARKS_MAX];
+    bool automatic[FV_BOOKMARKS_MAX];
+    size_t count;
+    int64_t last_auto_ms;
+} FvMarkerRecorder;
+void fv_marker_recorder_reset(FvMarkerRecorder *rec);
+bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, int64_t min_gap_ms);
+
+void fv_waveform_accumulate_sample(float peaks[FV_PLAYBACK_BINS], int64_t pts_us,
+                                   int64_t duration_us, float abs_level);
+void fv_waveform_normalize(float peaks[FV_PLAYBACK_BINS]);
 #endif

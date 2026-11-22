@@ -26,9 +26,17 @@ typedef enum {
     W_RADIO_TUNER, W_CLOSE_TUNER, W_TUNER_BANK, W_TUNER_SHUFFLE, W_TUNER_REFRESH,
     W_TUNER_PREV, W_TUNER_NEXT,
     W_TUNER_PLAY_0, W_TUNER_PLAY_1, W_TUNER_PLAY_2, W_TUNER_PLAY_3, W_TUNER_PLAY_4,
+    W_CAM_LENS, W_VIS_LAYOUT,
     W_ESTES_EXIT,
     W_COUNT
 } WidgetId;
+
+typedef enum {
+    FV_VIS_LAYOUT_BOTTOM = 0,
+    FV_VIS_LAYOUT_TOP,
+    FV_VIS_LAYOUT_COMPACT,
+    FV_VIS_LAYOUT_COUNT
+} FvVisLayoutPreset;
 
 typedef struct {
     float x, y, w, h; /* content coordinates (before scrolling) */
@@ -45,6 +53,7 @@ typedef struct {
     bool playback_audio_only;
     bool playback_controls_hidden;
     bool estes_mode;
+    FvVisLayoutPreset vis_layout;
 } FvUiState;
 
 typedef struct {
@@ -74,8 +83,7 @@ bool fv_ui_tap_dismisses_drawer(const WidgetRect rects[static W_COUNT], bool con
                                 int hit_id, float y_screen, float d);
 
 void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
-                              bool controls_visible, bool advanced_controls,
-                              FvUiScreenLayout *out_layout);
+                              const FvUiState *state, FvUiScreenLayout *out_layout);
 void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
                          const FvUiState *state, int overlay_item_count, const bool evidence_is_video[4],
                          FvUiScreenLayout *out_layout);

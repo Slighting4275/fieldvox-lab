@@ -11,12 +11,17 @@
 
 bool fv_camera_start(void);
 void fv_camera_stop(void);
-bool fv_camera_copy_argb(uint32_t out_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT]);
+bool fv_camera_copy_argb(uint32_t out_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT],
+                        int display_rotation_deg, int *rotation_deg, bool *front_facing,
+                        bool *torch_on);
 bool fv_camera_is_active(void);
 bool fv_camera_is_healthy(uint64_t max_age_ms);
-int fv_camera_get_sensor_orientation(void);
-int fv_camera_get_compensation_for_display(int display_rotation_deg);
 bool fv_camera_set_torch(bool enable);
 bool fv_camera_is_torch_on(void);
+size_t fv_camera_current_lens(void);
+void fv_camera_copy_lens_label(size_t index, char *out, size_t cap);
+bool fv_camera_cycle_lens(void);
+bool fv_camera_is_front_facing(void);
+bool fv_camera_needs_reopen(void);
 
 #endif

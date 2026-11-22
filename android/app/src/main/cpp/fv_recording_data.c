@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -208,7 +209,9 @@ bool fv_wav_waveform(const char *path,float peaks[FV_PLAYBACK_BINS],const atomic
         }
         at+=frames;
     }
-    fclose(file);return ok;
+    fclose(file);
+    if (ok) fv_waveform_normalize(peaks);
+    return ok;
 }
 bool fv_wav_load_mono_48k(const char *path,int16_t **samples,size_t *frames) {
     if (!path || !samples || !frames) return false;
@@ -290,4 +293,67 @@ bool fv_bookmarks_save(const char *recording,const int64_t *marks,size_t count) 
     if (ok) ok=rename(temp,path)==0;
     if (!ok) unlink(temp);
     return ok;
+}
+
+void fv_marker_recorder_reset(FvMarkerRecorder *rec) {
+    if (!rec) return;
+    memset(rec, 0, sizeof(*rec));
+    rec->last_auto_ms = -1;
+}
+
+bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, int64_t min_gap_ms) {
+    if (!rec || elapsed_ms < 0 || min_gap_ms < 0) return false;
+    const bool automatic = min_gap_ms > 0;
+    if (automatic && rec->last_auto_ms >= 0 && elapsed_ms - rec->last_auto_ms < min_gap_ms) {
+        return false;
+    }
+    size_t pos = 0;
+    while (pos < rec->count && rec->marks[pos] < elapsed_ms) pos++;
+    if (pos < rec->count && rec->marks[pos] == elapsed_ms) {
+        if (!automatic) rec->automatic[pos] = false;
+        return true;
+    }
+    if (rec->count == FV_BOOKMARKS_MAX) {
+        if (automatic) return false;
+        size_t oldest = 0;
+        while (oldest < rec->count && !rec->automatic[oldest]) oldest++;
+        if (oldest == rec->count) return false;
+        const size_t trailing = --rec->count - oldest;
+        memmove(rec->marks + oldest, rec->marks + oldest + 1, trailing * sizeof(rec->marks[0]));
+        memmove(rec->automatic + oldest, rec->automatic + oldest + 1, trailing * sizeof(rec->automatic[0]));
+        if (oldest < pos) pos--;
+    }
+    memmove(rec->automatic + pos + 1, rec->automatic + pos,
+            (rec->count - pos) * sizeof(rec->automatic[0]));
+    rec->automatic[pos] = automatic;
+    fv_bookmark_add(rec->marks, &rec->count, elapsed_ms);
+    if (automatic) rec->last_auto_ms = elapsed_ms;
+    return true;
+}
+
+void fv_waveform_accumulate_sample(float peaks[FV_PLAYBACK_BINS], int64_t pts_us,
+                                   int64_t duration_us, float abs_level) {
+    if (!peaks || duration_us <= 0 || duration_us > INT64_MAX / FV_PLAYBACK_BINS ||
+        pts_us < 0 || !isfinite(abs_level)) return;
+    if (pts_us >= duration_us) {
+        if (pts_us - duration_us <= 250000LL) pts_us = duration_us - 1;
+        else return;
+    }
+    size_t bin = (size_t)((uint64_t)pts_us * FV_PLAYBACK_BINS / (uint64_t)duration_us);
+    if (bin >= FV_PLAYBACK_BINS) bin = FV_PLAYBACK_BINS - 1u;
+    const float clamped = fmaxf(0.0f, fminf(1.0f, abs_level));
+    if (clamped > peaks[bin]) peaks[bin] = clamped;
+}
+
+void fv_waveform_normalize(float peaks[FV_PLAYBACK_BINS]) {
+    if (!peaks) return;
+    float max_peak = 0.0f;
+    for (size_t i = 0; i < FV_PLAYBACK_BINS; i++) {
+        if (isfinite(peaks[i]) && peaks[i] > max_peak) max_peak = peaks[i];
+    }
+    if (max_peak <= 0.005f || max_peak >= 0.9f) return;
+    const float gain = fminf(4.0f, 0.9f / max_peak);
+    for (size_t i = 0; i < FV_PLAYBACK_BINS; i++) {
+        peaks[i] = fminf(1.0f, fmaxf(0.0f, peaks[i] * gain));
+    }
 }

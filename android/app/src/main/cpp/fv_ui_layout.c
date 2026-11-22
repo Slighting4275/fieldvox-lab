@@ -139,7 +139,7 @@ static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, fl
 
     float cur_y = y + header_h + 4.0f * d;
     const float gap = 3.0f * d;
-    const float pill_h = (h - header_h - 32.0f * d) / 5.0f;
+    const float pill_h = (h - header_h - 34.0f * d) / 6.0f;
     const float row_w = w - 16.0f * d;
     const float row_x = x + 8.0f * d;
 
@@ -147,21 +147,24 @@ static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, fl
     const WidgetId r2[4] = {W_ECHO, W_REVERB, W_NOISE, W_REV};
     const WidgetId r3[6] = {W_SOURCE_MODE, W_VOCAL, W_PAN, W_REMPOD, W_ESTES, W_AUTO_GATE};
     const WidgetId r4[4] = {W_SENS_LOW, W_SENS_MED, W_SENS_HIGH, W_COOL_CYCLE};
-    const WidgetId r5[5] = {W_CAMHUD, W_MIC, W_REC, W_VIDEO_REC, W_SESS};
-    const WidgetId *rows[5] = {r1, r2, r3, r4, r5};
-    const size_t counts[5] = {4u, 4u, 6u, 4u, 5u};
+    const WidgetId r5[4] = {W_CAMHUD, W_CAM_LENS, W_VIS_LAYOUT, W_MIC};
+    const WidgetId r6[3] = {W_REC, W_VIDEO_REC, W_SESS};
+    const WidgetId *rows[6] = {r1, r2, r3, r4, r5, r6};
+    const size_t counts[6] = {4u, 4u, 6u, 4u, 4u, 3u};
 
-    for (size_t i = 0; i < 5u; i++) {
+    for (size_t i = 0; i < 6u; i++) {
         layout_row(rects, row_x, cur_y, row_w, pill_h, gap, rows[i], counts[i]);
         cur_y += pill_h + gap;
     }
 }
 
 void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
-                              bool controls_visible, bool advanced_controls,
-                              FvUiScreenLayout *out_layout) {
+                              const FvUiState *state, FvUiScreenLayout *out_layout) {
     memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
 
+    const bool controls_visible = state && state->controls_visible;
+    const bool advanced_controls = state && state->advanced_controls;
+    const FvVisLayoutPreset vis_layout = state ? state->vis_layout : FV_VIS_LAYOUT_BOTTOM;
     const bool landscape = screen_w > screen_h;
     const float top_inset = (landscape ? 36.0f : 58.0f) * d;
     const float side_inset = (landscape ? 36.0f : 12.0f) * d;
@@ -175,10 +178,16 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
     const float badge_h = (landscape ? 24.0f : 30.0f) * d;
     const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
     const float bottom_bar_y = (float)screen_h - bottom_inset - bottom_bar_h;
-    const float vis_h = (landscape ? 74.0f : 130.0f) * d;
-    const float vis_top = bottom_bar_y - vis_h - 8.0f * d;
+    const float max_vis_span = fmaxf(44.0f * d, bottom_bar_y - (badge_y + badge_h + 12.0f * d));
+    const float base_vis_h = (vis_layout == FV_VIS_LAYOUT_COMPACT)
+                                 ? (landscape ? 52.0f : 76.0f) * d
+                                 : (landscape ? 74.0f : 130.0f) * d;
+    const float vis_h = fminf(base_vis_h, max_vis_span);
+    const float vis_top = (vis_layout == FV_VIS_LAYOUT_TOP)
+                              ? (badge_y + badge_h + 6.0f * d)
+                              : (bottom_bar_y - vis_h - 8.0f * d);
     const float drawer_h = fminf((float)screen_h - top_inset - bottom_inset - 12.0f * d,
-                                 (advanced_controls ? (landscape ? 240.0f : 290.0f)
+                                 (advanced_controls ? (landscape ? 256.0f : 324.0f)
                                                     : (landscape ? 260.0f : 380.0f)) * d);
     const float drawer_y = (float)screen_h - bottom_inset - drawer_h;
 
@@ -328,9 +337,7 @@ void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int scr
                          const FvUiState *state, int overlay_item_count, const bool evidence_is_video[4],
                          FvUiScreenLayout *out_layout) {
     FvUiScreenLayout layout = {0};
-    fv_ui_layout_main_screen(rects, screen_w, screen_h, d,
-                             state ? state->controls_visible : false,
-                             state ? state->advanced_controls : false, &layout);
+    fv_ui_layout_main_screen(rects, screen_w, screen_h, d, state, &layout);
     if (state) {
         if (state->estes_mode) {
             memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);

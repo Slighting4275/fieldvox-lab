@@ -98,3 +98,76 @@ bool fv_vox_detect_voice(FvVoxDucker *state, const int16_t *mic, int frames,
     }
     return clock < state->hold_until;
 }
+
+void fv_hold_begin(FvHoldGesture *g, float x, float y, long now_ms, bool eligible) {
+    if (!g) return;
+    *g = (FvHoldGesture){0};
+    if (!eligible || !isfinite(x) || !isfinite(y)) return;
+    g->tracking = true;
+    g->start_x = x;
+    g->start_y = y;
+    g->start_ms = now_ms;
+}
+
+bool fv_hold_update(FvHoldGesture *g, float x, float y, float slop_px, long now_ms) {
+    if (!g || !g->tracking) return false;
+    if (!isfinite(x) || !isfinite(y) || fabsf(x - g->start_x) > slop_px || fabsf(y - g->start_y) > slop_px) {
+        /* Stop the burst while keeping an already-triggered hold consumed on release. */
+        g->tracking = false;
+        return false;
+    }
+    if (now_ms - g->start_ms >= 350L) g->triggered = true;
+    return g->triggered;
+}
+
+void fv_hold_cancel(FvHoldGesture *g) {
+    if (!g) return;
+    g->tracking = false;
+    g->triggered = false;
+}
+
+bool fv_hold_end(FvHoldGesture *g) {
+    if (!g) return false;
+    const bool was_triggered = g->triggered;
+    g->tracking = false;
+    g->triggered = false;
+    return was_triggered;
+}
+
+static float band_peak(const float spectrum[64], int start, int end) {
+    float peak = 0.0f;
+    for (int i = start; i < end; i++) {
+        if (isfinite(spectrum[i]) && spectrum[i] > peak) peak = spectrum[i];
+    }
+    return fminf(1.0f, fmaxf(0.0f, peak));
+}
+
+void fv_vis_siri_lobes(const float spectrum[64], float time_sec, int columns,
+                       float *out_low, float *out_mid, float *out_high) {
+    if (!spectrum || columns <= 0 || !out_low || !out_mid || !out_high) return;
+    const size_t n = (size_t)columns;
+    const float e_low = band_peak(spectrum, 0, 16);
+    const float e_mid = band_peak(spectrum, 16, 40);
+    const float e_high = band_peak(spectrum, 40, 64);
+    if (fmaxf(e_low, fmaxf(e_mid, e_high)) < 0.0005f) {
+        memset(out_low, 0, n * sizeof(float));
+        memset(out_mid, 0, n * sizeof(float));
+        memset(out_high, 0, n * sizeof(float));
+        return;
+    }
+    const float c0 = -0.35f + 0.16f * sinf(time_sec * 1.9f);
+    const float c1 = 0.12f * cosf(time_sec * 1.5f);
+    const float c2 = 0.35f + 0.16f * sinf(time_sec * 2.3f + 1.0f);
+    const float m0 = 0.65f + 0.35f * (0.5f + 0.5f * sinf(time_sec * 3.1f));
+    const float m1 = 0.65f + 0.35f * (0.5f + 0.5f * cosf(time_sec * 2.7f));
+    const float m2 = 0.65f + 0.35f * (0.5f + 0.5f * sinf(time_sec * 3.7f + 0.7f));
+    const float denom = (float)(columns > 1 ? columns - 1 : 1);
+    for (int i = 0; i < columns; i++) {
+        const float x = -1.0f + 2.0f * (float)i / denom;
+        const float taper = fmaxf(0.0f, 1.0f - x * x * 0.42f);
+        const float d0 = x - c0, d1 = x - c1, d2 = x - c2;
+        out_low[i] = fminf(1.0f, e_low * m0 * expf(-d0 * d0 / 0.18f) * taper);
+        out_mid[i] = fminf(1.0f, e_mid * m1 * expf(-d1 * d1 / 0.14f) * taper);
+        out_high[i] = fminf(1.0f, e_high * m2 * expf(-d2 * d2 / 0.16f) * taper);
+    }
+}

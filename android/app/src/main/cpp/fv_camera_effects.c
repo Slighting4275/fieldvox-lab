@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_camera_effects.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 const char *fv_camera_filter_name(FvCameraFilter filter) {
@@ -57,6 +58,12 @@ static uint32_t depth_color(const uint32_t *src, int w, int h, int x, int y) {
 }
 bool fv_camera_filter_frame(const uint32_t *src, int w, int h, uint32_t *dst, size_t capacity,
                             int rotation, FvCameraFilter filter, bool torch, int *out_w, int *out_h) {
+    return fv_camera_filter_frame_ex(src, w, h, dst, capacity, rotation, false, filter, torch, out_w, out_h);
+}
+
+bool fv_camera_filter_frame_ex(const uint32_t *src, int w, int h, uint32_t *dst, size_t capacity,
+                               int rotation, bool mirror_x, FvCameraFilter filter, bool torch,
+                               int *out_w, int *out_h) {
     if (!src || !dst || src==dst || w<=0 || h<=0 || w>4096 || h>4096 ||
         capacity<(size_t)w*(size_t)h || filter<FV_CAM_FILTER_NORMAL || filter>FV_CAM_FILTER_OFF) return false;
     rotation=(rotation%360+360)%360;
@@ -90,6 +97,7 @@ bool fv_camera_filter_frame(const uint32_t *src, int w, int h, uint32_t *dst, si
         if (rotation==90) { dx=h-1-y; dy=x; }
         else if (rotation==180) { dx=w-1-x; dy=h-1-y; }
         else if (rotation==270) { dx=y; dy=w-1-x; }
+        if (mirror_x) dx=dw-1-dx;
         dst[(size_t)dy*(size_t)dw+(size_t)dx]=out;
     }
     if (out_w) *out_w=dw;
@@ -169,8 +177,65 @@ bool fv_yuv420_to_argb(uint32_t *dst, int dw, int dh, int sw, int sh, int left, 
     }
     return true;
 }
-int fv_camera_compensation_degrees(int sensor_orientation_deg, int display_rotation_deg) {
+int fv_camera_compensation_degrees_facing(int sensor_orientation_deg, int display_rotation_deg,
+                                          bool front_facing) {
     const int s = ((sensor_orientation_deg % 360) + 360) % 360;
     const int d = ((display_rotation_deg % 360) + 360) % 360;
-    return (s - d + 360) % 360;
+    return front_facing ? (s + d) % 360 : (s - d + 360) % 360;
+}
+
+int fv_camera_compensation_degrees(int sensor_orientation_deg, int display_rotation_deg) {
+    return fv_camera_compensation_degrees_facing(sensor_orientation_deg, display_rotation_deg, false);
+}
+
+static bool lens_before(const FvCameraLensInfo *a, const FvCameraLensInfo *b) {
+    if (a->front_facing != b->front_facing) return !a->front_facing;
+    if (!a->front_facing) {
+        if ((a->parent_id[0] == '\0') != (b->parent_id[0] == '\0')) return a->parent_id[0] == '\0';
+        const bool a_zero = strcmp(a->id, "0") == 0;
+        const bool b_zero = strcmp(b->id, "0") == 0;
+        if (a_zero != b_zero) return a_zero;
+        if (fabsf(a->focal_mm - b->focal_mm) > 0.05f) return a->focal_mm < b->focal_mm;
+    }
+    return strcmp(a->id, b->id) < 0;
+}
+
+void fv_camera_build_lens_labels(FvCameraLensInfo *lenses, size_t count) {
+    if (!lenses || count == 0u) return;
+    for (size_t i = 0; i < count; i++) {
+        for (size_t j = i + 1u; j < count; j++) {
+            if (lens_before(&lenses[j], &lenses[i])) {
+                const FvCameraLensInfo tmp = lenses[i];
+                lenses[i] = lenses[j];
+                lenses[j] = tmp;
+            }
+        }
+    }
+    size_t back_count = 0u;
+    bool physical_back = false;
+    for (size_t i = 0; i < count; i++) {
+        if (!lenses[i].front_facing) back_count++;
+        if (!lenses[i].front_facing && lenses[i].parent_id[0]) physical_back = true;
+    }
+    const float primary_focal = (!lenses[0].front_facing && lenses[0].focal_mm > 0.0f) ? lenses[0].focal_mm : 5.0f;
+    size_t front_idx = 0u, extra_back = 0u;
+    for (size_t i = 0; i < count; i++) {
+        if (lenses[i].front_facing) {
+            front_idx++;
+            if (front_idx == 1u) snprintf(lenses[i].label, sizeof(lenses[i].label), "FRONT");
+            else snprintf(lenses[i].label, sizeof(lenses[i].label), "FRONT %zu", front_idx);
+        } else if (back_count <= 1u || (i == 0u && physical_back)) {
+            snprintf(lenses[i].label, sizeof(lenses[i].label), "BACK");
+        } else if (i == 0u || (lenses[i].parent_id[0] &&
+                               fabsf(lenses[i].focal_mm - primary_focal) <= 0.05f)) {
+            snprintf(lenses[i].label, sizeof(lenses[i].label), "WIDE");
+        } else if (lenses[i].focal_mm > 0.0f && lenses[i].focal_mm < primary_focal * 0.78f) {
+            snprintf(lenses[i].label, sizeof(lenses[i].label), "ULTRA");
+        } else if (lenses[i].focal_mm > primary_focal * 1.35f) {
+            snprintf(lenses[i].label, sizeof(lenses[i].label), "TELE");
+        } else {
+            extra_back++;
+            snprintf(lenses[i].label, sizeof(lenses[i].label), "BACK %zu", extra_back + 1u);
+        }
+    }
 }

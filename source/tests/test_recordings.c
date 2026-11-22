@@ -78,6 +78,39 @@ int main(void) {
     assert(fv_recording_catalog_load(&catalog,directory,NULL,path,NULL) && catalog.count==12);
     fv_recording_catalog_free(&catalog);assert(!catalog.items && !catalog.count);
     unlink(other);for (int i=0;i<12;i++) { snprintf(other,sizeof(other),"%s/session-%02d.mp4",directory,i);unlink(other); }
+
+    /* Auto-tagged session marker debounce & persistence */
+    FvMarkerRecorder rec = {0};
+    fv_marker_recorder_reset(&rec);
+    assert(!fv_marker_recorder_record(&rec, -10, 500));
+    assert(fv_marker_recorder_record(&rec, 1200, 500));
+    assert(!fv_marker_recorder_record(&rec, 1500, 500)); /* < 500ms debounce */
+    assert(fv_marker_recorder_record(&rec, 1500, 0));    /* manual hit bypasses debounce */
+    assert(fv_marker_recorder_record(&rec, 1750, 500));  /* >= 500ms since last_auto_ms=1200 */
+    assert(rec.count == 3u && rec.marks[0] == 1200 && rec.marks[1] == 1500 && rec.marks[2] == 1750);
+    assert(fv_bookmarks_save(path, rec.marks, rec.count));
+    memset(marks, 0, sizeof(marks)); count = 0;
+    assert(fv_bookmarks_load(path, marks, &count) && count == 3u && marks[1] == 1500);
+    unlink(marks_path);
+    fv_marker_recorder_reset(&rec);
+    for (size_t i = 0; i < FV_BOOKMARKS_MAX; i++)
+        assert(fv_marker_recorder_record(&rec, (int64_t)i * 500, 500));
+    assert(fv_marker_recorder_record(&rec, 0, 0)); /* Promote the coincident auto mark. */
+    assert(fv_marker_recorder_record(&rec, 200000, 0));
+    assert(rec.count == FV_BOOKMARKS_MAX && rec.marks[0] == 0 && rec.marks[1] == 1000);
+    assert(rec.marks[rec.count - 1] == 200000);
+
+    /* Compressed/AAC waveform binning & quiet-signal peak normalization */
+    float norm_bins[FV_PLAYBACK_BINS] = {0};
+    fv_waveform_accumulate_sample(norm_bins, 0, 1000000LL, 0.05f);
+    fv_waveform_accumulate_sample(norm_bins, 1050000LL, 1000000LL, 0.10f); /* slight trailing PTS clamped */
+    fv_waveform_accumulate_sample(norm_bins, 2000000LL, 1000000LL, 0.50f); /* far out of bounds ignored */
+    assert(fabsf(norm_bins[0] - 0.05f) < 0.001f);
+    assert(fabsf(norm_bins[FV_PLAYBACK_BINS - 1] - 0.10f) < 0.001f);
+    fv_waveform_normalize(norm_bins);
+    assert(fabsf(norm_bins[FV_PLAYBACK_BINS - 1] - 0.40f) < 0.01f); /* 0.10 * 4.0 bounded gain */
+    assert(fabsf(norm_bins[0] - 0.20f) < 0.01f);
+
     unlink(path);assert(rmdir(directory)==0);
     puts("Local recording tests passed: PCM metadata/peaks, malformed files, paged catalog, bookmarks, seek bounds.");
     return 0;

@@ -319,6 +319,65 @@ static void test_ui_controller_and_layout(void) {
     assert(rects[W_PLAY_BACK].visible && rects[W_PLAY_SEEK].visible && rects[W_PLAY_TOGGLE].visible);
     assert(fv_ui_handle_tap(&st, rects, 600.0f, 1500.0f, 3.0f, &estes_hit) == -1);
     assert(st.playback_controls_hidden);
+
+    /* Visualizer press-and-hold burst trigger */
+    FvHoldGesture hold = {0};
+    fv_hold_begin(&hold, 200.0f, 300.0f, 1000L, true);
+    assert(!fv_hold_update(&hold, 204.0f, 302.0f, 30.0f, 1200L)); /* < 350ms */
+    assert(fv_hold_update(&hold, 205.0f, 302.0f, 30.0f, 1400L));  /* >= 350ms -> armed */
+    assert(fv_hold_end(&hold) && !hold.tracking && !hold.triggered);
+    /* Short tap release returns false so tap handler still runs */
+    fv_hold_begin(&hold, 200.0f, 300.0f, 2000L, true);
+    assert(!fv_hold_update(&hold, 200.0f, 300.0f, 30.0f, 2100L));
+    assert(!fv_hold_end(&hold));
+    /* Sliding past slop cancels hold */
+    fv_hold_begin(&hold, 200.0f, 300.0f, 3000L, true);
+    assert(!fv_hold_update(&hold, 250.0f, 300.0f, 30.0f, 3500L));
+    assert(!hold.tracking && !fv_hold_end(&hold));
+
+    fv_hold_begin(&hold, 200.0f, 300.0f, 4000L, true);
+    assert(fv_hold_update(&hold, 200.0f, 300.0f, 30.0f, 4350L));
+    assert(!fv_hold_update(&hold, 250.0f, 300.0f, 30.0f, 4400L));
+    assert(!hold.tracking && fv_hold_end(&hold));
+
+    /* Visualizer overlay layout presets: TOP below badges, COMPACT shorter above footer */
+    st = (FvUiState){.vis_layout = FV_VIS_LAYOUT_TOP};
+    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 0, is_video, &layout);
+    assert(rects[W_CAM_PREVIEW].visible);
+    assert(layout.vis_top >= layout.badge_y + layout.badge_h);
+    assert(layout.vis_top + layout.vis_h <= layout.bottom_bar_y);
+
+    FvUiScreenLayout btm_layout = {0};
+    st = (FvUiState){.vis_layout = FV_VIS_LAYOUT_BOTTOM};
+    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 0, is_video, &btm_layout);
+    st = (FvUiState){.vis_layout = FV_VIS_LAYOUT_COMPACT};
+    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 0, is_video, &layout);
+    assert(layout.vis_h < btm_layout.vis_h && layout.vis_top + layout.vis_h <= layout.bottom_bar_y);
+
+    /* Advanced drawer exposes camera lens and HUD layout pills */
+    st = (FvUiState){.controls_visible = true, .advanced_controls = true};
+    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 0, is_video, &layout);
+    assert(rects[W_CAM_LENS].visible && rects[W_VIS_LAYOUT].visible);
+
+    /* Smooth multi-band Siri frequency wave lobes */
+    float zero_spec[64] = {0}, act_spec[64] = {0};
+    float low_c[32] = {0}, mid_c[32] = {0}, high_c[32] = {0};
+    fv_vis_siri_lobes(zero_spec, 0.5f, 32, low_c, mid_c, high_c);
+    for (int i = 0; i < 32; i++) {
+        assert(low_c[i] == 0.0f && mid_c[i] == 0.0f && high_c[i] == 0.0f);
+    }
+    act_spec[6] = 0.9f; act_spec[24] = 0.8f; act_spec[48] = 0.7f;
+    fv_vis_siri_lobes(act_spec, 0.25f, 32, low_c, mid_c, high_c);
+    float max_l = 0.0f, max_m = 0.0f, max_h = 0.0f;
+    for (int i = 0; i < 32; i++) {
+        assert(low_c[i] >= 0.0f && low_c[i] <= 1.0f);
+        assert(mid_c[i] >= 0.0f && mid_c[i] <= 1.0f);
+        assert(high_c[i] >= 0.0f && high_c[i] <= 1.0f);
+        if (low_c[i] > max_l) max_l = low_c[i];
+        if (mid_c[i] > max_m) max_m = mid_c[i];
+        if (high_c[i] > max_h) max_h = high_c[i];
+    }
+    assert(max_l > 0.2f && max_m > 0.2f && max_h > 0.2f);
 }
 
 int main(void) {
