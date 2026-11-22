@@ -30,18 +30,6 @@ static _Thread_local struct {
     jfieldID left,top,right,bottom,metric_top,metric_bottom;
     float last_size[FVG_FONT_COUNT],top_px[FVG_FONT_COUNT],bottom_px[FVG_FONT_COUNT];
 } text;
-static bool checked(JNIEnv *env,const char *operation) {
-    return fv_jni_check(env,"FieldVoxText",operation,false);
-}
-static jclass global_class(JNIEnv *env,const char *name) {
-    return fv_jni_global_class(env,"FieldVoxText",name,false);
-}
-static jmethodID method(JNIEnv *env,jclass cls,const char *name,const char *sig) {
-    return fv_jni_method(env,"FieldVoxText",cls,name,sig,false);
-}
-static jfieldID field(JNIEnv *env,jclass cls,const char *name,const char *sig) {
-    return fv_jni_field(env,"FieldVoxText",cls,name,sig,false);
-}
 static bool prepare(void) {
     if (text.initialized) return true;
     if (text.failed || !java_vm) return false;
@@ -52,20 +40,17 @@ static bool prepare(void) {
         text.attached=true;
     }
     text.env=env;
-    if ((*env)->PushLocalFrame(env,32)!=JNI_OK) { checked(env,"font initialization frame"); return false; }
+    if ((*env)->PushLocalFrame(env,32)!=JNI_OK) { fv_jni_check(env,"FieldVoxText","font initialization frame",false); return false; }
     bool ok=false;
-    text.paint_class=global_class(env,"android/graphics/Paint");
-    text.bitmap_class=global_class(env,"android/graphics/Bitmap");
-    text.canvas_class=global_class(env,"android/graphics/Canvas");
-    text.rect_class=global_class(env,"android/graphics/Rect");
-    jclass typeface=(*env)->FindClass(env,"android/graphics/Typeface");
-    if (!checked(env,"Typeface") || !typeface) goto done;
-    jclass config=(*env)->FindClass(env,"android/graphics/Bitmap$Config");
-    if (!checked(env,"Bitmap Config") || !config) goto done;
-    jclass fm=(*env)->FindClass(env,"android/graphics/Paint$FontMetrics");
-    if (!checked(env,"FontMetrics") || !fm) goto done;
-    if (!text.paint_class || !text.bitmap_class || !text.canvas_class || !text.rect_class) goto done;
-#define M(member,cls,name,sig) text.member=method(env,cls,name,sig); if (!text.member) goto done
+    text.paint_class=fv_jni_global_class(env,"FieldVoxText","android/graphics/Paint",false);
+    text.bitmap_class=fv_jni_global_class(env,"FieldVoxText","android/graphics/Bitmap",false);
+    text.canvas_class=fv_jni_global_class(env,"FieldVoxText","android/graphics/Canvas",false);
+    text.rect_class=fv_jni_global_class(env,"FieldVoxText","android/graphics/Rect",false);
+    jclass typeface=fv_jni_find_class(env,"FieldVoxText","android/graphics/Typeface",false);
+    jclass config=fv_jni_find_class(env,"FieldVoxText","android/graphics/Bitmap$Config",false);
+    jclass fm=fv_jni_find_class(env,"FieldVoxText","android/graphics/Paint$FontMetrics",false);
+    if (!typeface || !config || !fm || !text.paint_class || !text.bitmap_class || !text.canvas_class || !text.rect_class) goto done;
+#define M(member,cls,name,sig) text.member=fv_jni_method(env,"FieldVoxText",cls,name,sig,false); if (!text.member) goto done
     M(size,text.paint_class,"setTextSize","(F)V");
     M(measure,text.paint_class,"measureText","(Ljava/lang/String;)F");
     M(measure_range,text.paint_class,"measureText","(Ljava/lang/String;II)F");
@@ -75,36 +60,39 @@ static bool prepare(void) {
     M(draw,text.canvas_class,"drawText","(Ljava/lang/String;FFLandroid/graphics/Paint;)V");
     M(rect_new,text.rect_class,"<init>","()V");
 #undef M
-    text.left=field(env,text.rect_class,"left","I"); text.top=field(env,text.rect_class,"top","I");
-    text.right=field(env,text.rect_class,"right","I"); text.bottom=field(env,text.rect_class,"bottom","I");
-    text.metric_top=field(env,fm,"top","F"); text.metric_bottom=field(env,fm,"bottom","F");
+    text.left=fv_jni_field(env,"FieldVoxText",text.rect_class,"left","I",false);
+    text.top=fv_jni_field(env,"FieldVoxText",text.rect_class,"top","I",false);
+    text.right=fv_jni_field(env,"FieldVoxText",text.rect_class,"right","I",false);
+    text.bottom=fv_jni_field(env,"FieldVoxText",text.rect_class,"bottom","I",false);
+    text.metric_top=fv_jni_field(env,"FieldVoxText",fm,"top","F",false);
+    text.metric_bottom=fv_jni_field(env,"FieldVoxText",fm,"bottom","F",false);
     if (!text.left || !text.top || !text.right || !text.bottom || !text.metric_top || !text.metric_bottom) goto done;
-    text.bitmap_new=(*env)->GetStaticMethodID(env,text.bitmap_class,"createBitmap","(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
-    if (!checked(env,"createBitmap") || !text.bitmap_new) goto done;
-    const jfieldID argb=(*env)->GetStaticFieldID(env,config,"ARGB_8888","Landroid/graphics/Bitmap$Config;");
-    if (!checked(env,"ARGB8888 field") || !argb) goto done;
+    text.bitmap_new=fv_jni_static_method(env,"FieldVoxText",text.bitmap_class,"createBitmap","(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;",false);
+    if (!text.bitmap_new) goto done;
+    const jfieldID argb=fv_jni_static_field(env,"FieldVoxText",config,"ARGB_8888","Landroid/graphics/Bitmap$Config;",false);
+    if (!argb) goto done;
     jobject cfg=(*env)->GetStaticObjectField(env,config,argb);
-    if (!checked(env,"ARGB8888") || !cfg) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","ARGB8888",false) || !cfg) goto done;
     text.config=(*env)->NewGlobalRef(env,cfg);
-    if (!checked(env,"bitmap config reference") || !text.config) goto done;
-    jmethodID constructor=method(env,text.paint_class,"<init>","(I)V");
-    jmethodID face=method(env,text.paint_class,"setTypeface","(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;");
-    jmethodID color=method(env,text.paint_class,"setColor","(I)V");
-    jmethodID create=(*env)->GetStaticMethodID(env,typeface,"create","(Ljava/lang/String;I)Landroid/graphics/Typeface;");
-    if (!checked(env,"Typeface.create") || !constructor || !face || !color || !create) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","bitmap config reference",false) || !text.config) goto done;
+    jmethodID constructor=fv_jni_method(env,"FieldVoxText",text.paint_class,"<init>","(I)V",false);
+    jmethodID face=fv_jni_method(env,"FieldVoxText",text.paint_class,"setTypeface","(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;",false);
+    jmethodID color=fv_jni_method(env,"FieldVoxText",text.paint_class,"setColor","(I)V",false);
+    jmethodID create=fv_jni_static_method(env,"FieldVoxText",typeface,"create","(Ljava/lang/String;I)Landroid/graphics/Typeface;",false);
+    if (!constructor || !face || !color || !create) goto done;
     for (int i=0;i<FVG_FONT_COUNT;i++) {
         jstring family=(*env)->NewStringUTF(env,i==FVG_FONT_MONO ? "monospace" : (i==FVG_FONT_MEDIUM ? "sans-serif-medium" : "sans-serif"));
-        if (!checked(env,"font family") || !family) goto done;
+        if (!fv_jni_check(env,"FieldVoxText","font family",false) || !family) goto done;
         jobject font=(*env)->CallStaticObjectMethod(env,typeface,create,family,i==FVG_FONT_BOLD ? 1 : 0);
-        if (!checked(env,"font face") || !font) goto done;
+        if (!fv_jni_check(env,"FieldVoxText","font face",false) || !font) goto done;
         jobject paint=(*env)->NewObject(env,text.paint_class,constructor,129); /* anti-alias + subpixel text */
-        if (!checked(env,"Paint constructor") || !paint) goto done;
+        if (!fv_jni_check(env,"FieldVoxText","Paint constructor",false) || !paint) goto done;
         (*env)->CallObjectMethod(env,paint,face,font);
-        if (!checked(env,"font assignment")) goto done;
+        if (!fv_jni_check(env,"FieldVoxText","font assignment",false)) goto done;
         (*env)->CallVoidMethod(env,paint,color,(jint)-1);
-        if (!checked(env,"glyph color")) goto done;
+        if (!fv_jni_check(env,"FieldVoxText","glyph color",false)) goto done;
         text.paint[i]=(*env)->NewGlobalRef(env,paint);
-        if (!checked(env,"paint reference") || !text.paint[i]) goto done;
+        if (!fv_jni_check(env,"FieldVoxText","paint reference",false) || !text.paint[i]) goto done;
         (*env)->DeleteLocalRef(env,family); (*env)->DeleteLocalRef(env,font); (*env)->DeleteLocalRef(env,paint);
     }
     ok=true;
@@ -117,9 +105,9 @@ static bool set_size(int font,float pixels) {
     JNIEnv *env=text.env;
     if (pixels==text.last_size[font]) return true;
     (*env)->CallVoidMethod(env,text.paint[font],text.size,pixels);
-    if (!checked(env,"Paint size")) return false;
+    if (!fv_jni_check(env,"FieldVoxText","Paint size",false)) return false;
     jobject fm=(*env)->CallObjectMethod(env,text.paint[font],text.metrics);
-    if (!checked(env,"font metrics") || !fm) return false;
+    if (!fv_jni_check(env,"FieldVoxText","font metrics",false) || !fm) return false;
     text.top_px[font]=(*env)->GetFloatField(env,fm,text.metric_top);
     text.bottom_px[font]=(*env)->GetFloatField(env,fm,text.metric_bottom);
     (*env)->DeleteLocalRef(env,fm); text.last_size[font]=pixels; return true;
@@ -135,24 +123,22 @@ FvTextScale fv_android_text_scale(void *activity,float density) {
     FvTextScale scale; for (int i=0;i<FV_TEXT_SIZE_COUNT;i++) scale.px[i]=sizes[i]*density;
     if (!java_vm || !activity) return scale;
     JNIEnv *env=NULL; if ((*java_vm)->GetEnv(java_vm,(void **)&env,JNI_VERSION_1_6)!=JNI_OK) return scale;
-    if ((*env)->PushLocalFrame(env,16)!=JNI_OK) { checked(env,"sp frame"); return scale; }
-    jclass context=(*env)->FindClass(env,"android/content/Context");
-    if (!checked(env,"Context") || !context) goto done;
-    jclass resources=(*env)->FindClass(env,"android/content/res/Resources");
-    if (!checked(env,"Resources") || !resources) goto done;
-    jclass value=(*env)->FindClass(env,"android/util/TypedValue");
-    if (!checked(env,"TypedValue") || !value) goto done;
-    jmethodID get_resources=method(env,context,"getResources","()Landroid/content/res/Resources;");
-    jmethodID get_metrics=method(env,resources,"getDisplayMetrics","()Landroid/util/DisplayMetrics;");
-    jmethodID dimension=(*env)->GetStaticMethodID(env,value,"applyDimension","(IFLandroid/util/DisplayMetrics;)F");
-    if (!checked(env,"applyDimension") || !get_resources || !get_metrics || !dimension) goto done;
+    if ((*env)->PushLocalFrame(env,16)!=JNI_OK) { fv_jni_check(env,"FieldVoxText","sp frame",false); return scale; }
+    jclass context=fv_jni_find_class(env,"FieldVoxText","android/content/Context",false);
+    jclass resources=fv_jni_find_class(env,"FieldVoxText","android/content/res/Resources",false);
+    jclass value=fv_jni_find_class(env,"FieldVoxText","android/util/TypedValue",false);
+    if (!context || !resources || !value) goto done;
+    jmethodID get_resources=fv_jni_method(env,"FieldVoxText",context,"getResources","()Landroid/content/res/Resources;",false);
+    jmethodID get_metrics=fv_jni_method(env,"FieldVoxText",resources,"getDisplayMetrics","()Landroid/util/DisplayMetrics;",false);
+    jmethodID dimension=fv_jni_static_method(env,"FieldVoxText",value,"applyDimension","(IFLandroid/util/DisplayMetrics;)F",false);
+    if (!get_resources || !get_metrics || !dimension) goto done;
     jobject res=(*env)->CallObjectMethod(env,activity,get_resources);
-    if (!checked(env,"getResources") || !res) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","getResources",false) || !res) goto done;
     jobject metrics=(*env)->CallObjectMethod(env,res,get_metrics);
-    if (!checked(env,"getDisplayMetrics") || !metrics) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","getDisplayMetrics",false) || !metrics) goto done;
     for (int i=0;i<FV_TEXT_SIZE_COUNT;i++) {
         const float px=(*env)->CallStaticFloatMethod(env,value,dimension,2,sizes[i],metrics);
-        if (!checked(env,"sp conversion")) break;
+        if (!fv_jni_check(env,"FieldVoxText","sp conversion",false)) break;
         if (isfinite(px) && px>0 && px<=512) scale.px[i]=px;
     }
     __android_log_print(ANDROID_LOG_INFO,"FieldVoxText","sp sizes: 8=%.2fpx 11=%.2fpx 12=%.2fpx 14=%.2fpx 16=%.2fpx",(double)scale.px[0],(double)scale.px[1],(double)scale.px[2],(double)scale.px[3],(double)scale.px[4]);
@@ -166,27 +152,27 @@ bool fv_android_text_metrics(int font,float pixels,float *top,float *bottom) {
 bool fv_android_text_glyph(int font,float pixels,uint32_t cp,FvTextGlyph *out) {
     if (!out || !set_size(font,pixels)) return false;
     JNIEnv *env=text.env;
-    if ((*env)->PushLocalFrame(env,16)!=JNI_OK) { checked(env,"glyph frame"); return false; }
+    if ((*env)->PushLocalFrame(env,16)!=JNI_OK) { fv_jni_check(env,"FieldVoxText","glyph frame",false); return false; }
     bool ok=false; *out=(FvTextGlyph){0}; jchar chars[2]; const int length=utf16(cp,chars);
     jstring string=(*env)->NewString(env,chars,length);
-    if (!checked(env,"glyph string") || !string) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph string",false) || !string) goto done;
     out->advance=(*env)->CallFloatMethod(env,text.paint[font],text.measure,string);
-    if (!checked(env,"glyph advance")) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph advance",false)) goto done;
     jobject rect=(*env)->NewObject(env,text.rect_class,text.rect_new);
-    if (!checked(env,"glyph rect") || !rect) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph rect",false) || !rect) goto done;
     (*env)->CallVoidMethod(env,text.paint[font],text.bounds,string,0,length,rect);
-    if (!checked(env,"glyph bounds")) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph bounds",false)) goto done;
     const int left=(*env)->GetIntField(env,rect,text.left),top=(*env)->GetIntField(env,rect,text.top);
     const int right=(*env)->GetIntField(env,rect,text.right),bottom=(*env)->GetIntField(env,rect,text.bottom);
     if (right<=left || bottom<=top) { ok=true; goto done; }
     if (right-left>1024 || bottom-top>1024) goto done;
     out->w=right-left+4; out->h=bottom-top+4; out->xoff=left-2; out->yoff=top-2;
     jobject bitmap=(*env)->CallStaticObjectMethod(env,text.bitmap_class,text.bitmap_new,out->w,out->h,text.config);
-    if (!checked(env,"glyph bitmap") || !bitmap) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph bitmap",false) || !bitmap) goto done;
     jobject canvas=(*env)->NewObject(env,text.canvas_class,text.canvas_new,bitmap);
-    if (!checked(env,"glyph canvas") || !canvas) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph canvas",false) || !canvas) goto done;
     (*env)->CallVoidMethod(env,canvas,text.draw,string,(float)-out->xoff,(float)-out->yoff,text.paint[font]);
-    if (!checked(env,"glyph draw")) goto done;
+    if (!fv_jni_check(env,"FieldVoxText","glyph draw",false)) goto done;
     AndroidBitmapInfo info; void *pixels_data=NULL;
     if (AndroidBitmap_getInfo(env,bitmap,&info)!=ANDROID_BITMAP_RESULT_SUCCESS || info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888 ||
         info.width!=(uint32_t)out->w || info.height!=(uint32_t)out->h || info.stride<info.width*4u) goto done;
@@ -196,20 +182,20 @@ bool fv_android_text_glyph(int font,float pixels,uint32_t cp,FvTextGlyph *out) {
         out->bitmap[(size_t)y*(size_t)out->w+(size_t)x]=((const uint8_t *)pixels_data)[(size_t)y*info.stride+(size_t)x*4u+3u];
     ok=AndroidBitmap_unlockPixels(env,bitmap)==ANDROID_BITMAP_RESULT_SUCCESS;
 done:
-    if (!ok) { checked(env,"glyph rasterization"); free(out->bitmap); *out=(FvTextGlyph){0}; }
+    if (!ok) { fv_jni_check(env,"FieldVoxText","glyph rasterization",false); free(out->bitmap); *out=(FvTextGlyph){0}; }
     (*env)->PopLocalFrame(env,NULL); return ok;
 }
 float fv_android_text_kerning(int font,float pixels,uint32_t left,uint32_t right) {
     if (!set_size(font,pixels)) return 0;
     JNIEnv *env=text.env; jchar chars[4]; int first=utf16(left,chars); const int count=first+utf16(right,chars+first);
     jstring pair=(*env)->NewString(env,chars,count);
-    if (!checked(env,"kerning string") || !pair) return 0;
+    if (!fv_jni_check(env,"FieldVoxText","kerning string",false) || !pair) return 0;
     const float both=(*env)->CallFloatMethod(env,text.paint[font],text.measure,pair);
-    if (!checked(env,"pair advance")) { (*env)->DeleteLocalRef(env,pair); return 0; }
+    if (!fv_jni_check(env,"FieldVoxText","pair advance",false)) { (*env)->DeleteLocalRef(env,pair); return 0; }
     const float a=(*env)->CallFloatMethod(env,text.paint[font],text.measure_range,pair,0,first);
-    if (!checked(env,"left advance")) { (*env)->DeleteLocalRef(env,pair); return 0; }
+    if (!fv_jni_check(env,"FieldVoxText","left advance",false)) { (*env)->DeleteLocalRef(env,pair); return 0; }
     const float b=(*env)->CallFloatMethod(env,text.paint[font],text.measure_range,pair,first,count);
-    const bool ok=checked(env,"right advance"); (*env)->DeleteLocalRef(env,pair);
+    const bool ok=fv_jni_check(env,"FieldVoxText","right advance",false); (*env)->DeleteLocalRef(env,pair);
     return ok ? both-a-b : 0;
 }
 void fv_android_text_shutdown(void) {

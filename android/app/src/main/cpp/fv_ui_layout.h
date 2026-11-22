@@ -40,34 +40,8 @@ typedef struct {
     float badge_y, badge_h;
     float bottom_bar_h, bottom_bar_y;
     float vis_h, vis_top;
+    float drawer_y, drawer_h;
 } FvUiScreenLayout;
-
-typedef struct {
-    float half_w;
-    float left_x, right_x;
-} FvUiBadgeGeom;
-
-typedef struct {
-    float inset;
-    float plot_y, plot_w, plot_h;
-    float arrow_h;
-    float footer_y, footer_h;
-} FvUiVisualizerGeom;
-
-typedef struct {
-    float cx, cy, r_outer, hit_pad;
-    float gap, btn_h, btn_y, btn_w;
-    float side_clearance;
-    float b1_x, b2_x, b3_x, b4_x;
-} FvUiDockGeom;
-
-typedef struct {
-    float drawer_h, drawer_y;
-    float header_h;
-    float close_w, close_h, close_x, close_y;
-    float cur_y, gap, pill_h;
-    float p4_w, p5_w, tools_w;
-} FvUiAdvDrawerGeom;
 
 void fv_ui_place(WidgetRect rects[static W_COUNT], WidgetId id, float x, float y, float w, float h);
 int fv_ui_resolve_tap(const WidgetRect rects[static W_COUNT], float x, float y);
@@ -75,14 +49,17 @@ bool fv_ui_any_hit(const WidgetRect rects[static W_COUNT], float x, float y);
 bool fv_ui_tap_dismisses_drawer(const WidgetRect rects[static W_COUNT], bool controls_visible,
                                 int hit_id, float y_screen, float d);
 
-FvUiScreenLayout fv_ui_compute_screen(int screen_w, int screen_h, float d);
-void fv_ui_layout_perimeter_badges(WidgetRect rects[static W_COUNT], float x, float y, float w, float h,
-                                   float d, FvUiBadgeGeom *out);
-void fv_ui_layout_floating_visualizer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h,
-                                      float d, FvUiVisualizerGeom *out);
-void fv_ui_layout_bottom_action_bar(WidgetRect rects[static W_COUNT], float x, float y, float w, float h,
-                                    float d, FvUiDockGeom *out);
-void fv_ui_layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h,
-                                  float d, FvUiAdvDrawerGeom *out);
+void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
+                              bool controls_visible, bool advanced_controls,
+                              FvUiScreenLayout *out_layout);
+void fv_ui_layout_help_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                               float screen_h, float d, float *out_y, float *out_h);
+void fv_ui_layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                                   float screen_h, float d, int item_count, const bool is_video[4],
+                                   float *out_y, float *out_h, float *out_row_y, float *out_row_h);
+void fv_ui_layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                                 float width, float height, float d,
+                                 float *out_top, float *out_preview_y, float *out_preview_h,
+                                 float *out_wave_y, float *out_wave_h, float *out_buttons_y);
 
 #endif

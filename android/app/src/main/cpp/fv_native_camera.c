@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_native_camera.h"
+#include "fv_jni_helpers.h"
 #include "fv_recording_data.h"
 
 #include <android/log.h>
@@ -135,10 +136,10 @@ bool fv_android_has_permission(ANativeActivity *activity, const char *permission
     JNIEnv *env = fv_get_env(activity, &attached);
     if (!env || !permission) return false;
     jclass cls = (*env)->GetObjectClass(env, activity->clazz);
-    jmethodID method = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
+    jmethodID method = fv_jni_method(env, NULL, cls, "checkSelfPermission", "(Ljava/lang/String;)I", false);
     jstring value = (*env)->NewStringUTF(env, permission);
     const jint result = method && value ? (*env)->CallIntMethod(env, activity->clazz, method, value) : -1;
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    fv_jni_clear(env);
     if (value) (*env)->DeleteLocalRef(env, value);
     if (cls) (*env)->DeleteLocalRef(env, cls);
     if (attached) (*activity->vm)->DetachCurrentThread(activity->vm);
@@ -150,8 +151,8 @@ void fv_android_request_permissions(ANativeActivity *activity, const char * cons
     JNIEnv *env = fv_get_env(activity, &attached);
     if (!env || !permissions || count <= 0) return;
     jclass cls = (*env)->GetObjectClass(env, activity->clazz);
-    jmethodID request = cls ? (*env)->GetMethodID(env, cls, "requestPermissions", "([Ljava/lang/String;I)V") : NULL;
-    jclass string_cls = (*env)->FindClass(env, "java/lang/String");
+    jmethodID request = fv_jni_method(env, NULL, cls, "requestPermissions", "([Ljava/lang/String;I)V", false);
+    jclass string_cls = fv_jni_find_class(env, NULL, "java/lang/String", false);
     jobjectArray values = string_cls ? (*env)->NewObjectArray(env, count, string_cls, NULL) : NULL;
     if (request && values) {
         for (int i = 0; i < count; i++) {
@@ -163,8 +164,7 @@ void fv_android_request_permissions(ANativeActivity *activity, const char * cons
         }
         (*env)->CallVoidMethod(env, activity->clazz, request, values, request_code);
     }
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
+    if (!fv_jni_check(env, "FieldVoxCamera", "runtime permission request", false)) {
         CAM_LOGE("Runtime permission request failed");
     }
     if (values) (*env)->DeleteLocalRef(env, values);
@@ -193,31 +193,31 @@ static void fv_android_vibrate_effect(ANativeActivity *activity, int ms, bool do
     JNIEnv *env = fv_get_env(activity, &attached);
     if (!env) return;
     jclass act_cls = (*env)->GetObjectClass(env, activity->clazz);
-    jmethodID get_sys_svc = act_cls ? (*env)->GetMethodID(env, act_cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jmethodID get_sys_svc = fv_jni_method(env, NULL, act_cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", false);
     jstring svc_name = (*env)->NewStringUTF(env, "vibrator");
     jobject vibrator = (get_sys_svc && svc_name) ? (*env)->CallObjectMethod(env, activity->clazz, get_sys_svc, svc_name) : NULL;
     if (vibrator) {
         jclass vib_cls = (*env)->GetObjectClass(env, vibrator);
-        jclass effect_cls = (*env)->FindClass(env, "android/os/VibrationEffect");
+        jclass effect_cls = fv_jni_find_class(env, NULL, "android/os/VibrationEffect", false);
         jobject effect = NULL;
         if (effect_cls && double_pulse) {
             const jlong timings[] = {0, 35, 55, 45};
             jlongArray pattern = (*env)->NewLongArray(env, 4);
             if (pattern) {
                 (*env)->SetLongArrayRegion(env, pattern, 0, 4, timings);
-                jmethodID create = (*env)->GetStaticMethodID(
-                    env, effect_cls, "createWaveform", "([JI)Landroid/os/VibrationEffect;");
+                jmethodID create = fv_jni_static_method(
+                    env, NULL, effect_cls, "createWaveform", "([JI)Landroid/os/VibrationEffect;", false);
                 if (create) effect = (*env)->CallStaticObjectMethod(env, effect_cls, create, pattern, -1);
                 (*env)->DeleteLocalRef(env, pattern);
             }
         } else if (effect_cls) {
-            jmethodID create = (*env)->GetStaticMethodID(
-                env, effect_cls, "createOneShot", "(JI)Landroid/os/VibrationEffect;");
+            jmethodID create = fv_jni_static_method(
+                env, NULL, effect_cls, "createOneShot", "(JI)Landroid/os/VibrationEffect;", false);
             if (create) effect = (*env)->CallStaticObjectMethod(env, effect_cls, create, (jlong)ms, -1);
         }
         if (effect && vib_cls) {
-            jmethodID vibrate = (*env)->GetMethodID(
-                env, vib_cls, "vibrate", "(Landroid/os/VibrationEffect;)V");
+            jmethodID vibrate = fv_jni_method(
+                env, NULL, vib_cls, "vibrate", "(Landroid/os/VibrationEffect;)V", false);
             if (vibrate) (*env)->CallVoidMethod(env, vibrator, vibrate, effect);
         }
         if (effect) (*env)->DeleteLocalRef(env, effect);
@@ -227,7 +227,7 @@ static void fv_android_vibrate_effect(ANativeActivity *activity, int ms, bool do
     }
     if (svc_name) (*env)->DeleteLocalRef(env, svc_name);
     if (act_cls) (*env)->DeleteLocalRef(env, act_cls);
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    fv_jni_clear(env);
     if (attached) (*activity->vm)->DetachCurrentThread(activity->vm);
 }
 
@@ -278,8 +278,8 @@ static bool fv_copy_file_to_fd(const char *path, int dst_fd) {
 static jobject fv_find_published_media(JNIEnv *env, jobject resolver, jobject collection,
                                        const char *name, const char *relative_path) {
     jclass resolver_cls = (*env)->GetObjectClass(env, resolver);
-    jclass string_cls = (*env)->FindClass(env, "java/lang/String");
-    jclass content_uris_cls = (*env)->FindClass(env, "android/content/ContentUris");
+    jclass string_cls = fv_jni_find_class(env, NULL, "java/lang/String", false);
+    jclass content_uris_cls = fv_jni_find_class(env, NULL, "android/content/ContentUris", false);
     jobject result = NULL;
     jobjectArray projection = string_cls ? (*env)->NewObjectArray(env, 1, string_cls, NULL) : NULL;
     jobjectArray args = string_cls ? (*env)->NewObjectArray(env, 2, string_cls, NULL) : NULL;
@@ -291,30 +291,29 @@ static jobject fv_find_published_media(JNIEnv *env, jobject resolver, jobject co
         (*env)->SetObjectArrayElement(env, projection, 0, id_column);
         (*env)->SetObjectArrayElement(env, args, 0, display_name);
         (*env)->SetObjectArrayElement(env, args, 1, relative);
-        jmethodID query = resolver_cls ? (*env)->GetMethodID(
-            env, resolver_cls, "query",
-            "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;") : NULL;
+        jmethodID query = fv_jni_method(
+            env, NULL, resolver_cls, "query",
+            "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;", false);
         jobject cursor = query ? (*env)->CallObjectMethod(
             env, resolver, query, collection, projection, selection, args, NULL) : NULL;
-        if (cursor && !(*env)->ExceptionCheck(env)) {
+        if (cursor && fv_jni_clear(env)) {
             jclass cursor_cls = (*env)->GetObjectClass(env, cursor);
-            jmethodID move_first = cursor_cls ? (*env)->GetMethodID(env, cursor_cls, "moveToFirst", "()Z") : NULL;
-            jmethodID get_long = cursor_cls ? (*env)->GetMethodID(env, cursor_cls, "getLong", "(I)J") : NULL;
+            jmethodID move_first = fv_jni_method(env, NULL, cursor_cls, "moveToFirst", "()Z", false);
+            jmethodID get_long = fv_jni_method(env, NULL, cursor_cls, "getLong", "(I)J", false);
             if (move_first && get_long && (*env)->CallBooleanMethod(env, cursor, move_first)) {
                 jlong id = (*env)->CallLongMethod(env, cursor, get_long, 0);
-                jmethodID append_id = content_uris_cls ? (*env)->GetStaticMethodID(
-                    env, content_uris_cls, "withAppendedId",
-                    "(Landroid/net/Uri;J)Landroid/net/Uri;") : NULL;
+                jmethodID append_id = fv_jni_static_method(
+                    env, NULL, content_uris_cls, "withAppendedId",
+                    "(Landroid/net/Uri;J)Landroid/net/Uri;", false);
                 if (append_id) result = (*env)->CallStaticObjectMethod(env, content_uris_cls, append_id, collection, id);
             }
-            jmethodID close_cursor = cursor_cls ? (*env)->GetMethodID(env, cursor_cls, "close", "()V") : NULL;
+            jmethodID close_cursor = fv_jni_method(env, NULL, cursor_cls, "close", "()V", false);
             if (close_cursor) (*env)->CallVoidMethod(env, cursor, close_cursor);
             if (cursor_cls) (*env)->DeleteLocalRef(env, cursor_cls);
             (*env)->DeleteLocalRef(env, cursor);
         }
     }
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
+    if (!fv_jni_clear(env)) {
         result = NULL;
     }
     if (selection) (*env)->DeleteLocalRef(env, selection);
@@ -336,16 +335,16 @@ static jobject fv_publish_media(JNIEnv *env, jobject resolver, jobject collectio
     if (existing) return existing;
 
     jclass resolver_cls = (*env)->GetObjectClass(env, resolver);
-    jclass values_cls = (*env)->FindClass(env, "android/content/ContentValues");
-    jclass integer_cls = (*env)->FindClass(env, "java/lang/Integer");
-    jmethodID values_init = values_cls ? (*env)->GetMethodID(env, values_cls, "<init>", "()V") : NULL;
+    jclass values_cls = fv_jni_find_class(env, NULL, "android/content/ContentValues", false);
+    jclass integer_cls = fv_jni_find_class(env, NULL, "java/lang/Integer", false);
+    jmethodID values_init = fv_jni_method(env, NULL, values_cls, "<init>", "()V", false);
     jobject values = values_init ? (*env)->NewObject(env, values_cls, values_init) : NULL;
-    jmethodID put_string = values_cls ? (*env)->GetMethodID(
-        env, values_cls, "put", "(Ljava/lang/String;Ljava/lang/String;)V") : NULL;
-    jmethodID put_integer = values_cls ? (*env)->GetMethodID(
-        env, values_cls, "put", "(Ljava/lang/String;Ljava/lang/Integer;)V") : NULL;
-    jmethodID integer_value_of = integer_cls ? (*env)->GetStaticMethodID(
-        env, integer_cls, "valueOf", "(I)Ljava/lang/Integer;") : NULL;
+    jmethodID put_string = fv_jni_method(
+        env, NULL, values_cls, "put", "(Ljava/lang/String;Ljava/lang/String;)V", false);
+    jmethodID put_integer = fv_jni_method(
+        env, NULL, values_cls, "put", "(Ljava/lang/String;Ljava/lang/Integer;)V", false);
+    jmethodID integer_value_of = fv_jni_static_method(
+        env, NULL, integer_cls, "valueOf", "(I)Ljava/lang/Integer;", false);
     jstring key_name = (*env)->NewStringUTF(env, "_display_name");
     jstring key_mime = (*env)->NewStringUTF(env, "mime_type");
     jstring key_path = (*env)->NewStringUTF(env, "relative_path");
@@ -361,25 +360,25 @@ static jobject fv_publish_media(JNIEnv *env, jobject resolver, jobject collectio
         (*env)->CallVoidMethod(env, values, put_string, key_path, val_path);
         (*env)->CallVoidMethod(env, values, put_integer, key_pending, one);
     }
-    jmethodID insert = resolver_cls ? (*env)->GetMethodID(
-        env, resolver_cls, "insert",
-        "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;") : NULL;
-    jobject uri = (insert && values && !(*env)->ExceptionCheck(env)) ?
+    jmethodID insert = fv_jni_method(
+        env, NULL, resolver_cls, "insert",
+        "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;", false);
+    jobject uri = (insert && values && fv_jni_clear(env)) ?
         (*env)->CallObjectMethod(env, resolver, insert, collection, values) : NULL;
 
     bool copied = false;
-    if (uri && !(*env)->ExceptionCheck(env)) {
+    if (uri && fv_jni_clear(env)) {
         jstring write_mode = (*env)->NewStringUTF(env, "w");
-        jmethodID open_pfd = resolver_cls ? (*env)->GetMethodID(
-            env, resolver_cls, "openFileDescriptor",
-            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;") : NULL;
+        jmethodID open_pfd = fv_jni_method(
+            env, NULL, resolver_cls, "openFileDescriptor",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;", false);
         jobject pfd = (open_pfd && write_mode) ?
             (*env)->CallObjectMethod(env, resolver, open_pfd, uri, write_mode) : NULL;
-        if (pfd && !(*env)->ExceptionCheck(env)) {
+        if (pfd && fv_jni_clear(env)) {
             jclass pfd_cls = (*env)->GetObjectClass(env, pfd);
-            jmethodID detach_fd = pfd_cls ? (*env)->GetMethodID(env, pfd_cls, "detachFd", "()I") : NULL;
+            jmethodID detach_fd = fv_jni_method(env, NULL, pfd_cls, "detachFd", "()I", false);
             int fd = detach_fd ? (*env)->CallIntMethod(env, pfd, detach_fd) : -1;
-            if (fd >= 0 && !(*env)->ExceptionCheck(env)) {
+            if (fd >= 0 && fv_jni_clear(env)) {
                 copied = fv_copy_file_to_fd(source_path, fd);
                 if (fsync(fd) != 0) copied = false;
                 if (close(fd) != 0) copied = false;
@@ -390,28 +389,27 @@ static jobject fv_publish_media(JNIEnv *env, jobject resolver, jobject collectio
         if (write_mode) (*env)->DeleteLocalRef(env, write_mode);
     }
 
-    if (uri && copied && !(*env)->ExceptionCheck(env)) {
-        jmethodID clear = values_cls ? (*env)->GetMethodID(env, values_cls, "clear", "()V") : NULL;
+    if (uri && copied && fv_jni_clear(env)) {
+        jmethodID clear = fv_jni_method(env, NULL, values_cls, "clear", "()V", false);
         jobject zero = integer_value_of ? (*env)->CallStaticObjectMethod(env, integer_cls, integer_value_of, 0) : NULL;
         if (clear && put_integer && zero) {
             (*env)->CallVoidMethod(env, values, clear);
             (*env)->CallVoidMethod(env, values, put_integer, key_pending, zero);
-            jmethodID update = resolver_cls ? (*env)->GetMethodID(
-                env, resolver_cls, "update",
-                "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I") : NULL;
+            jmethodID update = fv_jni_method(
+                env, NULL, resolver_cls, "update",
+                "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I", false);
             if (update) (*env)->CallIntMethod(env, resolver, update, uri, values, NULL, NULL);
         }
         if (zero) (*env)->DeleteLocalRef(env, zero);
     } else if (uri) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-        jmethodID delete_uri = resolver_cls ? (*env)->GetMethodID(
-            env, resolver_cls, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I") : NULL;
+        fv_jni_clear(env);
+        jmethodID delete_uri = fv_jni_method(
+            env, NULL, resolver_cls, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I", false);
         if (delete_uri) (*env)->CallIntMethod(env, resolver, delete_uri, uri, NULL, NULL);
         (*env)->DeleteLocalRef(env, uri);
         uri = NULL;
     }
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
+    if (!fv_jni_clear(env)) {
         if (uri) (*env)->DeleteLocalRef(env, uri);
         uri = NULL;
     }
@@ -431,28 +429,27 @@ static jobject fv_publish_media(JNIEnv *env, jobject resolver, jobject collectio
 }
 
 static void fv_launch_media_viewer(JNIEnv *env, jobject activity, jobject uri, const char *mime) {
-    jclass intent_cls = (*env)->FindClass(env, "android/content/Intent");
+    jclass intent_cls = fv_jni_find_class(env, NULL, "android/content/Intent", false);
     jclass activity_cls = (*env)->GetObjectClass(env, activity);
     jstring action_view = (*env)->NewStringUTF(env, "android.intent.action.VIEW");
     jstring jmime = (*env)->NewStringUTF(env, mime);
-    jmethodID intent_init = (intent_cls && action_view) ? (*env)->GetMethodID(
-        env, intent_cls, "<init>", "(Ljava/lang/String;)V") : NULL;
+    jmethodID intent_init = action_view ? fv_jni_method(
+        env, NULL, intent_cls, "<init>", "(Ljava/lang/String;)V", false) : NULL;
     jobject intent = intent_init ? (*env)->NewObject(env, intent_cls, intent_init, action_view) : NULL;
     if (intent && uri && jmime) {
-        jmethodID set_data_type = (*env)->GetMethodID(
-            env, intent_cls, "setDataAndType",
-            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;");
-        jmethodID add_flags = (*env)->GetMethodID(
-            env, intent_cls, "addFlags", "(I)Landroid/content/Intent;");
-        jmethodID start_activity = activity_cls ? (*env)->GetMethodID(
-            env, activity_cls, "startActivity", "(Landroid/content/Intent;)V") : NULL;
+        jmethodID set_data_type = fv_jni_method(
+            env, NULL, intent_cls, "setDataAndType",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;", false);
+        jmethodID add_flags = fv_jni_method(
+            env, NULL, intent_cls, "addFlags", "(I)Landroid/content/Intent;", false);
+        jmethodID start_activity = fv_jni_method(
+            env, NULL, activity_cls, "startActivity", "(Landroid/content/Intent;)V", false);
         if (set_data_type) (*env)->CallObjectMethod(env, intent, set_data_type, uri, jmime);
         if (add_flags) (*env)->CallObjectMethod(
             env, intent, add_flags, 0x10000000 | 0x00000001); /* NEW_TASK | GRANT_READ_URI_PERMISSION */
         if (start_activity) (*env)->CallVoidMethod(env, activity, start_activity, intent);
     }
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->ExceptionClear(env);
+    if (!fv_jni_check(env, "FieldVoxCamera", "launch media viewer", false)) {
         CAM_LOGE("No system viewer could open the published evidence");
     }
     if (intent) (*env)->DeleteLocalRef(env, intent);
@@ -470,27 +467,27 @@ static void *fv_open_file_worker(void *opaque) {
         return NULL;
     }
     jclass activity_cls = (*env)->GetObjectClass(env, job->activity);
-    jmethodID get_resolver = activity_cls ? (*env)->GetMethodID(
-        env, activity_cls, "getContentResolver", "()Landroid/content/ContentResolver;") : NULL;
+    jmethodID get_resolver = fv_jni_method(
+        env, NULL, activity_cls, "getContentResolver", "()Landroid/content/ContentResolver;", false);
     jobject resolver = get_resolver ? (*env)->CallObjectMethod(env, job->activity, get_resolver) : NULL;
 
     const bool video = strncmp(job->mime, "video/", 6) == 0;
     const char *media_class_name = video ?
         "android/provider/MediaStore$Video$Media" : "android/provider/MediaStore$Audio$Media";
     const char *relative_path = video ? "Movies/FieldVox/" : "Music/FieldVox/";
-    jclass media_cls = (*env)->FindClass(env, media_class_name);
-    jfieldID external_uri = media_cls ? (*env)->GetStaticFieldID(
-        env, media_cls, "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;") : NULL;
+    jclass media_cls = fv_jni_find_class(env, NULL, media_class_name, false);
+    jfieldID external_uri = fv_jni_static_field(
+        env, NULL, media_cls, "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;", false);
     jobject collection = external_uri ? (*env)->GetStaticObjectField(env, media_cls, external_uri) : NULL;
     const char *slash = strrchr(job->path, '/');
     const char *name = slash ? slash + 1 : job->path;
-    jobject published = (resolver && collection && name[0] && !(*env)->ExceptionCheck(env)) ?
+    jobject published = (resolver && collection && name[0] && fv_jni_clear(env)) ?
         fv_publish_media(env, resolver, collection, job->path, name, job->mime, relative_path) : NULL;
     if (published) {
         CAM_LOGI("Published evidence to MediaStore: %s", name);
         fv_launch_media_viewer(env, job->activity, published, job->mime);
     } else {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        fv_jni_clear(env);
         CAM_LOGE("Failed to publish evidence: %s", job->path);
     }
     if (published) (*env)->DeleteLocalRef(env, published);
@@ -890,17 +887,17 @@ int fv_android_get_display_rotation_degrees(ANativeActivity *activity) {
     jint rot_val = 0;
     jclass act_cls = (*env)->GetObjectClass(env, activity->clazz);
     if (act_cls) {
-        jmethodID get_wm = (*env)->GetMethodID(env, act_cls, "getWindowManager", "()Landroid/view/WindowManager;");
+        jmethodID get_wm = fv_jni_method(env, NULL, act_cls, "getWindowManager", "()Landroid/view/WindowManager;", false);
         if (get_wm) {
             jobject wm = (*env)->CallObjectMethod(env, activity->clazz, get_wm);
             if (wm) {
                 jclass wm_cls = (*env)->GetObjectClass(env, wm);
-                jmethodID get_disp = wm_cls ? (*env)->GetMethodID(env, wm_cls, "getDefaultDisplay", "()Landroid/view/Display;") : NULL;
+                jmethodID get_disp = fv_jni_method(env, NULL, wm_cls, "getDefaultDisplay", "()Landroid/view/Display;", false);
                 if (get_disp) {
                     jobject disp = (*env)->CallObjectMethod(env, wm, get_disp);
                     if (disp) {
                         jclass disp_cls = (*env)->GetObjectClass(env, disp);
-                        jmethodID get_rot = disp_cls ? (*env)->GetMethodID(env, disp_cls, "getRotation", "()I") : NULL;
+                        jmethodID get_rot = fv_jni_method(env, NULL, disp_cls, "getRotation", "()I", false);
                         if (get_rot) {
                             rot_val = (*env)->CallIntMethod(env, disp, get_rot);
                         }
@@ -914,7 +911,7 @@ int fv_android_get_display_rotation_degrees(ANativeActivity *activity) {
         }
         (*env)->DeleteLocalRef(env, act_cls);
     }
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    fv_jni_clear(env);
     if (attached) (*activity->vm)->DetachCurrentThread(activity->vm);
 
     switch (rot_val) {

@@ -27,8 +27,6 @@ typedef struct {
 bool fv_wav_read_info(const char *path, FvWavInfo *info);
 bool fv_wav_waveform(const char *path, float peaks[FV_PLAYBACK_BINS], const atomic_bool *cancel);
 bool fv_wav_load_mono_48k(const char *path, int16_t **samples, size_t *frames);
-void fv_put_le16(uint8_t dst[static 2], uint16_t value);
-void fv_put_le32(uint8_t dst[static 4], uint32_t value);
 void fv_wav_build_header(uint8_t header[static 44], uint32_t sample_rate,
                          uint16_t channels, uint32_t pcm_bytes);
 int64_t fv_playback_clamp_seek(int64_t target_ms, int64_t duration_ms);

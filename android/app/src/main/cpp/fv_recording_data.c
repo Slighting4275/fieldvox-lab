@@ -70,11 +70,11 @@ fail:
     fv_recording_catalog_free(&next);return false;
 }
 
-void fv_put_le16(uint8_t dst[static 2], uint16_t value) {
+static void put_le16(uint8_t dst[static 2], uint16_t value) {
     dst[0] = (uint8_t)(value & 0xFFu);
     dst[1] = (uint8_t)((value >> 8u) & 0xFFu);
 }
-void fv_put_le32(uint8_t dst[static 4], uint32_t value) {
+static void put_le32(uint8_t dst[static 4], uint32_t value) {
     for (unsigned i = 0; i < 4u; i++) dst[i] = (uint8_t)(value >> (8u * i));
 }
 void fv_wav_build_header(uint8_t header[static 44], uint32_t sample_rate,
@@ -83,17 +83,17 @@ void fv_wav_build_header(uint8_t header[static 44], uint32_t sample_rate,
     const uint16_t block_align = (uint16_t)(channels * 2u);
     const uint32_t byte_rate = sample_rate * (uint32_t)block_align;
     memcpy(header, "RIFF", 4);
-    fv_put_le32(header + 4, pcm_bytes + 36u);
+    put_le32(header + 4, pcm_bytes + 36u);
     memcpy(header + 8, "WAVEfmt ", 8);
-    fv_put_le32(header + 16, 16u);
-    fv_put_le16(header + 20, 1u);
-    fv_put_le16(header + 22, channels);
-    fv_put_le32(header + 24, sample_rate);
-    fv_put_le32(header + 28, byte_rate);
-    fv_put_le16(header + 32, block_align);
-    fv_put_le16(header + 34, 16u);
+    put_le32(header + 16, 16u);
+    put_le16(header + 20, 1u);
+    put_le16(header + 22, channels);
+    put_le32(header + 24, sample_rate);
+    put_le32(header + 28, byte_rate);
+    put_le16(header + 32, block_align);
+    put_le16(header + 34, 16u);
     memcpy(header + 36, "data", 4);
-    fv_put_le32(header + 40, pcm_bytes);
+    put_le32(header + 40, pcm_bytes);
 }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1]<<8u)); }
 static uint32_t le32(const uint8_t *p) {

@@ -270,10 +270,6 @@ static float fit_size(int font, float size_px, const char *text, float max_w, bo
     return s;
 }
 
-static void place(Ui *ui, WidgetId id, float x, float y, float w, float h) {
-    fv_ui_place(ui->rects, id, x, y, w, h);
-}
-
 typedef struct {
     uint32_t bg, stroke, text;
 } PillStyle;
@@ -282,12 +278,12 @@ static const PillStyle PILL_IDLE = {0xE8181818, 0xFF555555, 0xFFEAEAEA};
 static const PillStyle PILL_ACTIVE = {0xFFF0F0F0, 0xFFFFFFFF, 0xFF111111};
 
 /* Action labels use platform medium weight at 14 sp; geometry remains dp. */
-static void draw_pill(Ui *ui, WidgetId id, float x, float y, float w, float h, const char *label, PillStyle st) {
-    place(ui, id, x, y, w, h);
-    const float sy = y - ui->scroll;
-    fvg_round_rect(ui->c, x, sy, w, h, dp(ui, 8), st.bg, st.stroke, fmaxf(1.0f, dp(ui, 1)));
-    const float size = fit_size(FVG_FONT_MEDIUM, text_sp(ui,14.0f), label, w - dp(ui, 6), false);
-    fvg_text_center(ui->c, FVG_FONT_MEDIUM, size, x, sy, w, h, label, st.text, false);
+static void draw_placed_pill(Ui *ui, WidgetId id, const char *label, PillStyle st) {
+    const WidgetRect *r = &ui->rects[id];
+    const float sy = r->y - ui->scroll;
+    fvg_round_rect(ui->c, r->x, sy, r->w, r->h, dp(ui, 8), st.bg, st.stroke, fmaxf(1.0f, dp(ui, 1)));
+    const float size = fit_size(FVG_FONT_MEDIUM, text_sp(ui,14.0f), label, r->w - dp(ui, 6), false);
+    fvg_text_center(ui->c, FVG_FONT_MEDIUM, size, r->x, sy, r->w, r->h, label, st.text, false);
 }
 
 /* Java LogoGlyphView: sensor ring, compass ticks, waveform core, antenna spine and field dots. */
@@ -333,9 +329,9 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
     FvCanvas *c = ui->c;
     const uint32_t color = visualizer_colors[s->visualizer_color % 4];
     fvg_round_rect(c, x, y, w, h, 14.0f*d, 0xB8000000, 0x44FFFFFF, d);
-    FvUiVisualizerGeom g;
-    fv_ui_layout_floating_visualizer(ui->rects, x, y, w, h, d, &g);
-    const float inset = g.inset, plot_y = g.plot_y, plot_h = g.plot_h, plot_w = g.plot_w;
+    const WidgetRect *pr = &ui->rects[W_CAM_PREVIEW];
+    const WidgetRect *cr = &ui->rects[W_VIS_COLOR];
+    const float plot_x = pr->x, plot_y = pr->y, plot_w = pr->w, plot_h = pr->h;
     if (s->visualizer_style == 2) {
         static uint32_t tinted_history[WF_WIDTH*WF_HEIGHT];
         for (int i=0; i<WF_WIDTH*WF_HEIGHT; i++) {
@@ -345,32 +341,29 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
             const uint32_t blue = (color&255u)*level/255u;
             tinted_history[i] = 0xFF000000u | (red<<16) | (green<<8) | blue;
         }
-        fvg_blit_scaled(c, tinted_history, WF_WIDTH, WF_HEIGHT, x+inset, plot_y, plot_w, plot_h);
+        fvg_blit_scaled(c, tinted_history, WF_WIDTH, WF_HEIGHT, plot_x, plot_y, plot_w, plot_h);
     } else if (s->visualizer_style == 1) {
         const float mid = plot_y + plot_h*0.5f;
-        fvg_line(c, x+inset, mid, x+w-inset, mid, d, 0x33FFFFFF);
+        fvg_line(c, plot_x, mid, plot_x+plot_w, mid, d, 0x33FFFFFF);
         for (int i=1; i<FV_NATIVE_SPECTRUM_BINS; i++) {
             const float step = plot_w / (float)(FV_NATIVE_SPECTRUM_BINS-1);
-            fvg_line(c, x+inset+(float)(i-1)*step, mid-s->waveform[i-1]*plot_h*0.45f,
-                     x+inset+(float)i*step, mid-s->waveform[i]*plot_h*0.45f, 1.8f*d, color);
+            fvg_line(c, plot_x+(float)(i-1)*step, mid-s->waveform[i-1]*plot_h*0.45f,
+                     plot_x+(float)i*step, mid-s->waveform[i]*plot_h*0.45f, 1.8f*d, color);
         }
     } else {
         const float step = plot_w/32.0f;
         for (int i=0; i<32; i++) {
             const float v = fmaxf(0.015f, fminf(1.0f, s->spectrum[i*2]));
             const float bh = v*plot_h;
-            fvg_round_rect(c, x+inset+(float)i*step, plot_y+plot_h-bh,
+            fvg_round_rect(c, plot_x+(float)i*step, plot_y+plot_h-bh,
                            fmaxf(d, step-2.0f*d), bh, d, color, 0, 0);
         }
     }
-    const float arrow_h = g.arrow_h;
-    draw_pill(ui, W_VIS_PREV, x+2.0f*d, y+(h-arrow_h)*0.5f, 34.0f*d, arrow_h, "<", PILL_IDLE);
-    draw_pill(ui, W_VIS_NEXT, x+w-36.0f*d, y+(h-arrow_h)*0.5f, 34.0f*d, arrow_h, ">", PILL_IDLE);
-    const float footer_h = g.footer_h, footer_y = g.footer_y;
-    fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), x+inset, footer_y, plot_w*0.60f, footer_h,
+    draw_placed_pill(ui, W_VIS_PREV, "<", PILL_IDLE);
+    draw_placed_pill(ui, W_VIS_NEXT, ">", PILL_IDLE);
+    fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), plot_x, cr->y, plot_w*0.60f, cr->h,
                     visualizer_names[s->visualizer_style % 3], color, false);
-    draw_pill(ui, W_VIS_COLOR, x+inset+plot_w*0.62f, footer_y, plot_w*0.38f, footer_h,
-              visualizer_color_names[s->visualizer_color % 4], PILL_IDLE);
+    draw_placed_pill(ui, W_VIS_COLOR, visualizer_color_names[s->visualizer_color % 4], PILL_IDLE);
 }
 
 static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w, int h, float d, long now) {
@@ -432,17 +425,15 @@ static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w,
 static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
     const float d = ui->d;
     FvCanvas *c = ui->c;
-    const float row_h = fminf(42.0f*d, h*0.65f), gap = 4.0f*d;
+    const float row_h = ui->rects[W_MUTE].h;
     fvg_round_rect(c, x, y, w, h, 12.0f*d, 0xBD000000, 0, 0);
-    const float help_w = 32.0f*d, torch_w = 54.0f*d, mute_w = 56.0f*d;
-    const float help_x = x+w-help_w, torch_x = help_x-gap-torch_w, mute_x = torch_x-gap-mute_w;
-    const float title_w = fmaxf(30.0f*d, mute_x-x-8.0f*d);
+    const float title_w = fmaxf(30.0f*d, ui->rects[W_MUTE].x - x - 8.0f*d);
     const float title_size = fit_size(FVG_FONT_SANS, text_sp(ui,16.0f), "FIELDVOX", title_w, true);
     fvg_text_center(c, FVG_FONT_SANS, title_size, x+4.0f*d, y, title_w, row_h, "FIELDVOX", 0xFFFFFFFF, true);
-    draw_pill(ui, W_MUTE, mute_x, y, mute_w, row_h, s->audio_muted ? "MUTED" : "MUTE",
-              s->audio_muted ? PILL_ACTIVE : PILL_IDLE);
-    draw_pill(ui, W_TORCH, torch_x, y, torch_w, row_h, "TORCH", s->torch_active ? PILL_ACTIVE : PILL_IDLE);
-    draw_pill(ui, W_HELP, help_x, y, help_w, row_h, "?", PILL_IDLE);
+    draw_placed_pill(ui, W_MUTE, s->audio_muted ? "MUTED" : "MUTE",
+                     s->audio_muted ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_TORCH, "TORCH", s->torch_active ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_HELP, "?", PILL_IDLE);
     char detail[160];
     if (s->video_recording_active) {
         const uint32_t seconds = fv_video_recorder_get_duration_ms()/1000u;
@@ -458,15 +449,13 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
                     s->video_recording_active && (now/500L)%2 == 0 ? 0xFFFF6677 : 0xFFE0E0E0, false);
 }
 
-static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
+static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float y, float h, long now_ms) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
-    FvUiBadgeGeom bg;
-    fv_ui_layout_perimeter_badges(ui->rects, x, y, w, h, d, &bg);
-    const float half_w = bg.half_w;
+    const float half_w = ui->rects[W_CAL].w;
 
     /* Left Badge: EMF Meter - tap to zero-calibrate! */
-    const float lx = bg.left_x;
+    const float lx = ui->rects[W_CAL].x;
     const bool cal = now_ms < s->cal_flash_until_ms;
     const uint32_t emf_stroke = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF1744 :
                                 (s->emf_delta >= 1.5f ? 0xFFFFD600 : 0x55FFFFFF));
@@ -502,7 +491,7 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
     }
 
     /* Right Badge: Environment Telemetry - tap to toggle REM-POD! */
-    const float rx = bg.right_x;
+    const float rx = ui->rects[W_REMPOD].x;
     char telem[96];
     uint32_t tel_bg = 0xA8000000;
     uint32_t tel_stroke = 0x55FFFFFF;
@@ -541,14 +530,18 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
 static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
-    FvUiDockGeom dock;
-    fv_ui_layout_bottom_action_bar(ui->rects, x, y, w, h, d, &dock);
-    const float cx = dock.cx, cy = dock.cy, r_outer = dock.r_outer;
-    const float btn_h = dock.btn_h, btn_y = dock.btn_y, btn_w = dock.btn_w;
+    const float cx = x + w * 0.5f;
+    const float cy = y + h * 0.5f;
+    const float r_outer = (h >= 52.0f * d ? 28.0f : 21.0f) * d;
+    const WidgetRect *r1 = &ui->rects[W_SESS];
+    const WidgetRect *r2 = &ui->rects[W_MARK_HIT];
+    const WidgetRect *r3 = &ui->rects[W_CAM_TINT];
+    const WidgetRect *r4 = &ui->rects[W_CTRL];
+    const float btn_h = r1->h, btn_y = r1->y, btn_w = r1->w;
 
     /* --- Left Flank: LIBRARY & MARK HIT --- */
     {
-        const float b1_x = dock.b1_x;
+        const float b1_x = r1->x;
         const uint32_t b1_bg = 0xC0181818;
         const uint32_t b1_stroke = 0x77FFFFFF;
         fvg_round_rect(c, b1_x, btn_y, btn_w, btn_h, 10.0f * d, b1_bg, b1_stroke, fmaxf(1.0f, 1.2f * d));
@@ -556,7 +549,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
                         b1_x, btn_y, btn_w, btn_h, "LIBRARY", 0xFFFFFFFF, true);
 
         /* Button 2: W_MARK_HIT (Pre-Roll Lossless Audio Capture) */
-        const float b2_x = dock.b2_x;
+        const float b2_x = r2->x;
         fvg_round_rect(c, b2_x, btn_y, btn_w, btn_h, 10.0f * d, 0xD0241406, 0xFFFF9100, fmaxf(1.0f, 1.2f * d));
         char hit_lbl[32];
         if (s->session_hit_count > 0) {
@@ -614,7 +607,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
     /* --- Right Flank: LENS (Spectral Filter) & SETTINGS (Drawer) --- */
     {
         /* Button 3: W_CAM_TINT (Spectral Lens Switcher) */
-        const float b3_x = dock.b3_x;
+        const float b3_x = r3->x;
         fvg_round_rect(c, b3_x, btn_y, btn_w, btn_h, 10.0f * d, 0xC0181818, 0xFFEAEAEA, fmaxf(1.0f, 1.2f * d));
 
         char lens_name[32];
@@ -624,7 +617,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         fvg_text_center(c, FVG_FONT_SANS, s3, b3_x, btn_y, btn_w, btn_h, lens_name, 0xFFFFFFFF, true);
 
         /* Button 4: W_CTRL (DSP & Paranormal Settings Drawer) */
-        const float b4_x = dock.b4_x;
+        const float b4_x = r4->x;
         const uint32_t b4_bg = s->controls_visible ? 0xDD280A35 : 0xC0181818;
         fvg_round_rect(c, b4_x, btn_y, btn_w, btn_h, 10.0f * d, b4_bg, 0xFFAAAAAA, fmaxf(1.0f, 1.2f * d));
         const char *b4_label = s->controls_visible ? "CLOSE" : "CONTROLS";
@@ -633,10 +626,10 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
     }
 }
 
-static void draw_level_slider(Ui *ui, WidgetId id, float x, float y, float w, float h,
-                              const char *label, int level, const char *value) {
+static void draw_placed_slider(Ui *ui, WidgetId id, const char *label, int level, const char *value) {
     const float d = ui->d;
-    place(ui, id, x, y, w, h);
+    const WidgetRect *r = &ui->rects[id];
+    const float x = r->x, y = r->y, w = r->w, h = r->h;
     fvg_text(ui->c, FVG_FONT_SANS, text_sp(ui,12.0f), x+8.0f*d, y+h*0.38f, label, 0xFFFFFFFF, false);
     fvg_text_center(ui->c, FVG_FONT_SANS, text_sp(ui,8.0f), x+w*0.70f, y, w*0.30f, h*0.45f, value, 0xFFCCCCCC, false);
     const float left = x+w*0.12f, right = x+w*0.88f, line_y = y+h*0.72f;
@@ -651,33 +644,22 @@ static void draw_vox_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, floa
     fvg_round_rect(ui->c, x, y, w, h, 16.0f*d, 0xF50D0D0D, 0xFF666666, d);
     fvg_text_center(ui->c, FVG_FONT_SANS, text_sp(ui,14.0f), x, y+4.0f*d, w-44.0f*d, 32.0f*d,
                     "FIELDVOX • AUDIO CONTROLS", 0xFFFFFFFF, false);
-    draw_pill(ui, W_CLOSE_DRAWER, x+w-42.0f*d, y+4.0f*d, 36.0f*d, 32.0f*d, "X", PILL_IDLE);
-    const bool wide = w>600.0f*d;
-    const float row = (h-44.0f*d)/(wide ? 4.0f : 6.0f);
-    const float slider_w = wide ? (w-24.0f*d)*0.5f : w-16.0f*d;
-    const float slider_x = x+8.0f*d, second_x = slider_x+slider_w+8.0f*d;
-    float ry = y+40.0f*d;
+    draw_placed_pill(ui, W_CLOSE_DRAWER, "X", PILL_IDLE);
     char value[48];
     snprintf(value, sizeof(value), "%d%%", s->echo_percent);
-    draw_level_slider(ui, W_ECHO_LEVEL, slider_x, ry, slider_w, row, "Echo", s->echo_percent, value);
-    if (!wide) ry+=row;
+    draw_placed_slider(ui, W_ECHO_LEVEL, "Echo", s->echo_percent, value);
     snprintf(value, sizeof(value), "%d%%", s->reverb_percent);
-    draw_level_slider(ui, W_REVERB_LEVEL, wide ? second_x : slider_x, ry, slider_w, row, "Reverb", s->reverb_percent, value); ry+=row;
+    draw_placed_slider(ui, W_REVERB_LEVEL, "Reverb", s->reverb_percent, value);
     snprintf(value, sizeof(value), "%d%%", s->distortion_percent);
-    draw_level_slider(ui, W_DISTORTION_LEVEL, slider_x, ry, slider_w, row, "Distortion", s->distortion_percent, value);
-    if (!wide) ry+=row;
+    draw_placed_slider(ui, W_DISTORTION_LEVEL, "Distortion", s->distortion_percent, value);
     snprintf(value, sizeof(value), "%d ms", s->grain_ms);
-    draw_level_slider(ui, W_GRAIN_LEVEL, wide ? second_x : slider_x, ry, slider_w, row, "Radio sweep rate",
-                      (s->grain_ms-65)*100/935, value); ry+=row;
-    const float gap = 4.0f*d, bw = (w-16.0f*d-2.0f*gap)/3.0f;
-    const float px = x+8.0f*d;
-    draw_pill(ui, W_START, px, ry+4.0f*d, bw, row-8.0f*d, s->sweep_active ? "RUNNING" : "STOPPED", s->sweep_active ? PILL_ACTIVE : PILL_IDLE);
-    draw_pill(ui, W_NOISE, px+bw+gap, ry+4.0f*d, bw, row-8.0f*d, "WHITE NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
-    draw_pill(ui, W_VOICE_DUCK, px+2.0f*(bw+gap), ry+4.0f*d, bw, row-8.0f*d, "SPEAKING MUTE", s->voice_duck ? PILL_ACTIVE : PILL_IDLE); ry+=row;
-    draw_pill(ui, W_AUTO_GATE, px, ry+4.0f*d, bw, row-8.0f*d, s->auto_gate ? "AUTO" : "SENSOR", !s->auto_gate ? PILL_ACTIVE : PILL_IDLE);
-    draw_pill(ui, W_ADVANCED, px+bw+gap, ry+4.0f*d, bw, row-8.0f*d, "ADVANCED", PILL_IDLE);
-    draw_pill(ui, W_SOURCE_MODE, px+2.0f*(bw+gap), ry+4.0f*d, bw, row-8.0f*d,
-              s->local_only ? "LOCAL" : "LIVE", s->local_only ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_slider(ui, W_GRAIN_LEVEL, "Radio sweep rate", (s->grain_ms-65)*100/935, value);
+    draw_placed_pill(ui, W_START, s->sweep_active ? "RUNNING" : "STOPPED", s->sweep_active ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_NOISE, "WHITE NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_VOICE_DUCK, "SPEAKING MUTE", s->voice_duck ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_AUTO_GATE, s->auto_gate ? "AUTO" : "SENSOR", !s->auto_gate ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_ADVANCED, "ADVANCED", PILL_IDLE);
+    draw_placed_pill(ui, W_SOURCE_MODE, s->local_only ? "LOCAL" : "LIVE", s->local_only ? PILL_ACTIVE : PILL_IDLE);
 }
 
 static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
@@ -689,21 +671,14 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
     fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xF5081019, 0xFF6FE7FF, fmaxf(1.0f, d * 1.5f));
 
     /* Drawer Header */
-    FvUiAdvDrawerGeom adv;
-    fv_ui_layout_advanced_drawer(ui->rects, x, y, w, h, d, &adv);
-    const float header_h = adv.header_h;
+    const float header_h = ui->rects[W_ADVANCED].h;
     const char *header = "ADVANCED • TAP TITLE FOR AUDIO";
     fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), x, y + 2.0f * d, w, header_h, header, 0xFF6FE7FF, true);
 
     /* Close Button in Header */
-    draw_pill(ui, W_CLOSE_DRAWER, adv.close_x, adv.close_y, adv.close_w, adv.close_h, "X", PILL_IDLE);
-
-    float cur_y = adv.cur_y;
-    const float gap = adv.gap;
-    const float pill_h = adv.pill_h;
+    draw_placed_pill(ui, W_CLOSE_DRAWER, "X", PILL_IDLE);
 
     /* Row 1: Sweep Controls (Cadence, Direction, Pitch, Cal) */
-    const float p4_w = adv.p4_w;
     {
         const bool cal = now < s->cal_flash_until_ms;
         PillStyle cal_style = PILL_IDLE;
@@ -714,92 +689,54 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
             (s->pitch_override == FV_PITCH_OVERRIDE_NORMAL ? "NORMAL" : "HIGH"));
         if (s->pitch_semitones < 0) {
             pitch_style = (PillStyle){0xFF0C1F2D, 0xFF6FE7FF, 0xFF6FE7FF};
-
         } else if (s->pitch_semitones > 0) {
             pitch_style = (PillStyle){0xFF2E0D1B, 0xFFFFFFFF, 0xFFFFFFFF};
-
         }
-
-        float px = x + 8.0f * d;
-        draw_pill(ui, W_CADENCE, px, cur_y, p4_w, pill_h, cadence_label(s->cadence_idx), PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_DIRECTION, px, cur_y, p4_w, pill_h, direction_label(s->direction), PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_PITCH, px, cur_y, p4_w, pill_h, pitch_label, pitch_style);
-        px += p4_w + gap;
-        draw_pill(ui, W_CAL, px, cur_y, p4_w, pill_h, cal ? "CAL: OK" : "CAL ZERO", cal_style);
-        cur_y += pill_h + gap;
+        draw_placed_pill(ui, W_CADENCE, cadence_label(s->cadence_idx), PILL_IDLE);
+        draw_placed_pill(ui, W_DIRECTION, direction_label(s->direction), PILL_IDLE);
+        draw_placed_pill(ui, W_PITCH, pitch_label, pitch_style);
+        draw_placed_pill(ui, W_CAL, cal ? "CAL: OK" : "CAL ZERO", cal_style);
     }
 
     /* Row 2: FX Toggles */
-    {
-        float px = x + 8.0f * d;
-        draw_pill(ui, W_ECHO, px, cur_y, p4_w, pill_h, "ECHO", s->echo_fx ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_REVERB, px, cur_y, p4_w, pill_h, "REVERB", s->reverb_fx ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_NOISE, px, cur_y, p4_w, pill_h, "NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_REV, px, cur_y, p4_w, pill_h, "REV FX", s->reverse_fx ? PILL_ACTIVE : PILL_IDLE);
-        cur_y += pill_h + gap;
-    }
+    draw_placed_pill(ui, W_ECHO, "ECHO", s->echo_fx ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_REVERB, "REVERB", s->reverb_fx ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_NOISE, "NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_REV, "REV FX", s->reverse_fx ? PILL_ACTIVE : PILL_IDLE);
 
     /* Row 3: Specialized Modes */
-    const float p5_w = (w - gap * 5.0f - 16.0f * d) / 6.0f;
-    {
-        float px = x + 8.0f * d;
-        draw_pill(ui, W_SOURCE_MODE, px, cur_y, p5_w, pill_h, s->local_only ? "LOCAL" : "LIVE", s->local_only ? PILL_ACTIVE : PILL_IDLE);
-        px += p5_w + gap;
-        draw_pill(ui, W_VOCAL, px, cur_y, p5_w, pill_h, "VOCAL", s->vocal_filter ? PILL_ACTIVE : PILL_IDLE);
-        px += p5_w + gap;
-        draw_pill(ui, W_PAN, px, cur_y, p5_w, pill_h, "3D PAN", s->spatial_pan ? PILL_ACTIVE : PILL_IDLE);
-        px += p5_w + gap;
-        draw_pill(ui, W_REMPOD, px, cur_y, p5_w, pill_h, "REM-POD", s->rem_pod_active ? PILL_ACTIVE : PILL_IDLE);
-        px += p5_w + gap;
-        draw_pill(ui, W_ESTES, px, cur_y, p5_w, pill_h, "ESTES", PILL_IDLE);
-        px += p5_w + gap;
-        draw_pill(ui, W_AUTO_GATE, px, cur_y, p5_w, pill_h,
-                  s->auto_gate ? "AUTO" : "SENSOR", s->auto_gate ? PILL_IDLE : PILL_ACTIVE);
-        cur_y += pill_h + gap;
-    }
+    draw_placed_pill(ui, W_SOURCE_MODE, s->local_only ? "LOCAL" : "LIVE", s->local_only ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_VOCAL, "VOCAL", s->vocal_filter ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_PAN, "3D PAN", s->spatial_pan ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_REMPOD, "REM-POD", s->rem_pod_active ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_ESTES, "ESTES", PILL_IDLE);
+    draw_placed_pill(ui, W_AUTO_GATE, s->auto_gate ? "AUTO" : "SENSOR", s->auto_gate ? PILL_IDLE : PILL_ACTIVE);
 
     /* Row 4: plain-language sensor presets and one-tap cooldown cycle. */
     {
-        float px = x + 8.0f * d;
         const bool low = s->threshold >= 2.5f;
         const bool high = s->threshold < 1.2f;
         const bool med = !low && !high;
-        draw_pill(ui, W_SENS_LOW, px, cur_y, p4_w, pill_h, "SENS LOW", low ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_SENS_MED, px, cur_y, p4_w, pill_h, "SENS MED", med ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
-        draw_pill(ui, W_SENS_HIGH, px, cur_y, p4_w, pill_h, "SENS HIGH", high ? PILL_ACTIVE : PILL_IDLE);
-        px += p4_w + gap;
+        draw_placed_pill(ui, W_SENS_LOW, "SENS LOW", low ? PILL_ACTIVE : PILL_IDLE);
+        draw_placed_pill(ui, W_SENS_MED, "SENS MED", med ? PILL_ACTIVE : PILL_IDLE);
+        draw_placed_pill(ui, W_SENS_HIGH, "SENS HIGH", high ? PILL_ACTIVE : PILL_IDLE);
         char c_str[48];
         snprintf(c_str, sizeof(c_str), "COOL %dms", s->cooldown_ms);
-        draw_pill(ui, W_COOL_CYCLE, px, cur_y, p4_w, pill_h, c_str, PILL_IDLE);
-        cur_y += pill_h + gap;
+        draw_placed_pill(ui, W_COOL_CYCLE, c_str, PILL_IDLE);
     }
 
     /* Row 5: Camera switch, audio session and recording tools. */
     {
-        const float tools_w=(w-gap*4.0f-16.0f*d)/5.0f;
-        float px = x + 8.0f * d;
-        draw_pill(ui,W_CAMHUD,px,cur_y,tools_w,pill_h,s->cam_filter==FV_CAM_FILTER_OFF ? "CAM OFF" : "CAM ON",
-                  s->cam_filter==FV_CAM_FILTER_OFF ? PILL_IDLE : PILL_ACTIVE);
-        px+=tools_w+gap;
-        draw_pill(ui, W_MIC, px, cur_y, tools_w, pill_h, s->monitor_active ? "MIC ON" : "MIC OFF",
-                  s->monitor_active ? PILL_ACTIVE : PILL_IDLE);
-        px += tools_w + gap;
-        draw_pill(ui, W_REC, px, cur_y, tools_w, pill_h, s->recording_active ? "WAV ON" : "SESS WAV",
-                  s->recording_active ? PILL_ACTIVE : PILL_IDLE);
-        px += tools_w + gap;
+        draw_placed_pill(ui, W_CAMHUD, s->cam_filter==FV_CAM_FILTER_OFF ? "CAM OFF" : "CAM ON",
+                         s->cam_filter==FV_CAM_FILTER_OFF ? PILL_IDLE : PILL_ACTIVE);
+        draw_placed_pill(ui, W_MIC, s->monitor_active ? "MIC ON" : "MIC OFF",
+                         s->monitor_active ? PILL_ACTIVE : PILL_IDLE);
+        draw_placed_pill(ui, W_REC, s->recording_active ? "WAV ON" : "SESS WAV",
+                         s->recording_active ? PILL_ACTIVE : PILL_IDLE);
         PillStyle rec_st = PILL_IDLE;
         if (s->video_recording_active) rec_st = (PillStyle){0xDD3A050B, 0xFFFF1744, 0xFFFF5252};
-        draw_pill(ui, W_VIDEO_REC, px, cur_y, tools_w, pill_h,
-                  s->video_recording_active ? "VID STOP" : "VID MP4", rec_st);
-        px += tools_w + gap;
-        draw_pill(ui, W_SESS, px, cur_y, tools_w, pill_h, "EVIDENCE", PILL_IDLE);
+        draw_placed_pill(ui, W_VIDEO_REC, s->video_recording_active ? "VID STOP" : "VID MP4", rec_st);
+        draw_placed_pill(ui, W_SESS, "EVIDENCE", PILL_IDLE);
     }
 }
 
@@ -808,8 +745,8 @@ static void draw_help_overlay(Ui *ui, float screen_h) {
     const float d = ui->d;
     const float x = ui->x0;
     const float w = ui->w;
-    const float h = fminf(screen_h - 36.0f * d, 360.0f * d);
-    const float y = (screen_h - h) * 0.5f;
+    float y = 0.0f, h = 0.0f;
+    fv_ui_layout_help_overlay(ui->rects, x, w, screen_h, d, &y, &h);
     fvg_fill_rect(c, 0, 0, (float)c->w, screen_h, 0xB8000000);
     fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xF70A121C, 0xFF6FE7FF, fmaxf(1.0f, 1.5f * d));
     fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,16.0f), x, y + 8.0f * d, w, 30.0f * d,
@@ -832,28 +769,26 @@ static void draw_help_overlay(Ui *ui, float screen_h) {
         fvg_text(c, FVG_FONT_SANS, fs, x + 26.0f * d, ly, lines[i], 0xFFE0E0E0, false);
         ly += 32.0f * d;
     }
-    const float bw = fminf(150.0f * d, w - 28.0f * d);
-    const float bh = 38.0f * d;
-    const float bx = x + (w - bw) * 0.5f;
-    const float by = y + h - bh - 12.0f * d;
-    draw_pill(ui, W_CLOSE_HELP, bx, by, bw, bh, "GOT IT", PILL_ACTIVE);
+    draw_placed_pill(ui, W_CLOSE_HELP, "GOT IT", PILL_ACTIVE);
 }
 
 static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, float screen_h) {
     FvCanvas *c=ui->c;const float d=ui->d,x=ui->x0,w=ui->w;
-    const float h=fminf(screen_h-92.0f*d,390.0f*d),y=(screen_h-h)*0.5f;
+    bool is_video[EVIDENCE_MAX] = {false};
+    for (int i=0;i<s->evidence_count && i<EVIDENCE_MAX;i++) is_video[i]=strcmp(s->evidence[i].mime,"video/mp4")==0;
+    float y=0.0f,h=0.0f,row_y=0.0f,row_h=0.0f;
+    fv_ui_layout_evidence_overlay(ui->rects,x,w,screen_h,d,s->evidence_count,is_video,&y,&h,&row_y,&row_h);
     fvg_fill_rect(c,0,0,(float)c->w,screen_h,0xD0000000);
     fvg_round_rect(c,x,y,w,h,14.0f*d,0xFA101010,0xFF888888,d);
     fvg_text(c,FVG_FONT_SANS, text_sp(ui,16.0f),x+14.0f*d,y+29.0f*d,"LOCAL RECORDINGS",0xFFFFFFFF,true);
-    draw_pill(ui,W_CLOSE_EVIDENCE,x+w-48.0f*d,y+9.0f*d,38.0f*d,25.0f*d,"X",PILL_IDLE);
+    draw_placed_pill(ui,W_CLOSE_EVIDENCE,"X",PILL_IDLE);
     fvg_text(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+14.0f*d,y+48.0f*d,
               s->recording_active || s->video_recording_active ? "Stop recording before replaying saved media" : "Saved on this phone • play without internet",0xFFBBBBBB,false);
-    const float row_x=x+12.0f*d,row_w=w-24.0f*d,row_h=fminf(58.0f*d,(h-132.0f*d)/4.0f);
-    float row_y=y+62.0f*d;
+    const float row_x=x+12.0f*d,row_w=w-24.0f*d;
     for (int i=0;i<s->evidence_count && i<EVIDENCE_MAX;i++) {
-        const EvidenceEntry *entry=&s->evidence[i];const bool video=strcmp(entry->mime,"video/mp4")==0;
+        const EvidenceEntry *entry=&s->evidence[i];const bool video=is_video[i];
         fvg_round_rect(c,row_x,row_y,row_w,row_h,8.0f*d,0xEE191919,0xFF444444,d);
-        const float tag_w=44.0f*d,open_w=54.0f*d,text_x=row_x+58.0f*d,text_w=row_w-188.0f*d;
+        const float tag_w=44.0f*d,text_x=row_x+58.0f*d,text_w=row_w-188.0f*d;
         fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x+6.0f*d,row_y,tag_w,row_h,video ? "MP4" : "WAV",0xFFE0E0E0,true);
         char name[sizeof(entry->name)+4u];
         fvg_text_elide_filename(FVG_FONT_SANS,text_sp(ui,16.0f),entry->name,text_w,name,sizeof(name));
@@ -861,15 +796,15 @@ static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, float screen_h) 
         char detail[sizeof(entry->detail)+4u];
         fvg_text_elide(FVG_FONT_SANS,text_sp(ui,11.0f),entry->detail,text_w,false,detail,sizeof(detail));
         fvg_text(c,FVG_FONT_SANS,text_sp(ui,11.0f),text_x,row_y+row_h*0.76f,detail,0xFFBBBBBB,false);
-        if (!video) draw_pill(ui,(WidgetId)(W_EVIDENCE_BANK_0+i),row_x+row_w-2.0f*open_w-12.0f*d,row_y+8.0f*d,open_w,row_h-16.0f*d,"BANK",PILL_IDLE);
-        draw_pill(ui,(WidgetId)(W_EVIDENCE_OPEN_0+i),row_x+row_w-open_w-8.0f*d,row_y+8.0f*d,open_w,row_h-16.0f*d,"PLAY",PILL_ACTIVE);
+        if (!video) draw_placed_pill(ui,(WidgetId)(W_EVIDENCE_BANK_0+i),"BANK",PILL_IDLE);
+        draw_placed_pill(ui,(WidgetId)(W_EVIDENCE_OPEN_0+i),"PLAY",PILL_ACTIVE);
         row_y+=row_h+5.0f*d;
     }
     if (!s->evidence_count) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x,row_y+30.0f*d,row_w,45.0f*d,"No saved recordings yet",0xFFBBBBBB,false);
-    const float footer=y+h-48.0f*d,bw=(row_w-12.0f*d)/3.0f;
-    draw_pill(ui,W_LIBRARY_PREV,row_x,footer,bw,34.0f*d,"< PREV",PILL_IDLE);
-    draw_pill(ui,W_LIBRARY_REFRESH,row_x+bw+6.0f*d,footer,bw,34.0f*d,"REFRESH",PILL_IDLE);
-    draw_pill(ui,W_LIBRARY_NEXT,row_x+2.0f*(bw+6.0f*d),footer,bw,34.0f*d,"NEXT >",PILL_IDLE);
+    const float footer=ui->rects[W_LIBRARY_PREV].y;
+    draw_placed_pill(ui,W_LIBRARY_PREV,"< PREV",PILL_IDLE);
+    draw_placed_pill(ui,W_LIBRARY_REFRESH,"REFRESH",PILL_IDLE);
+    draw_placed_pill(ui,W_LIBRARY_NEXT,"NEXT >",PILL_IDLE);
     char count[96];const size_t pages=(s->evidence_total+EVIDENCE_MAX-1)/EVIDENCE_MAX;
     snprintf(count,sizeof(count),"Page %zu / %zu • %zu recordings",pages ? s->evidence_page+1 : 0,pages,s->evidence_total);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),row_x,footer-20.0f*d,row_w,18.0f*d,count,0xFFBBBBBB,false);
@@ -882,16 +817,13 @@ static void playback_time(char *out,size_t capacity,int64_t ms) {
 static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float width,float height) {
     FvCanvas *c=ui->c;const float d=ui->d,x=ui->x0,w=ui->w;
     const bool landscape=width>height;
-    const float top=(landscape ? 36.0f : 58.0f)*d,bottom=(landscape ? 12.0f : 32.0f)*d;
+    float top=0.0f,preview_y=0.0f,preview_h=0.0f,wave_y=0.0f,wave_h=0.0f,buttons_y=0.0f;
+    fv_ui_layout_local_playback(ui->rects,x,w,width,height,d,&top,&preview_y,&preview_h,&wave_y,&wave_h,&buttons_y);
     fvg_clear(c,0xFF080808);
-    draw_pill(ui,W_PLAY_BACK,x,top,80.0f*d,34.0f*d,"< LIBRARY",PILL_IDLE);
-    draw_pill(ui,W_PLAY_MUTE,x+w-64.0f*d,top,64.0f*d,34.0f*d,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui,W_PLAY_BACK,"< LIBRARY",PILL_IDLE);
+    draw_placed_pill(ui,W_PLAY_MUTE,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+84.0f*d,top,w-152.0f*d,34.0f*d,"LOCAL PLAYBACK",0xFFFFFFFF,true);
     fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),p->name,w,false),x,top+38.0f*d,w,25.0f*d,p->name,0xFFDDDDDD,false);
-    const float buttons_y=height-bottom-90.0f*d;
-    const float wave_h=(landscape ? 56.0f : 100.0f)*d;
-    const float wave_y=buttons_y-wave_h-42.0f*d;
-    const float preview_y=top+70.0f*d,preview_h=fmaxf(0.0f,wave_y-preview_y-8.0f*d);
     if (p->video) {
         fv_local_player_draw_video(c,x,preview_y,w,preview_h);
         if (!p->video_frames && !p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,preview_y,w,preview_h,"Loading local video…",0xFFAAAAAA,false);
@@ -899,7 +831,6 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
         fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,landscape ? 16.0f : 20.0f),x,preview_y,w,preview_h,p->error ? "RECORDING UNAVAILABLE" : "SAVED AUDIO",0xFFDDDDDD,true);
     }
     fvg_round_rect(c,x,wave_y,w,wave_h,8.0f*d,0xFF141414,0xFF444444,d);
-    place(ui,W_PLAY_SEEK,x,wave_y,w,wave_h);
     const float mid=wave_y+wave_h*0.5f;
     fvg_line(c,x,mid,x+w,mid,d,0xFF555555);
     if (p->waveform_ready) {
@@ -925,14 +856,12 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
     if (p->ready) snprintf(status,sizeof(status),"On this phone • drag waveform to seek • %zu bookmarks",p->bookmark_count);
     else snprintf(status,sizeof(status),"%s",p->status);
     fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),status,w,false),x,buttons_y-21.0f*d,w,20.0f*d,status,p->error ? 0xFFFF7777 : 0xFFBBBBBB,false);
-    const float gap=5.0f*d,bw=(w-3.0f*gap)/4.0f;
     const WidgetId ids[]={W_PLAY_REWIND_10,W_PLAY_REWIND_5,W_PLAY_TOGGLE,W_PLAY_FORWARD_5};
     const char *labels[]={"-10 SEC","-5 SEC",p->playing ? "PAUSE" : "PLAY","+5 SEC"};
-    for (int i=0;i<4;i++) draw_pill(ui,ids[i],x+(float)i*(bw+gap),buttons_y,bw,40.0f*d,labels[i],i==2 ? PILL_ACTIVE : PILL_IDLE);
-    const float mw=(w-2.0f*gap)/3.0f;
-    draw_pill(ui,W_PLAY_MARK_PREV,x,buttons_y+46.0f*d,mw,40.0f*d,"< MARK",PILL_IDLE);
-    draw_pill(ui,W_PLAY_MARK,x+mw+gap,buttons_y+46.0f*d,mw,40.0f*d,"MARK",PILL_IDLE);
-    draw_pill(ui,W_PLAY_MARK_NEXT,x+2.0f*(mw+gap),buttons_y+46.0f*d,mw,40.0f*d,"MARK >",PILL_IDLE);
+    for (int i=0;i<4;i++) draw_placed_pill(ui,ids[i],labels[i],i==2 ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui,W_PLAY_MARK_PREV,"< MARK",PILL_IDLE);
+    draw_placed_pill(ui,W_PLAY_MARK,"MARK",PILL_IDLE);
+    draw_placed_pill(ui,W_PLAY_MARK_NEXT,"MARK >",PILL_IDLE);
 }
 
 static void draw_estes(FvCanvas *c, float d, const FieldVoxApp *s, int w, int h) {
@@ -974,16 +903,14 @@ static void render_frame(ANativeWindow_Buffer *buf) {
         return;
     }
 
-    const FvUiScreenLayout layout = fv_ui_compute_screen(w, h, d);
-    const bool landscape = layout.landscape;
-    const float top_inset = layout.top_inset;
-    const float bottom_inset = layout.bottom_inset;
-
+    FvUiScreenLayout layout;
     WidgetRect rects[W_COUNT];
-    memset(rects, 0, sizeof(rects));
+    fv_ui_layout_main_screen(rects, w, h, d, s.controls_visible, s.advanced_controls, &layout);
+    const float top_inset = layout.top_inset;
     Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
 
     if (s.playback_visible) {
+        memset(rects, 0, sizeof(rects));
         FvLocalPlayerSnapshot playback;
         fv_local_player_snapshot(&playback);
         draw_local_playback(&ui,&playback,(float)w,(float)h);
@@ -1020,7 +947,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     }
 
     /* 4. Perimeter HUD Badges (EMF & Sensors) */
-    draw_perimeter_badges(&ui, &s, ui.x0, layout.badge_y, ui.w, layout.badge_h, now);
+    draw_perimeter_badges(&ui, &s, layout.badge_y, layout.badge_h, now);
 
     /* 5-7. Floating Visualizer & Bottom Action Bar (only rendered and clickable when drawer is closed) */
     if (!s.controls_visible) {
@@ -1030,10 +957,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
 
     /* 8. Slide-Up Drawer Overlay (if toggled) */
     if (s.controls_visible) {
-        const float drawer_h = fminf((float)h-top_inset-bottom_inset-12.0f*d,
-                                    (s.advanced_controls ? (landscape ? 240.0f : 290.0f) : (landscape ? 260.0f : 380.0f))*d);
-        const float drawer_y = (float)h - bottom_inset - drawer_h;
-        draw_slide_up_drawer(&ui, &s, ui.x0, drawer_y, ui.w, drawer_h, now);
+        draw_slide_up_drawer(&ui, &s, ui.x0, layout.drawer_y, ui.w, layout.drawer_h, now);
     }
 
     /* Positive evidence feedback remains readable over the camera for two seconds. */

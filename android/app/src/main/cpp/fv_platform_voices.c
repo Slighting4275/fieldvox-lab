@@ -60,12 +60,7 @@ static uint64_t millis(void) {
     return (uint64_t)t.tv_sec*1000u+(uint64_t)t.tv_nsec/1000000u;
 }
 static float unit(float x) { return isfinite(x) ? fmaxf(0.0f,fminf(1.0f,x)) : 0.0f; }
-static bool checked(JNIEnv *env,const char *operation) {
-    return fv_jni_check(env,"FieldVoxVoices",operation,true);
-}
-static jmethodID method(JNIEnv *env,jclass c,const char *name,const char *signature) {
-    return fv_jni_method(env,"FieldVoxVoices",c,name,signature,true);
-}
+#define VCHK(op) fv_jni_check(env,"FieldVoxVoices",(op),true)
 static void source_release(Source *source) {
     if (source && --source->references==0u) { close(source->fd); free(source); }
 }
@@ -75,21 +70,15 @@ static void clear_queue(FvPlatformVoices *v) {
         source_release(v->events[i].source); v->events[i].source=NULL;
     }
 }
-static jclass find_class(JNIEnv *env,const char *name) {
-    return fv_jni_find_class(env,"FieldVoxVoices",name,true);
-}
-static jclass global_class(JNIEnv *env,const char *name) {
-    return fv_jni_global_class(env,"FieldVoxVoices",name,true);
-}
 static bool init_api(JNIEnv *env,Api *a,Player players[PLAYERS]) {
     memset(a,0,sizeof(*a));
-    a->media=global_class(env,"android/media/MediaPlayer");
-    a->parcel=global_class(env,"android/os/ParcelFileDescriptor");
-    jclass params=find_class(env,"android/media/PlaybackParams");
-    jclass builder=find_class(env,"android/media/AudioAttributes$Builder");
-    jclass reverb=find_class(env,"android/media/audiofx/EnvironmentalReverb");
-    if (!checked(env,"classes") || !a->media || !a->parcel || !params || !builder || !reverb) return false;
-#define M(field,cls,name,sig) a->field=method(env,cls,name,sig); if (!checked(env,name) || !a->field) return false
+    a->media=fv_jni_global_class(env,"FieldVoxVoices","android/media/MediaPlayer",true);
+    a->parcel=fv_jni_global_class(env,"FieldVoxVoices","android/os/ParcelFileDescriptor",true);
+    jclass params=fv_jni_find_class(env,"FieldVoxVoices","android/media/PlaybackParams",true);
+    jclass builder=fv_jni_find_class(env,"FieldVoxVoices","android/media/AudioAttributes$Builder",true);
+    jclass reverb=fv_jni_find_class(env,"FieldVoxVoices","android/media/audiofx/EnvironmentalReverb",true);
+    if (!VCHK("classes") || !a->media || !a->parcel || !params || !builder || !reverb) return false;
+#define M(field,cls,name,sig) a->field=fv_jni_method(env,"FieldVoxVoices",cls,name,sig,true); if (!a->field) return false
     M(constructor,a->media,"<init>","()V");
     M(reset,a->media,"reset","()V"); M(release,a->media,"release","()V");
     M(attributes_set,a->media,"setAudioAttributes","(Landroid/media/AudioAttributes;)V");
@@ -100,8 +89,8 @@ static bool init_api(JNIEnv *env,Api *a,Player players[PLAYERS]) {
     M(params_get,a->media,"getPlaybackParams","()Landroid/media/PlaybackParams;");
     M(params_set,a->media,"setPlaybackParams","(Landroid/media/PlaybackParams;)V");
     M(start,a->media,"start","()V"); M(pause,a->media,"pause","()V");
-    a->adopt=(*env)->GetStaticMethodID(env,a->parcel,"adoptFd","(I)Landroid/os/ParcelFileDescriptor;");
-    if (!checked(env,"adoptFd") || !a->adopt) return false;
+    a->adopt=fv_jni_static_method(env,"FieldVoxVoices",a->parcel,"adoptFd","(I)Landroid/os/ParcelFileDescriptor;",true);
+    if (!a->adopt) return false;
     M(descriptor,a->parcel,"getFileDescriptor","()Ljava/io/FileDescriptor;"); M(close,a->parcel,"close","()V");
     M(speed,params,"setSpeed","(F)Landroid/media/PlaybackParams;");
     M(pitch,params,"setPitch","(F)Landroid/media/PlaybackParams;");
@@ -113,31 +102,31 @@ static bool init_api(JNIEnv *env,Api *a,Player players[PLAYERS]) {
     M(room,reverb,"setRoomLevel","(S)V"); M(room_hf,reverb,"setRoomHFLevel","(S)V");
     M(decay_get,reverb,"getDecayTime","()I");
 #undef M
-    jmethodID bc=method(env,builder,"<init>","()V");
-    jmethodID usage=method(env,builder,"setUsage","(I)Landroid/media/AudioAttributes$Builder;");
-    jmethodID content=method(env,builder,"setContentType","(I)Landroid/media/AudioAttributes$Builder;");
-    jmethodID build=method(env,builder,"build","()Landroid/media/AudioAttributes;");
-    jmethodID effect_constructor=method(env,reverb,"<init>","(II)V");
-    if (!bc || !usage || !content || !build || !effect_constructor || !checked(env,"constructors")) return false;
+    jmethodID bc=fv_jni_method(env,"FieldVoxVoices",builder,"<init>","()V",true);
+    jmethodID usage=fv_jni_method(env,"FieldVoxVoices",builder,"setUsage","(I)Landroid/media/AudioAttributes$Builder;",true);
+    jmethodID content=fv_jni_method(env,"FieldVoxVoices",builder,"setContentType","(I)Landroid/media/AudioAttributes$Builder;",true);
+    jmethodID build=fv_jni_method(env,"FieldVoxVoices",builder,"build","()Landroid/media/AudioAttributes;",true);
+    jmethodID effect_constructor=fv_jni_method(env,"FieldVoxVoices",reverb,"<init>","(II)V",true);
+    if (!bc || !usage || !content || !build || !effect_constructor) return false;
     jobject b=(*env)->NewObject(env,builder,bc);
-    if (!checked(env,"attribute builder") || !b) return false;
+    if (!VCHK("attribute builder") || !b) return false;
     (*env)->CallObjectMethod(env,b,usage,1);
-    if (!checked(env,"attribute usage")) return false;
+    if (!VCHK("attribute usage")) return false;
     (*env)->CallObjectMethod(env,b,content,2);
-    if (!checked(env,"attribute setup")) return false;
+    if (!VCHK("attribute setup")) return false;
     jobject attr=(*env)->CallObjectMethod(env,b,build);
-    if (!checked(env,"attributes") || !attr) return false;
+    if (!VCHK("attributes") || !attr) return false;
     a->attributes=(*env)->NewGlobalRef(env,attr);
-    if (!checked(env,"attribute reference") || !a->attributes) return false;
+    if (!VCHK("attribute reference") || !a->attributes) return false;
     jobject fx=(*env)->NewObject(env,reverb,effect_constructor,1,0);
-    if (!checked(env,"environmental reverb session 0") || !fx) return false;
+    if (!VCHK("environmental reverb session 0") || !fx) return false;
     a->effect=(*env)->NewGlobalRef(env,fx);
-    if (!checked(env,"global references") || !a->attributes || !a->effect) return false;
+    if (!VCHK("global references") || !a->attributes || !a->effect) return false;
     for (unsigned i=0;i<PLAYERS;i++) {
         jobject p=(*env)->NewObject(env,a->media,a->constructor);
-        if (!checked(env,"player constructor") || !p) return false;
+        if (!VCHK("player constructor") || !p) return false;
         players[i].object=(*env)->NewGlobalRef(env,p);
-        if (!checked(env,"player reference") || !players[i].object) return false;
+        if (!VCHK("player reference") || !players[i].object) return false;
         (*env)->DeleteLocalRef(env,p);
     }
     return true;
@@ -146,14 +135,14 @@ static void effect_mix(JNIEnv *env,Api *a,float mix,bool enabled) {
     if (!a->effect) return;
     if (!enabled || mix<=0.0f) {
         (*env)->CallIntMethod(env,a->effect,a->effect_enable,(jboolean)false);
-        checked(env,"disable reverb");
+        VCHK("disable reverb");
         if (mix<=0.0f) return;
     }
     /* Keep the platform's validation and clamping; do not invent a different
      * native decay limit. A rejected setting stops this update sequence. */
-#define FX(id,val) (*env)->CallVoidMethod(env,a->effect,a->id,val); if (!checked(env,#id)) { \
+#define FX(id,val) (*env)->CallVoidMethod(env,a->effect,a->id,val); if (!VCHK(#id)) { \
     const jint retained=(*env)->CallIntMethod(env,a->effect,a->decay_get); \
-    if (checked(env,"retained decay")) LOGW("reverb update rejected: requested=%dms retained=%dms",(int)(9000.0f*mix),(int)retained); \
+    if (VCHK("retained decay")) LOGW("reverb update rejected: requested=%dms retained=%dms",(int)(9000.0f*mix),(int)retained); \
     return; }
     FX(diffusion,(jshort)(1000.0f*mix)); FX(density,(jshort)1000);
     FX(decay,(jint)(9000.0f*mix)); FX(decay_hf,(jshort)1000);
@@ -161,14 +150,14 @@ static void effect_mix(JNIEnv *env,Api *a,float mix,bool enabled) {
     FX(room,(jshort)-1000); FX(room_hf,(jshort)0);
 #undef FX
     const jint status=(*env)->CallIntMethod(env,a->effect,a->effect_enable,(jboolean)(enabled && mix>0.0f));
-    if (!checked(env,"effect enable state")) return;
+    if (!VCHK("effect enable state")) return;
     const jint decay=(*env)->CallIntMethod(env,a->effect,a->decay_get);
-    if (checked(env,"effect state")) LOGI("reverb requested=%dms accepted=%dms mix=%.2f status=%d",(int)(9000.0f*mix),(int)decay,(double)mix,(int)status);
+    if (VCHK("effect state")) LOGI("reverb requested=%dms accepted=%dms mix=%.2f status=%d",(int)(9000.0f*mix),(int)decay,(double)mix,(int)status);
 }
 static void reset_players(JNIEnv *env,Api *a,Player players[PLAYERS]) {
     for (unsigned i=0;i<PLAYERS;i++) if (players[i].object) {
         pthread_mutex_lock(&players[i].mutex);
-        (*env)->CallVoidMethod(env,players[i].object,a->reset); checked(env,"reset");
+        (*env)->CallVoidMethod(env,players[i].object,a->reset); VCHK("reset");
         players[i].busy=players[i].playing=false;
         pthread_mutex_unlock(&players[i].mutex);
     }
@@ -176,25 +165,25 @@ static void reset_players(JNIEnv *env,Api *a,Player players[PLAYERS]) {
 static bool play(JNIEnv *env,Api *a,Player *player,Event *event,bool muted,float reverb,FvPlatformVoices *v) {
     Source *s=event->source;
     bool ok=false; jobject parcel=NULL;
-    if ((*env)->PushLocalFrame(env,24)!=JNI_OK) { checked(env,"play frame"); return false; }
-#define CALL(id,...) (*env)->CallVoidMethod(env,player->object,a->id __VA_OPT__(,) __VA_ARGS__); if (!checked(env,#id)) goto done
+    if ((*env)->PushLocalFrame(env,24)!=JNI_OK) { VCHK("play frame"); return false; }
+#define CALL(id,...) (*env)->CallVoidMethod(env,player->object,a->id __VA_OPT__(,) __VA_ARGS__); if (!VCHK(#id)) goto done
     CALL(reset); CALL(attributes_set,a->attributes);
     struct stat st;
     if (fstat(s->fd,&st)!=0 || st.st_size<=0) goto done;
     const int owned=fcntl(s->fd,F_DUPFD_CLOEXEC,0);
     if (owned<0) goto done;
     parcel=(*env)->CallStaticObjectMethod(env,a->parcel,a->adopt,owned);
-    if (!parcel) { close(owned); checked(env,"adopt source descriptor"); goto done; }
-    if (!checked(env,"adopt source descriptor")) goto done;
+    if (!parcel) { close(owned); VCHK("adopt source descriptor"); goto done; }
+    if (!VCHK("adopt source descriptor")) goto done;
     jobject descriptor=(*env)->CallObjectMethod(env,parcel,a->descriptor);
-    if (!checked(env,"file descriptor") || !descriptor) goto done;
+    if (!VCHK("file descriptor") || !descriptor) goto done;
     CALL(data_source,descriptor,(jlong)0,(jlong)st.st_size);
     (*env)->CallVoidMethod(env,parcel,a->close); parcel=NULL;
-    if (!checked(env,"source descriptor close")) goto done;
+    if (!VCHK("source descriptor close")) goto done;
     CALL(prepare);
     if (event->primary) {
         const jint total=(*env)->CallIntMethod(env,player->object,a->duration);
-        if (!checked(env,"duration") || total<=0) goto done;
+        if (!VCHK("duration") || total<=0) goto done;
         const int grain=s->trigger.grain_duration_ms;
         int length=grain;
         s->seek_ms=(int)((float)total*unit(s->trigger.seek_offset));
@@ -210,15 +199,15 @@ static bool play(JNIEnv *env,Api *a,Player *player,Event *event,bool muted,float
     CALL(volume,volume,volume);
     if (event->primary) {
         const jint id=(*env)->CallIntMethod(env,a->effect,a->effect_id);
-        if (!checked(env,"effect id")) goto done;
+        if (!VCHK("effect id")) goto done;
         CALL(attach,id); CALL(send,muted ? 0.0f : reverb);
     }
     jobject params=(*env)->CallObjectMethod(env,player->object,a->params_get);
-    if (!checked(env,"playback parameters") || !params) goto done;
+    if (!VCHK("playback parameters") || !params) goto done;
     (*env)->CallObjectMethod(env,params,a->speed,s->trigger.speed_factor);
-    if (!checked(env,"setSpeed")) goto done;
+    if (!VCHK("setSpeed")) goto done;
     (*env)->CallObjectMethod(env,params,a->pitch,s->trigger.pitch_factor);
-    if (!checked(env,"setPitch")) goto done;
+    if (!VCHK("setPitch")) goto done;
     CALL(params_set,params);
     pthread_mutex_lock(&v->mutex);
     const bool current=v->running && v->enabled && v->generation==event->generation;
@@ -234,19 +223,19 @@ static bool play(JNIEnv *env,Api *a,Player *player,Event *event,bool muted,float
     LOGI("%s seek=%d play=%d pitch=%.2f speed=%.2f gain=%.5f source=%lld bytes",event->primary ? "primary" : "echo",s->seek_ms,s->play_ms,(double)s->trigger.pitch_factor,(double)s->trigger.speed_factor,(double)event->volume,(long long)st.st_size);
     ok=true;
 done:
-    if (parcel) { (*env)->CallVoidMethod(env,parcel,a->close); checked(env,"source close after error"); }
-    if (!ok) { (*env)->CallVoidMethod(env,player->object,a->reset); checked(env,"failed player reset"); player->busy=player->playing=false; }
+    if (parcel) { (*env)->CallVoidMethod(env,parcel,a->close); VCHK("source close after error"); }
+    if (!ok) { (*env)->CallVoidMethod(env,player->object,a->reset); VCHK("failed player reset"); player->busy=player->playing=false; }
     (*env)->PopLocalFrame(env,NULL);
 #undef CALL
     return ok;
 }
 static void cleanup(JNIEnv *env,Api *a,Player players[PLAYERS]) {
     for (unsigned i=0;i<PLAYERS;i++) if (players[i].object) {
-        if (a->release) { (*env)->CallVoidMethod(env,players[i].object,a->release); checked(env,"player release"); }
+        if (a->release) { (*env)->CallVoidMethod(env,players[i].object,a->release); VCHK("player release"); }
         (*env)->DeleteGlobalRef(env,players[i].object);
     }
     if (a->effect) {
-        if (a->effect_release) { (*env)->CallVoidMethod(env,a->effect,a->effect_release); checked(env,"effect release"); }
+        if (a->effect_release) { (*env)->CallVoidMethod(env,a->effect,a->effect_release); VCHK("effect release"); }
         (*env)->DeleteGlobalRef(env,a->effect);
     }
     if (a->attributes) (*env)->DeleteGlobalRef(env,a->attributes);
@@ -269,19 +258,19 @@ static void *stop_timer(void *context) {
             Player *p=&timer->players[i];
             if (pthread_mutex_trylock(&p->mutex)!=0) continue;
             if (p->busy && (!enabled || p->generation!=generation)) {
-                (*env)->CallVoidMethod(env,p->object,a->reset); checked(env,"cancel voice"); p->busy=p->playing=false;
+                (*env)->CallVoidMethod(env,p->object,a->reset); VCHK("cancel voice"); p->busy=p->playing=false;
             }
             if (p->playing && now>=p->stop) {
-                (*env)->CallVoidMethod(env,p->object,a->pause); checked(env,"scheduled pause");
+                (*env)->CallVoidMethod(env,p->object,a->pause); VCHK("scheduled pause");
                 LOGI("grain stop: late=%llums",(unsigned long long)(now-p->stop)); p->playing=false;
             }
             if (p->busy && now>=p->release) {
-                (*env)->CallVoidMethod(env,p->object,a->reset); checked(env,"slot release"); p->busy=false;
+                (*env)->CallVoidMethod(env,p->object,a->reset); VCHK("slot release"); p->busy=false;
             }
             if (p->busy && p->muted!=muted) {
                 const float gain=muted ? 0.0f : p->volume;
-                (*env)->CallVoidMethod(env,p->object,a->volume,gain,gain); checked(env,"timer monitor volume");
-                (*env)->CallVoidMethod(env,p->object,a->send,muted ? 0.0f : p->send); checked(env,"timer monitor send");
+                (*env)->CallVoidMethod(env,p->object,a->volume,gain,gain); VCHK("timer monitor volume");
+                (*env)->CallVoidMethod(env,p->object,a->send,muted ? 0.0f : p->send); VCHK("timer monitor send");
                 p->muted=muted;
             }
             pthread_mutex_unlock(&p->mutex);
@@ -382,8 +371,8 @@ static void *voice_worker(void *context) {
                 pthread_mutex_lock(&players[i].mutex);
                 if (players[i].busy) {
                 const float level=muted ? 0.0f : players[i].volume;
-                (*env)->CallVoidMethod(env,players[i].object,api.volume,level,level); checked(env,"monitor volume");
-                (*env)->CallVoidMethod(env,players[i].object,api.send,muted ? 0.0f : players[i].send); checked(env,"monitor send");
+                (*env)->CallVoidMethod(env,players[i].object,api.volume,level,level); VCHK("monitor volume");
+                (*env)->CallVoidMethod(env,players[i].object,api.send,muted ? 0.0f : players[i].send); VCHK("monitor send");
                 players[i].muted=muted;
                 }
                 pthread_mutex_unlock(&players[i].mutex);
@@ -400,7 +389,7 @@ static void *voice_worker(void *context) {
                 if (played) {
                     pthread_mutex_lock(&players[slot].mutex);
                     if (players[slot].generation==event.generation) {
-                        (*env)->CallVoidMethod(env,players[slot].object,api.reset); checked(env,"cancel prepared voice");
+                        (*env)->CallVoidMethod(env,players[slot].object,api.reset); VCHK("cancel prepared voice");
                         players[slot].busy=players[slot].playing=false;
                     }
                     pthread_mutex_unlock(&players[slot].mutex);

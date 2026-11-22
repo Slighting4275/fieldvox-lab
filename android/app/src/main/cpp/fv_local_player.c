@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_local_player.h"
+#include "fv_jni_helpers.h"
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include <media/NdkImageReader.h>
@@ -49,16 +50,11 @@ typedef struct {
     jmethodID playing, width, height, volume, surface, adopt_fd, get_fd, close_fd;
 } PlayerMethods;
 
-static bool exception(JNIEnv *env,const char *action) {
-    if (!(*env)->ExceptionCheck(env)) return false;
-    LOGE("Android media operation failed: %s",action);
-    (*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);return true;
-}
 static bool methods(JNIEnv *env,PlayerMethods *m) {
-    m->cls=(*env)->FindClass(env,"android/media/MediaPlayer");
-    m->pfd_cls=(*env)->FindClass(env,"android/os/ParcelFileDescriptor");
-    if (exception(env,"find media classes") || !m->cls || !m->pfd_cls) return false;
-#define METHOD(field,name,sig) m->field=(*env)->GetMethodID(env,m->cls,name,sig); if (exception(env,name) || !m->field) return false
+    m->cls=fv_jni_find_class(env,"FieldVoxPlayer","android/media/MediaPlayer",true);
+    m->pfd_cls=fv_jni_find_class(env,"FieldVoxPlayer","android/os/ParcelFileDescriptor",true);
+    if (!m->cls || !m->pfd_cls) return false;
+#define METHOD(field,name,sig) m->field=fv_jni_method(env,"FieldVoxPlayer",m->cls,name,sig,true); if (!m->field) return false
     METHOD(ctor,"<init>","()V");METHOD(set_source,"setDataSource","(Ljava/io/FileDescriptor;JJ)V");
     METHOD(prepare,"prepare","()V");METHOD(start,"start","()V");METHOD(pause,"pause","()V");
     METHOD(release,"release","()V");METHOD(seek,"seekTo","(JI)V");
@@ -66,10 +62,10 @@ static bool methods(JNIEnv *env,PlayerMethods *m) {
     METHOD(playing,"isPlaying","()Z");METHOD(width,"getVideoWidth","()I");METHOD(height,"getVideoHeight","()I");
     METHOD(volume,"setVolume","(FF)V");METHOD(surface,"setSurface","(Landroid/view/Surface;)V");
 #undef METHOD
-    m->adopt_fd=(*env)->GetStaticMethodID(env,m->pfd_cls,"adoptFd","(I)Landroid/os/ParcelFileDescriptor;");
-    m->get_fd=(*env)->GetMethodID(env,m->pfd_cls,"getFileDescriptor","()Ljava/io/FileDescriptor;");
-    m->close_fd=(*env)->GetMethodID(env,m->pfd_cls,"close","()V");
-    return !exception(env,"file descriptor methods") && m->adopt_fd && m->get_fd && m->close_fd;
+    m->adopt_fd=fv_jni_static_method(env,"FieldVoxPlayer",m->pfd_cls,"adoptFd","(I)Landroid/os/ParcelFileDescriptor;",true);
+    m->get_fd=fv_jni_method(env,"FieldVoxPlayer",m->pfd_cls,"getFileDescriptor","()Ljava/io/FileDescriptor;",true);
+    m->close_fd=fv_jni_method(env,"FieldVoxPlayer",m->pfd_cls,"close","()V",true);
+    return m->adopt_fd && m->get_fd && m->close_fd;
 }
 static bool cancelled(const WaveformJob *job) { return atomic_load(&job->cancel); }
 
@@ -207,7 +203,7 @@ static void video_image(AImageReader *reader) {
 static void release_media(JNIEnv *env,const PlayerMethods *m,jobject *player,AImageReader **reader) {
     stop_analysis();
     if (*player) {
-        (*env)->CallVoidMethod(env,*player,m->release);exception(env,"release");
+        (*env)->CallVoidMethod(env,*player,m->release);fv_jni_check(env,"FieldVoxPlayer","release",true);
         (*env)->DeleteGlobalRef(env,*player);*player=NULL;
     }
     if (*reader) { AImageReader_delete(*reader);*reader=NULL; }
@@ -221,31 +217,31 @@ static bool open_media(JNIEnv *env,const PlayerMethods *m,const char *path,uint6
     if (fd<0) return false;
     if (fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_size<=0) { close(fd);return false; }
     jobject descriptor=(*env)->CallStaticObjectMethod(env,m->pfd_cls,m->adopt_fd,fd);
-    if (exception(env,"adopt local file") || !descriptor) { close(fd);return false; }
+    if (!fv_jni_check(env,"FieldVoxPlayer","adopt local file",true) || !descriptor) { close(fd);return false; }
     jobject local=(*env)->NewObject(env,m->cls,m->ctor);
-    bool ok=!exception(env,"create player") && local;
+    bool ok=fv_jni_check(env,"FieldVoxPlayer","create player",true) && local;
     if (ok) {
         *player=(*env)->NewGlobalRef(env,local);(*env)->DeleteLocalRef(env,local);
-        ok=*player!=NULL && !exception(env,"retain player");
+        ok=*player!=NULL && fv_jni_check(env,"FieldVoxPlayer","retain player",true);
     }
     jobject file_descriptor=ok ? (*env)->CallObjectMethod(env,descriptor,m->get_fd) : NULL;
-    if (exception(env,"get local descriptor") || !file_descriptor) ok=false;
-    if (ok) { (*env)->CallVoidMethod(env,*player,m->set_source,file_descriptor,(jlong)0,(jlong)st.st_size);ok=!exception(env,"load local file"); }
-    if (ok) { (*env)->CallVoidMethod(env,*player,m->prepare);ok=!exception(env,"prepare local file"); }
-    (*env)->CallVoidMethod(env,descriptor,m->close_fd);if (exception(env,"close local descriptor")) ok=false;
+    if (!fv_jni_check(env,"FieldVoxPlayer","get local descriptor",true) || !file_descriptor) ok=false;
+    if (ok) { (*env)->CallVoidMethod(env,*player,m->set_source,file_descriptor,(jlong)0,(jlong)st.st_size);ok=fv_jni_check(env,"FieldVoxPlayer","load local file",true); }
+    if (ok) { (*env)->CallVoidMethod(env,*player,m->prepare);ok=fv_jni_check(env,"FieldVoxPlayer","prepare local file",true); }
+    (*env)->CallVoidMethod(env,descriptor,m->close_fd);if (!fv_jni_check(env,"FieldVoxPlayer","close local descriptor",true)) ok=false;
     if (file_descriptor) (*env)->DeleteLocalRef(env,file_descriptor);
     (*env)->DeleteLocalRef(env,descriptor);
     if (!ok) return false;
     const int duration=(*env)->CallIntMethod(env,*player,m->duration);
     const int width=(*env)->CallIntMethod(env,*player,m->width),height=(*env)->CallIntMethod(env,*player,m->height);
-    if (exception(env,"read local media format") || duration<=0 || width<0 || height<0 || width>8192 || height>8192) return false;
+    if (!fv_jni_check(env,"FieldVoxPlayer","read local media format",true) || duration<=0 || width<0 || height<0 || width>8192 || height>8192) return false;
     if (width>0 && height>0) {
         if (AImageReader_new(width,height,AIMAGE_FORMAT_YUV_420_888,4,reader)!=AMEDIA_OK) return false;
         ANativeWindow *window=NULL;
         if (AImageReader_getWindow(*reader,&window)!=AMEDIA_OK || !window) return false;
         jobject surface=ANativeWindow_toSurface(env,window);
-        if (exception(env,"create playback surface") || !surface) return false;
-        (*env)->CallVoidMethod(env,*player,m->surface,surface);ok=!exception(env,"set playback surface");
+        if (!fv_jni_check(env,"FieldVoxPlayer","create playback surface",true) || !surface) return false;
+        (*env)->CallVoidMethod(env,*player,m->surface,surface);ok=fv_jni_check(env,"FieldVoxPlayer","set playback surface",true);
         (*env)->DeleteLocalRef(env,surface);if (!ok) return false;
         const float scale=fminf(1.0f,960.0f/(float)(width>height ? width : height));
         const int dw=(int)((float)width*scale),dh=(int)((float)height*scale);
@@ -317,7 +313,7 @@ static void *player_worker(void *arg) {
             }
             const int position=(*env)->CallIntMethod(env,player,m.position);
             const bool playing=(*env)->CallBooleanMethod(env,player,m.playing)==JNI_TRUE;
-            if (exception(env,"playback controls")) {
+            if (!fv_jni_check(env,"FieldVoxPlayer","playback controls",true)) {
                 release_media(env,&m,&player,&reader);player_error("Playback failed • reopen the recording");
             } else {
                 int64_t marks[FV_BOOKMARKS_MAX]={0};size_t count=0;bool save=false;

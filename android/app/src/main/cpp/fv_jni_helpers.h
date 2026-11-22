@@ -13,10 +13,17 @@
 
 static inline bool fv_jni_check(JNIEnv *env, const char *log_tag, const char *operation, bool describe) {
     if (!(*env)->ExceptionCheck(env)) return true;
-    __android_log_print(ANDROID_LOG_WARN, log_tag, "JNI operation failed: %s", operation);
+    if (log_tag) {
+        __android_log_print(ANDROID_LOG_WARN, log_tag, "JNI operation failed: %s",
+                            operation ? operation : "unknown");
+    }
     if (describe) (*env)->ExceptionDescribe(env);
     (*env)->ExceptionClear(env);
     return false;
+}
+
+static inline bool fv_jni_clear(JNIEnv *env) {
+    return fv_jni_check(env, NULL, NULL, false);
 }
 
 static inline jclass fv_jni_find_class(JNIEnv *env, const char *log_tag, const char *name, bool describe) {
@@ -39,10 +46,24 @@ static inline jmethodID fv_jni_method(JNIEnv *env, const char *log_tag, jclass c
     return fv_jni_check(env, log_tag, name, describe) ? id : NULL;
 }
 
+static inline jmethodID fv_jni_static_method(JNIEnv *env, const char *log_tag, jclass cls,
+                                             const char *name, const char *sig, bool describe) {
+    if (!cls) return NULL;
+    jmethodID id = (*env)->GetStaticMethodID(env, cls, name, sig);
+    return fv_jni_check(env, log_tag, name, describe) ? id : NULL;
+}
+
 static inline jfieldID fv_jni_field(JNIEnv *env, const char *log_tag, jclass cls,
                                     const char *name, const char *sig, bool describe) {
     if (!cls) return NULL;
     jfieldID id = (*env)->GetFieldID(env, cls, name, sig);
+    return fv_jni_check(env, log_tag, name, describe) ? id : NULL;
+}
+
+static inline jfieldID fv_jni_static_field(JNIEnv *env, const char *log_tag, jclass cls,
+                                           const char *name, const char *sig, bool describe) {
+    if (!cls) return NULL;
+    jfieldID id = (*env)->GetStaticFieldID(env, cls, name, sig);
     return fv_jni_check(env, log_tag, name, describe) ? id : NULL;
 }
 

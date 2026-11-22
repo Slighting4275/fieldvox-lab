@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "fv_native_radio.h"
 #include "fv_fragment_engine.h"
+#include "fv_jni_helpers.h"
 #include "fv_station_policy.h"
 #include "fv_station_blob_data.h"
 #include <android/log.h>
@@ -50,64 +51,64 @@ static const FvBlobStationEntry *entry_at(int station) {
  * confined to this request; connect/read deadlines also bound lifecycle cancellation. */
 static bool download(JNIEnv *env,const char *url,FILE *file,unsigned generation) {
     if((*env)->PushLocalFrame(env,24)!=JNI_OK) {
-        if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        fv_jni_clear(env);
         return false;
     }
     bool ok=false; jobject connection=NULL,input=NULL;
-    jclass url_class=(*env)->FindClass(env,"java/net/URL");
-    jclass http_class=(*env)->FindClass(env,"java/net/HttpURLConnection");
-    jclass input_class=(*env)->FindClass(env,"java/io/InputStream");
+    jclass url_class=fv_jni_find_class(env,NULL,"java/net/URL",false);
+    jclass http_class=fv_jni_find_class(env,NULL,"java/net/HttpURLConnection",false);
+    jclass input_class=fv_jni_find_class(env,NULL,"java/io/InputStream",false);
     if(!url_class || !http_class || !input_class) goto done;
-    jmethodID constructor=(*env)->GetMethodID(env,url_class,"<init>","(Ljava/lang/String;)V");
-    jmethodID open=(*env)->GetMethodID(env,url_class,"openConnection","()Ljava/net/URLConnection;");
-    jmethodID connect_timeout=(*env)->GetMethodID(env,http_class,"setConnectTimeout","(I)V");
-    jmethodID read_timeout=(*env)->GetMethodID(env,http_class,"setReadTimeout","(I)V");
-    jmethodID header=(*env)->GetMethodID(env,http_class,"setRequestProperty","(Ljava/lang/String;Ljava/lang/String;)V");
-    jmethodID response=(*env)->GetMethodID(env,http_class,"getResponseCode","()I");
-    jmethodID get_input=(*env)->GetMethodID(env,http_class,"getInputStream","()Ljava/io/InputStream;");
-    jmethodID read=(*env)->GetMethodID(env,input_class,"read","([BII)I");
-    if((*env)->ExceptionCheck(env)) goto done;
+    jmethodID constructor=fv_jni_method(env,NULL,url_class,"<init>","(Ljava/lang/String;)V",false);
+    jmethodID open=fv_jni_method(env,NULL,url_class,"openConnection","()Ljava/net/URLConnection;",false);
+    jmethodID connect_timeout=fv_jni_method(env,NULL,http_class,"setConnectTimeout","(I)V",false);
+    jmethodID read_timeout=fv_jni_method(env,NULL,http_class,"setReadTimeout","(I)V",false);
+    jmethodID header=fv_jni_method(env,NULL,http_class,"setRequestProperty","(Ljava/lang/String;Ljava/lang/String;)V",false);
+    jmethodID response=fv_jni_method(env,NULL,http_class,"getResponseCode","()I",false);
+    jmethodID get_input=fv_jni_method(env,NULL,http_class,"getInputStream","()Ljava/io/InputStream;",false);
+    jmethodID read=fv_jni_method(env,NULL,input_class,"read","([BII)I",false);
+    if(!constructor || !open || !connect_timeout || !read_timeout || !header || !response || !get_input || !read) goto done;
     jstring address=(*env)->NewStringUTF(env,url);
     if(!address) goto done;
     jobject object=(*env)->NewObject(env,url_class,constructor,address);
-    if(!object || (*env)->ExceptionCheck(env)) goto done;
+    if(!object || !fv_jni_clear(env)) goto done;
     connection=(*env)->CallObjectMethod(env,object,open);
-    if(!connection || (*env)->ExceptionCheck(env) || !(*env)->IsInstanceOf(env,connection,http_class)) goto done;
+    if(!connection || !fv_jni_clear(env) || !(*env)->IsInstanceOf(env,connection,http_class)) goto done;
     (*env)->CallVoidMethod(env,connection,connect_timeout,5000);
     (*env)->CallVoidMethod(env,connection,read_timeout,5000);
     jstring key=(*env)->NewStringUTF(env,"User-Agent"),value=(*env)->NewStringUTF(env,"FieldVoxLab/0.5.2");
-    if(!key || !value || (*env)->ExceptionCheck(env)) goto done;
+    if(!key || !value || !fv_jni_clear(env)) goto done;
     (*env)->CallVoidMethod(env,connection,header,key,value);
-    if((*env)->ExceptionCheck(env)) goto done;
+    if(!fv_jni_clear(env)) goto done;
     const jint code=(*env)->CallIntMethod(env,connection,response);
-    if((*env)->ExceptionCheck(env) || code<200 || code>=300 || !current(generation)) goto done;
+    if(!fv_jni_clear(env) || code<200 || code>=300 || !current(generation)) goto done;
     input=(*env)->CallObjectMethod(env,connection,get_input);
-    if(!input || (*env)->ExceptionCheck(env)) goto done;
+    if(!input || !fv_jni_clear(env)) goto done;
     jbyteArray bytes=(*env)->NewByteArray(env,4096); if(!bytes) goto done;
     size_t total=0; const long started=now_ms();
     while(total<FETCH_BYTES && current(generation) && now_ms()-started<5000L) {
         const jint wanted=(jint)(FETCH_BYTES-total>4096u ? 4096u : FETCH_BYTES-total);
         const jint n=(*env)->CallIntMethod(env,input,read,bytes,0,wanted);
-        if((*env)->ExceptionCheck(env) || n<0) break;
+        if(!fv_jni_clear(env) || n<0) break;
         if(!n) continue;
         if(n>wanted) break;
         jbyte buffer[4096]; (*env)->GetByteArrayRegion(env,bytes,0,n,buffer);
-        if((*env)->ExceptionCheck(env) || fwrite(buffer,1,(size_t)n,file)!=(size_t)n) goto done;
+        if(!fv_jni_clear(env) || fwrite(buffer,1,(size_t)n,file)!=(size_t)n) goto done;
         total+=(size_t)n;
     }
     ok=total>0u && current(generation) && fflush(file)==0;
     LOGI("clip fetch: %zu bytes in %ld ms",total,now_ms()-started);
 done:
-    if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    fv_jni_clear(env);
     if(input && input_class) {
-        jmethodID close=(*env)->GetMethodID(env,input_class,"close","()V");
+        jmethodID close=fv_jni_method(env,NULL,input_class,"close","()V",false);
         if(close) (*env)->CallVoidMethod(env,input,close);
-        if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        fv_jni_clear(env);
     }
     if(connection && http_class) {
-        jmethodID disconnect=(*env)->GetMethodID(env,http_class,"disconnect","()V");
+        jmethodID disconnect=fv_jni_method(env,NULL,http_class,"disconnect","()V",false);
         if(disconnect) (*env)->CallVoidMethod(env,connection,disconnect);
-        if((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        fv_jni_clear(env);
     }
     (*env)->PopLocalFrame(env,NULL); return ok;
 }

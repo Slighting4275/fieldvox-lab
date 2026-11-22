@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_core.h"
+#include "fv_recording_data.h"
 
 #include <errno.h>
 #include <math.h>
@@ -121,19 +122,9 @@ int fv_wav_begin(FV_WavWriter *w, const char *path, uint32_t sample_rate, uint16
     w->channels = channels;
     w->frames_written = 0;
 
-    fwrite("RIFF", 1, 4, w->fp);
-    write_le32(w->fp, 0);
-    fwrite("WAVE", 1, 4, w->fp);
-    fwrite("fmt ", 1, 4, w->fp);
-    write_le32(w->fp, 16);
-    write_le16(w->fp, 1);
-    write_le16(w->fp, channels);
-    write_le32(w->fp, sample_rate);
-    write_le32(w->fp, (uint32_t)byte_rate);
-    write_le16(w->fp, (uint16_t)block_align);
-    write_le16(w->fp, 16);
-    fwrite("data", 1, 4, w->fp);
-    write_le32(w->fp, 0);
+    uint8_t header[44];
+    fv_wav_build_header(header, sample_rate, channels, 0u);
+    fwrite(header, 1, sizeof(header), w->fp);
     if (ferror(w->fp)) {
         fclose(w->fp);
         w->fp = NULL;
