@@ -44,9 +44,9 @@ Speaker playback and recordings use different paths. Default radio voices play t
 
 The timeline records the audio blocks actually included in the WAVs. Its completion flag indicates metadata coverage. Pausing resets pre-roll, and newly started captures save only the audio available.
 
-**SESS WAV** records continuous session audio. **REC / STOP** records camera video as H.264 with AAC audio in MP4: up to 30 fps, 3.5 Mbps video, BT.709 limited-range color, and 48 kHz mono audio at 128 kbps. Capture timestamps follow the actual frame cadence.
+Tap the red **REC** button to start a **Clean MP4**, then tap **STOP** to save it. Clean mode saves the filtered camera view, session audio, and timeline markers. The camera view retains its proportions and is cropped to fill the MP4 frame. Select **Screen MP4** above the same red button to include FieldVox's on-screen controls and overlays.
 
-In **CONTROLS → ADVANCED**, tap **MP4 SCREEN** to switch to **MP4 CLEAN** before recording. Clean mode saves the filtered camera view, session audio, and timeline markers. The view retains its proportions and is cropped to fill the MP4 frame. Screen mode includes the on-screen FieldVox interface.
+Both modes record H.264 video at up to 30 fps and 3.5 Mbps, with BT.709 limited-range color and 48 kHz mono AAC audio at 128 kbps. Capture timestamps follow the actual frame cadence.
 
 **LIBRARY** lists saved WAV and MP4 captures. Playback shows a waveform with labeled markers for VOX fragments, REM-POD alerts, manual hits, and bookmarks added during review. Use **< MARK** and **MARK >** to jump between events. Older recordings keep their saved markers. **BANK** selects a saved PCM WAV as the LOCAL fragment source. **PLAY** replays the recording. Explicit exports use Android MediaStore under `Music/FieldVox` or `Movies/FieldVox`.
 
@@ -74,7 +74,7 @@ The current cache stores paired `.wav` and `.wav.audio` files, counted as one cl
 | `WHITE NOISE` / `NOISE` | Enable timed static bursts. |
 | `MUTE / MUTED` | Silence speaker monitoring while recording continues. |
 | `MARK HIT` | Save paired pre-roll audio and its timeline. |
-| `REC / STOP`, `SESS WAV` | Record MP4 video or session WAV audio. |
+| `REC / STOP` | Start or stop video in the selected MP4 mode. |
 | `LIBRARY`, `PLAY`, `BANK` | Browse, replay, or select a saved WAV for fragments. |
 | `LENS`, visualizer arrows and color | Select camera and audio display styles. |
 | `CAL ZERO`, sensitivity and cooldown presets | Adjust sensor baseline and auxiliary sensor trigger settings. |

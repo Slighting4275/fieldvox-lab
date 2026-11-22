@@ -226,22 +226,43 @@ static void test_ui_controller_and_layout(void) {
     const bool is_video[4] = {false, true, false, false};
     FvUiScreenLayout layout = {0};
 
+    /* The same shutter and mode choices are reachable in every drawer state. */
+    FvUiState capture = {0};
+    const int capture_sizes[][2] = {{1080, 2400}, {2400, 1080}};
+    for (size_t i = 0; i < sizeof(capture_sizes) / sizeof(capture_sizes[0]); i++) {
+        const int width = capture_sizes[i][0], height = capture_sizes[i][1];
+        capture = (FvUiState){0};
+        fv_ui_layout_active(rects, width, height, 3.0f, &capture, 0, is_video, &layout);
+        const WidgetRect shutter = rects[W_RECORD];
+        const WidgetRect clean = rects[W_CAPTURE_CLEAN], screen = rects[W_CAPTURE_SCREEN];
+        assert(shutter.visible && clean.visible && screen.visible);
+        assert(clean.x + clean.w < screen.x && clean.y + clean.h < shutter.y);
+        assert(layout.vis_top + layout.vis_h < clean.y);
+        assert(fv_ui_resolve_tap(rects, clean.x + clean.w / 2, clean.y + clean.h / 2) == W_CAPTURE_CLEAN);
+        assert(fv_ui_resolve_tap(rects, screen.x + screen.w / 2, screen.y + screen.h / 2) == W_CAPTURE_SCREEN);
+        for (int advanced = 0; advanced < 2; advanced++) {
+            capture.controls_visible = true;
+            capture.advanced_controls = advanced != 0;
+            fv_ui_layout_active(rects, width, height, 3.0f, &capture, 0, is_video, &layout);
+            assert(layout.drawer_y + layout.drawer_h < clean.y);
+            assert(rects[W_RECORD].x == shutter.x && rects[W_RECORD].y == shutter.y);
+            const float shutter_x = shutter.x + shutter.w / 2;
+            const float shutter_y = shutter.y + shutter.h / 2;
+            assert(fv_ui_handle_tap(&capture, rects, shutter_x, shutter_y, 3.0f, NULL) == W_RECORD);
+            assert(capture.controls_visible);
+        }
+    }
+
     /* Landscape with standard VOX drawer & advanced drawer open */
     FvUiState st = {.controls_visible = true, .advanced_controls = false};
     fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 0, is_video, &layout);
     assert(layout.landscape);
     assert(rects[W_START].visible && rects[W_ECHO_LEVEL].visible && rects[W_CLOSE_DRAWER].visible);
     assert(rects[W_RADIO_TUNER].visible);
-    assert(!rects[W_VIDEO_SOURCE].visible);
 
     st.advanced_controls = true;
     fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 0, is_video, &layout);
     assert(rects[W_CADENCE].visible && rects[W_ADVANCED].visible && rects[W_CLOSE_DRAWER].visible);
-    assert(rects[W_VIDEO_SOURCE].visible && rects[W_VIDEO_REC].visible);
-    assert(rects[W_VIDEO_REC].x + rects[W_VIDEO_REC].w < rects[W_VIDEO_SOURCE].x);
-    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 0, is_video, &layout);
-    const WidgetRect *source = &rects[W_VIDEO_SOURCE];
-    assert(fv_ui_resolve_tap(rects, source->x + source->w / 2, source->y + source->h / 2) == W_VIDEO_SOURCE);
 
     /* Radio Tuner modal overlay in portrait and landscape */
     st = (FvUiState){.tuner_visible = true};

@@ -102,7 +102,7 @@ static void layout_bottom_action_bar(WidgetRect rects[static W_COUNT], float x, 
 
     fv_ui_place(rects, W_SESS, x, btn_y, btn_w, btn_h);
     fv_ui_place(rects, W_MARK_HIT, x + btn_w + gap, btn_y, btn_w, btn_h);
-    fv_ui_place(rects, W_VIDEO_REC, cx - r_outer - hit_pad, cy - r_outer - hit_pad,
+    fv_ui_place(rects, W_RECORD, cx - r_outer - hit_pad, cy - r_outer - hit_pad,
                 (r_outer + hit_pad) * 2.0f, (r_outer + hit_pad) * 2.0f);
     fv_ui_place(rects, W_CAM_TINT, cx + side_clearance, btn_y, btn_w, btn_h);
     fv_ui_place(rects, W_CTRL, cx + side_clearance + btn_w + gap, btn_y, btn_w, btn_h);
@@ -139,7 +139,7 @@ static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, fl
 
     float cur_y = y + header_h + 4.0f * d;
     const float gap = 3.0f * d;
-    const float pill_h = (h - header_h - 34.0f * d) / 6.0f;
+    const float pill_h = (h - header_h - 28.0f * d) / 5.0f;
     const float row_w = w - 16.0f * d;
     const float row_x = x + 8.0f * d;
 
@@ -148,11 +148,10 @@ static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, fl
     const WidgetId r3[6] = {W_SOURCE_MODE, W_VOCAL, W_PAN, W_REMPOD, W_ESTES, W_AUTO_GATE};
     const WidgetId r4[4] = {W_SENS_LOW, W_SENS_MED, W_SENS_HIGH, W_COOL_CYCLE};
     const WidgetId r5[4] = {W_CAMHUD, W_CAM_LENS, W_VIS_LAYOUT, W_MIC};
-    const WidgetId r6[4] = {W_REC, W_VIDEO_REC, W_VIDEO_SOURCE, W_SESS};
-    const WidgetId *rows[6] = {r1, r2, r3, r4, r5, r6};
-    const size_t counts[6] = {4u, 4u, 6u, 4u, 4u, 4u};
+    const WidgetId *rows[5] = {r1, r2, r3, r4, r5};
+    const size_t counts[5] = {4u, 4u, 6u, 4u, 4u};
 
-    for (size_t i = 0; i < 6u; i++) {
+    for (size_t i = 0; i < 5u; i++) {
         layout_row(rects, row_x, cur_y, row_w, pill_h, gap, rows[i], counts[i]);
         cur_y += pill_h + gap;
     }
@@ -178,24 +177,31 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
     const float badge_h = (landscape ? 24.0f : 30.0f) * d;
     const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
     const float bottom_bar_y = (float)screen_h - bottom_inset - bottom_bar_h;
-    const float max_vis_span = fmaxf(44.0f * d, bottom_bar_y - (badge_y + badge_h + 12.0f * d));
+    const float capture_h = 48.0f * d;
+    const float capture_y = bottom_bar_y - 8.0f * d - capture_h;
+    const float capture_w = fminf(ui_w, 214.0f * d);
+    const float max_vis_span = fmaxf(44.0f * d, capture_y - (badge_y + badge_h + 12.0f * d));
     const float base_vis_h = (vis_layout == FV_VIS_LAYOUT_COMPACT)
                                  ? (landscape ? 52.0f : 76.0f) * d
                                  : (landscape ? 74.0f : 130.0f) * d;
     const float vis_h = fminf(base_vis_h, max_vis_span);
     const float vis_top = (vis_layout == FV_VIS_LAYOUT_TOP)
                               ? (badge_y + badge_h + 6.0f * d)
-                              : (bottom_bar_y - vis_h - 8.0f * d);
-    const float drawer_h = fminf((float)screen_h - top_inset - bottom_inset - 12.0f * d,
-                                 (advanced_controls ? (landscape ? 256.0f : 324.0f)
+                              : (capture_y - vis_h - 8.0f * d);
+    const float drawer_bottom = capture_y - 8.0f * d;
+    const float drawer_h = fminf(drawer_bottom - top_inset - 12.0f * d,
+                                 (advanced_controls ? (landscape ? 216.0f : 280.0f)
                                                     : (landscape ? 260.0f : 380.0f)) * d);
-    const float drawer_y = (float)screen_h - bottom_inset - drawer_h;
+    const float drawer_y = drawer_bottom - drawer_h;
 
     layout_top_header(rects, ui_x0, top_inset, ui_w, header_h, d);
     layout_perimeter_badges(rects, ui_x0, badge_y, ui_w, badge_h, d);
+    layout_bottom_action_bar(rects, ui_x0, bottom_bar_y, ui_w, bottom_bar_h, d);
+    const WidgetId capture_ids[] = {W_CAPTURE_CLEAN, W_CAPTURE_SCREEN};
+    layout_row(rects, ui_x0 + (ui_w - capture_w) * 0.5f, capture_y, capture_w,
+               capture_h, 4.0f * d, capture_ids, 2u);
     if (!controls_visible) {
         layout_floating_visualizer(rects, ui_x0, vis_top, ui_w, vis_h, d);
-        layout_bottom_action_bar(rects, ui_x0, bottom_bar_y, ui_w, bottom_bar_h, d);
     } else if (advanced_controls) {
         layout_advanced_drawer(rects, ui_x0, drawer_y, ui_w, drawer_h, d);
     } else {
