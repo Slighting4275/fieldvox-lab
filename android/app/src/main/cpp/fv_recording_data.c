@@ -249,85 +249,142 @@ size_t fv_adts_sync_offset(const uint8_t *buf,size_t len) {
     }
     return 0u;
 }
-bool fv_bookmark_add(int64_t marks[FV_BOOKMARKS_MAX],size_t *count,int64_t ms) {
-    if (!marks || !count || *count>FV_BOOKMARKS_MAX || ms<0) return false;
-    size_t i=0;while (i<*count && marks[i]<ms) i++;
-    if (i<*count && marks[i]==ms) return true;
-    if (*count==FV_BOOKMARKS_MAX) return false;
-    memmove(marks+i+1,marks+i,(*count-i)*sizeof(*marks));marks[i]=ms;(*count)++;return true;
+static bool valid_marker_kinds(unsigned kinds) {
+    const unsigned mask = FV_MARK_FRAGMENT | FV_MARK_REM_POD | FV_MARK_HIT |
+                          FV_MARK_BOOKMARK | FV_MARK_LEGACY;
+    return kinds != 0u && (kinds & ~mask) == 0u;
 }
-int64_t fv_bookmark_next(const int64_t *marks,size_t count,int64_t ms,bool forward) {
-    if (!marks || count>FV_BOOKMARKS_MAX) return -1;
-    if (forward) { for (size_t i=0;i<count;i++) if (marks[i]>ms) return marks[i]; }
-    else { for (size_t i=count;i>0;i--) if (marks[i-1]<ms) return marks[i-1]; }
-    return -1;
+
+static size_t timeline_position(const FvTimeline *timeline, int64_t ms) {
+    size_t pos = 0;
+    while (pos < timeline->count && timeline->markers[pos].ms < ms) pos++;
+    return pos;
 }
-static bool marks_path(char *out,size_t cap,const char *recording,const char *suffix) {
-    if (!recording || recording[0]!='/') return false;
-    const int n=snprintf(out,cap,"%s%s",recording,suffix);return n>=0 && (size_t)n<cap;
-}
-bool fv_bookmarks_load(const char *recording,int64_t marks[FV_BOOKMARKS_MAX],size_t *count) {
-    if (!marks || !count) return false;
-    *count=0;char path[544];if (!marks_path(path,sizeof(path),recording,".fvmarks")) return false;
-    FILE *file=fopen(path,"rb");if (!file) return errno==ENOENT;
-    char line[64];bool ok=fgets(line,sizeof(line),file)!=NULL && strcmp(line,"FieldVox bookmarks 1\n")==0;
-    while (ok && fgets(line,sizeof(line),file)) {
-        char *end;errno=0;const long long ms=strtoll(line,&end,10);
-        if (errno || end==line || strcmp(end,"\n")!=0 || ms<0 || !fv_bookmark_add(marks,count,ms)) ok=false;
+
+bool fv_timeline_add(FvTimeline *timeline, int64_t ms, unsigned kinds) {
+    if (!timeline || timeline->count > FV_TIMELINE_MAX || ms < 0 || !valid_marker_kinds(kinds))
+        return false;
+    const size_t pos = timeline_position(timeline, ms);
+    FvTimelineMarker *marker = timeline->markers + pos;
+    if (pos < timeline->count && marker->ms == ms) {
+        marker->kinds |= kinds;
+        return true;
     }
-    if (ferror(file)) ok=false;
-    fclose(file);if (!ok) *count=0;return ok;
+    if (timeline->count == FV_TIMELINE_MAX) return false;
+    memmove(marker + 1, marker, (timeline->count - pos) * sizeof(*marker));
+    *marker = (FvTimelineMarker){.ms = ms, .kinds = kinds};
+    timeline->count++;
+    return true;
 }
-bool fv_bookmarks_save(const char *recording,const int64_t *marks,size_t count) {
-    if (!marks || count>FV_BOOKMARKS_MAX) return false;
-    for (size_t i=0;i<count;i++) if (marks[i]<0 || (i && marks[i]<=marks[i-1])) return false;
-    char path[544],temp[560];
-    if (!marks_path(path,sizeof(path),recording,".fvmarks") || !marks_path(temp,sizeof(temp),recording,".fvmarks.tmp-XXXXXX")) return false;
-    const int fd=mkstemp(temp);if (fd<0) return false;
-    FILE *file=fdopen(fd,"wb");
-    if (!file) { close(fd);unlink(temp);return false; }
-    bool ok=fputs("FieldVox bookmarks 1\n",file)>=0;
-    for (size_t i=0;ok && i<count;i++) ok=fprintf(file,"%lld\n",(long long)marks[i])>0;
-    if (fflush(file)!=0 || fsync(fd)!=0) ok=false;
-    if (fclose(file)!=0) ok=false;
-    if (ok) ok=rename(temp,path)==0;
+
+const FvTimelineMarker *fv_timeline_step(const FvTimeline *timeline, int64_t ms, bool forward) {
+    if (!timeline || timeline->count > FV_TIMELINE_MAX) return NULL;
+    const size_t pos = timeline_position(timeline, ms);
+    if (!forward) return pos ? &timeline->markers[pos - 1] : NULL;
+    const size_t next = pos < timeline->count && timeline->markers[pos].ms == ms ? pos + 1 : pos;
+    return next < timeline->count ? &timeline->markers[next] : NULL;
+}
+
+static bool marks_path(char *out, size_t cap, const char *recording, const char *suffix) {
+    if (!recording || recording[0] != '/') return false;
+    const int n = snprintf(out, cap, "%s%s", recording, suffix);
+    return n >= 0 && (size_t)n < cap;
+}
+
+bool fv_timeline_load(const char *recording, FvTimeline *timeline) {
+    if (!timeline) return false;
+    timeline->count = 0;
+    char path[544];
+    if (!marks_path(path, sizeof(path), recording, ".fvmarks")) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return errno == ENOENT;
+    char line[64];
+    const bool header = fgets(line, sizeof(line), file) != NULL;
+    const bool legacy = header && strcmp(line, "FieldVox bookmarks 1\n") == 0;
+    bool ok = legacy || (header && strcmp(line, "FieldVox bookmarks 2\n") == 0);
+    while (ok && fgets(line, sizeof(line), file)) {
+        char *end;
+        errno = 0;
+        const long long ms = strtoll(line, &end, 10);
+        if (errno || end == line || ms < 0) {
+            ok = false;
+            break;
+        }
+        unsigned long kinds = FV_MARK_LEGACY;
+        if (!legacy) {
+            if (*end != ' ' || end[1] < '0' || end[1] > '9') {
+                ok = false;
+                break;
+            }
+            kinds = strtoul(end + 1, &end, 10);
+        }
+        ok = !errno && kinds <= UINT_MAX && strcmp(end, "\n") == 0 &&
+             fv_timeline_add(timeline, (int64_t)ms, (unsigned)kinds);
+    }
+    if (ferror(file)) ok = false;
+    fclose(file);
+    if (!ok) timeline->count = 0;
+    return ok;
+}
+
+bool fv_timeline_save(const char *recording, const FvTimeline *timeline) {
+    if (!timeline || timeline->count > FV_TIMELINE_MAX) return false;
+    for (size_t i = 0; i < timeline->count; i++) {
+        const FvTimelineMarker *m = &timeline->markers[i];
+        if (m->ms < 0 || !valid_marker_kinds(m->kinds) ||
+            (i && m->ms <= timeline->markers[i - 1].ms)) return false;
+    }
+    char path[544], temp[560];
+    if (!marks_path(path, sizeof(path), recording, ".fvmarks") ||
+        !marks_path(temp, sizeof(temp), recording, ".fvmarks.tmp-XXXXXX")) return false;
+    const int fd = mkstemp(temp);
+    if (fd < 0) return false;
+    FILE *file = fdopen(fd, "wb");
+    if (!file) {
+        close(fd);
+        unlink(temp);
+        return false;
+    }
+    bool ok = fputs("FieldVox bookmarks 2\n", file) >= 0;
+    for (size_t i = 0; ok && i < timeline->count; i++) {
+        const FvTimelineMarker *m = &timeline->markers[i];
+        ok = fprintf(file, "%lld %u\n", (long long)m->ms, m->kinds) > 0;
+    }
+    if (fflush(file) != 0 || fsync(fd) != 0) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (ok) ok = rename(temp, path) == 0;
     if (!ok) unlink(temp);
     return ok;
 }
 
 void fv_marker_recorder_reset(FvMarkerRecorder *rec) {
     if (!rec) return;
-    memset(rec, 0, sizeof(*rec));
-    rec->last_auto_ms = -1;
+    *rec = (FvMarkerRecorder){.last_auto_ms = -1};
 }
 
-bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, int64_t min_gap_ms) {
-    if (!rec || elapsed_ms < 0 || min_gap_ms < 0) return false;
-    const bool automatic = min_gap_ms > 0;
-    if (automatic && rec->last_auto_ms >= 0 && elapsed_ms - rec->last_auto_ms < min_gap_ms) {
+bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, unsigned kinds) {
+    const unsigned automatic = FV_MARK_FRAGMENT | FV_MARK_REM_POD;
+    if (!rec || rec->timeline.count > FV_TIMELINE_MAX || elapsed_ms < 0 || !kinds ||
+        (kinds & ~(automatic | FV_MARK_HIT)) != 0u)
         return false;
+    FvTimeline *timeline = &rec->timeline;
+    const int64_t min_gap_ms = kinds & FV_MARK_FRAGMENT ? 500 : 750;
+    if ((kinds & automatic) && rec->last_auto_ms >= 0 &&
+        elapsed_ms - rec->last_auto_ms < min_gap_ms) kinds &= ~automatic;
+    if (!kinds) return false;
+
+    if (!fv_timeline_add(timeline, elapsed_ms, kinds)) {
+        if (!(kinds & FV_MARK_HIT)) return false;
+        size_t oldest_auto = 0;
+        while (oldest_auto < timeline->count &&
+               (timeline->markers[oldest_auto].kinds & FV_MARK_HIT)) oldest_auto++;
+        if (oldest_auto == timeline->count) return false;
+        FvTimelineMarker *oldest = &timeline->markers[oldest_auto];
+        timeline->count--;
+        memmove(oldest, oldest + 1, (timeline->count - oldest_auto) * sizeof(*oldest));
+        if (!fv_timeline_add(timeline, elapsed_ms, kinds)) return false;
     }
-    size_t pos = 0;
-    while (pos < rec->count && rec->marks[pos] < elapsed_ms) pos++;
-    if (pos < rec->count && rec->marks[pos] == elapsed_ms) {
-        if (!automatic) rec->automatic[pos] = false;
-        return true;
-    }
-    if (rec->count == FV_BOOKMARKS_MAX) {
-        if (automatic) return false;
-        size_t oldest = 0;
-        while (oldest < rec->count && !rec->automatic[oldest]) oldest++;
-        if (oldest == rec->count) return false;
-        const size_t trailing = --rec->count - oldest;
-        memmove(rec->marks + oldest, rec->marks + oldest + 1, trailing * sizeof(rec->marks[0]));
-        memmove(rec->automatic + oldest, rec->automatic + oldest + 1, trailing * sizeof(rec->automatic[0]));
-        if (oldest < pos) pos--;
-    }
-    memmove(rec->automatic + pos + 1, rec->automatic + pos,
-            (rec->count - pos) * sizeof(rec->automatic[0]));
-    rec->automatic[pos] = automatic;
-    fv_bookmark_add(rec->marks, &rec->count, elapsed_ms);
-    if (automatic) rec->last_auto_ms = elapsed_ms;
+    if (kinds & automatic) rec->last_auto_ms = elapsed_ms;
     return true;
 }
 

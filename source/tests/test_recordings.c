@@ -40,21 +40,38 @@ int main(void) {
     assert(!fv_wav_load_mono_48k(other,&pcm,&frames));
     assert(truncate(other,55)==0);assert(!fv_wav_read_info(other,&info));
     assert(!fv_wav_waveform(other,peaks,NULL));unlink(other);
-    int64_t marks[FV_BOOKMARKS_MAX]={0};size_t count=0;
-    assert(fv_bookmark_add(marks,&count,500));assert(fv_bookmark_add(marks,&count,0));assert(fv_bookmark_add(marks,&count,200));
-    assert(fv_bookmark_add(marks,&count,200) && count==3);
-    assert(!fv_bookmark_add(marks,&count,-1));
-    assert(marks[0]==0 && marks[1]==200 && marks[2]==500);
-    assert(fv_bookmark_next(marks,count,200,true)==500 && fv_bookmark_next(marks,count,200,false)==0);
-    assert(fv_bookmark_next(marks,count,500,true)==-1 && fv_bookmark_next(marks,count,0,false)==-1);
-    assert(fv_bookmarks_save(path,marks,count));memset(marks,0,sizeof(marks));count=0;
-    assert(fv_bookmarks_load(path,marks,&count) && count==3 && marks[2]==500);
-    assert(fv_bookmarks_save(path,marks,count));
+    FvTimeline timeline = {0};
     snprintf(marks_path,sizeof(marks_path),"%s.fvmarks",path);
-    FILE *f=fopen(marks_path,"ab");assert(f);fputs("invalid\n",f);fclose(f);
-    assert(!fv_bookmarks_load(path,marks,&count) && count==0);unlink(marks_path);
-    for (int64_t i=0;i<FV_BOOKMARKS_MAX;i++) assert(fv_bookmark_add(marks,&count,i));
-    assert(!fv_bookmark_add(marks,&count,FV_BOOKMARKS_MAX));
+    assert(fv_timeline_load(path, &timeline) && timeline.count == 0);
+    FILE *f = fopen(marks_path, "wb");
+    assert(f);
+    assert(fputs("FieldVox bookmarks 1\n500\n0\n200\n200\n", f) >= 0);
+    assert(fclose(f) == 0);
+    assert(fv_timeline_load(path, &timeline) && timeline.count == 3u);
+    assert(timeline.markers[0].ms == 0 && timeline.markers[0].kinds == FV_MARK_LEGACY);
+    assert(timeline.markers[1].ms == 200 && timeline.markers[1].kinds == FV_MARK_LEGACY);
+    assert(timeline.markers[2].ms == 500 && timeline.markers[2].kinds == FV_MARK_LEGACY);
+    assert(fv_timeline_step(&timeline, 200, true)->ms == 500);
+    assert(fv_timeline_step(&timeline, 200, false)->ms == 0);
+    assert(!fv_timeline_step(&timeline, 500, true) && !fv_timeline_step(&timeline, 0, false));
+    assert(fv_timeline_add(&timeline, 200, FV_MARK_BOOKMARK) && timeline.count == 3u);
+    assert(fv_timeline_add(&timeline, 300, FV_MARK_FRAGMENT | FV_MARK_HIT));
+    assert(!fv_timeline_add(&timeline, -1, FV_MARK_BOOKMARK));
+    assert(!fv_timeline_add(&timeline, 100, 0u));
+    assert(!fv_timeline_add(&timeline, 100, 128u));
+    assert(fv_timeline_save(path, &timeline));
+    timeline = (FvTimeline){0};
+    assert(fv_timeline_load(path, &timeline) && timeline.count == 4u);
+    assert(timeline.markers[1].kinds == (FV_MARK_LEGACY | FV_MARK_BOOKMARK));
+    assert(timeline.markers[2].ms == 300 && timeline.markers[2].kinds == (FV_MARK_FRAGMENT | FV_MARK_HIT));
+    f = fopen(marks_path, "ab");
+    assert(f);
+    assert(fputs("600 32\n", f) >= 0);
+    assert(fclose(f) == 0);
+    assert(!fv_timeline_load(path, &timeline) && timeline.count == 0);
+    unlink(marks_path);
+    for (int64_t i = 0; i < FV_TIMELINE_MAX; i++) assert(fv_timeline_add(&timeline, i, FV_MARK_BOOKMARK));
+    assert(!fv_timeline_add(&timeline, FV_TIMELINE_MAX, FV_MARK_BOOKMARK));
     assert(fv_playback_clamp_seek(INT64_MIN,1000)==0 && fv_playback_clamp_seek(INT64_MAX,1000)==1000);
     assert(fv_playback_clamp_seek(999,1000)==999 && fv_playback_clamp_seek(9,0)==0);
     /* Leading partial Icecast AAC bytes before a verified ADTS frame pair must be skipped. */
@@ -79,26 +96,32 @@ int main(void) {
     fv_recording_catalog_free(&catalog);assert(!catalog.items && !catalog.count);
     unlink(other);for (int i=0;i<12;i++) { snprintf(other,sizeof(other),"%s/session-%02d.mp4",directory,i);unlink(other); }
 
-    /* Auto-tagged session marker debounce & persistence */
-    FvMarkerRecorder rec = {0};
-    fv_marker_recorder_reset(&rec);
-    assert(!fv_marker_recorder_record(&rec, -10, 500));
-    assert(fv_marker_recorder_record(&rec, 1200, 500));
-    assert(!fv_marker_recorder_record(&rec, 1500, 500)); /* < 500ms debounce */
-    assert(fv_marker_recorder_record(&rec, 1500, 0));    /* manual hit bypasses debounce */
-    assert(fv_marker_recorder_record(&rec, 1750, 500));  /* >= 500ms since last_auto_ms=1200 */
-    assert(rec.count == 3u && rec.marks[0] == 1200 && rec.marks[1] == 1500 && rec.marks[2] == 1750);
-    assert(fv_bookmarks_save(path, rec.marks, rec.count));
-    memset(marks, 0, sizeof(marks)); count = 0;
-    assert(fv_bookmarks_load(path, marks, &count) && count == 3u && marks[1] == 1500);
+    /* Keep the cause of each recorded marker, including events on the same audio block. */
+    FvMarkerRecorder recorder;
+    fv_marker_recorder_reset(&recorder);
+    assert(!fv_marker_recorder_record(&recorder, -10, FV_MARK_FRAGMENT));
+    assert(fv_marker_recorder_record(&recorder, 1200, FV_MARK_FRAGMENT));
+    assert(!fv_marker_recorder_record(&recorder, 1500, FV_MARK_REM_POD));
+    assert(fv_marker_recorder_record(&recorder, 1500, FV_MARK_HIT | FV_MARK_REM_POD));
+    assert(fv_marker_recorder_record(&recorder, 1950, FV_MARK_REM_POD | FV_MARK_HIT));
+    assert(recorder.timeline.count == 3u);
+    assert(recorder.timeline.markers[1].ms == 1500 && recorder.timeline.markers[1].kinds == FV_MARK_HIT);
+    assert(recorder.timeline.markers[2].kinds == (FV_MARK_REM_POD | FV_MARK_HIT));
+    assert(fv_timeline_save(path, &recorder.timeline));
+    assert(fv_timeline_load(path, &timeline) && timeline.count == 3u);
+    assert(timeline.markers[0].kinds == FV_MARK_FRAGMENT);
+    assert(timeline.markers[2].kinds == (FV_MARK_REM_POD | FV_MARK_HIT));
     unlink(marks_path);
-    fv_marker_recorder_reset(&rec);
-    for (size_t i = 0; i < FV_BOOKMARKS_MAX; i++)
-        assert(fv_marker_recorder_record(&rec, (int64_t)i * 500, 500));
-    assert(fv_marker_recorder_record(&rec, 0, 0)); /* Promote the coincident auto mark. */
-    assert(fv_marker_recorder_record(&rec, 200000, 0));
-    assert(rec.count == FV_BOOKMARKS_MAX && rec.marks[0] == 0 && rec.marks[1] == 1000);
-    assert(rec.marks[rec.count - 1] == 200000);
+
+    fv_marker_recorder_reset(&recorder);
+    for (size_t i = 0; i < FV_TIMELINE_MAX; i++)
+        assert(fv_marker_recorder_record(&recorder, (int64_t)i * 500, FV_MARK_FRAGMENT));
+    assert(fv_marker_recorder_record(&recorder, 0, FV_MARK_HIT));
+    assert(fv_marker_recorder_record(&recorder, 200000, FV_MARK_HIT));
+    assert(recorder.timeline.count == FV_TIMELINE_MAX);
+    assert(recorder.timeline.markers[0].kinds == (FV_MARK_FRAGMENT | FV_MARK_HIT));
+    assert(recorder.timeline.markers[1].ms == 1000);
+    assert(recorder.timeline.markers[FV_TIMELINE_MAX - 1].ms == 200000);
 
     /* Compressed/AAC waveform binning & quiet-signal peak normalization */
     float norm_bins[FV_PLAYBACK_BINS] = {0};

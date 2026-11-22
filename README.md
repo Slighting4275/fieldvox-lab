@@ -46,7 +46,7 @@ The timeline records the audio blocks actually included in the WAVs. Its complet
 
 **SESS WAV** records continuous session audio. **REC / STOP** records camera video as H.264 with AAC audio in MP4: up to 30 fps, 3.5 Mbps video, BT.709 limited-range color, and 48 kHz mono audio at 128 kbps. Capture timestamps follow the actual frame cadence.
 
-**LIBRARY** lists saved WAV and MP4 captures. In-app replay supports seeking, WAV waveforms, and bookmarks. **BANK** selects a saved PCM WAV as the LOCAL fragment source; **PLAY** replays the recording. Explicit exports use Android MediaStore under `Music/FieldVox` or `Movies/FieldVox`.
+**LIBRARY** lists saved WAV and MP4 captures. Playback shows a waveform with labeled markers for VOX fragments, REM-POD alerts, manual hits, and bookmarks added during review. Use **< MARK** and **MARK >** to jump between events. Older recordings keep their saved markers. **BANK** selects a saved PCM WAV as the LOCAL fragment source. **PLAY** replays the recording. Explicit exports use Android MediaStore under `Music/FieldVox` or `Movies/FieldVox`.
 
 Recordings, hit captures, and the radio clip cache use separate app-private directories:
 

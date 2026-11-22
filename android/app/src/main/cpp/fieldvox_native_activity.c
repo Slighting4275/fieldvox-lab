@@ -210,11 +210,11 @@ static uint32_t g_camera_source[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
 static uint32_t g_camera_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT];
 
 static void save_recording_markers(const char *path, const FvMarkerRecorder *rec) {
-    if (path && path[0] && rec->count > 0u) {
-        if (!fv_bookmarks_save(path, rec->marks, rec->count)) {
+    if (path && path[0] && rec->timeline.count > 0u) {
+        if (!fv_timeline_save(path, &rec->timeline)) {
             LOGW("Could not save auto-markers for %s", path);
         } else {
-            LOGI("Saved %zu timeline markers for %s", rec->count, path);
+            LOGI("Saved %zu timeline markers for %s", rec->timeline.count, path);
         }
     }
 }
@@ -231,14 +231,14 @@ static void stop_video_recording_locked(char *out_path, size_t out_cap) {
     if (out_path && out_cap) snprintf(out_path, out_cap, "%s", saved_path);
 }
 
-static void record_active_timeline_marker(long now_ms, int64_t min_gap_ms) {
+static void record_active_timeline_marker(long now_ms, unsigned kinds) {
     pthread_mutex_lock(&g_record_mutex);
     if (g_record_file) {
         const int64_t wav_ms = (int64_t)g_record_frames * 1000 / SAMPLE_RATE;
-        fv_marker_recorder_record(&g_wav_markers, wav_ms, min_gap_ms);
+        fv_marker_recorder_record(&g_wav_markers, wav_ms, kinds);
     }
     if (g_vid_markers_active) {
-        fv_marker_recorder_record(&g_vid_markers, (int64_t)(now_ms - g_vid_rec_start_ms), min_gap_ms);
+        fv_marker_recorder_record(&g_vid_markers, (int64_t)(now_ms - g_vid_rec_start_ms), kinds);
     }
     pthread_mutex_unlock(&g_record_mutex);
 }
@@ -984,6 +984,28 @@ static void set_window_fullscreen(ANativeActivity *activity, bool fullscreen) {
                                    fullscreen ? 0u : AWINDOW_FLAG_FULLSCREEN);
 }
 
+static uint32_t timeline_color(unsigned kinds) {
+    if (kinds & FV_MARK_HIT) return 0xFFFFD166u;
+    if (kinds & FV_MARK_REM_POD) return 0xFFD6A6FFu;
+    if (kinds & FV_MARK_FRAGMENT) return 0xFF80DFC1u;
+    return 0xFFCBCDD4u;
+}
+
+static void timeline_label(char *out, size_t cap, unsigned kinds) {
+    static const struct { unsigned flag; const char *label; } labels[] = {
+        {FV_MARK_HIT, "Manual hit"}, {FV_MARK_REM_POD, "REM-POD alert"},
+        {FV_MARK_FRAGMENT, "VOX fragment"}, {FV_MARK_BOOKMARK, "Playback bookmark"},
+    };
+    size_t used = 0;
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        if (!(kinds & labels[i].flag)) continue;
+        const int n = snprintf(out + used, cap - used, "%s%s", used ? " + " : "", labels[i].label);
+        if (n < 0 || (size_t)n >= cap - used) return;
+        used += (size_t)n;
+    }
+    if (!used) snprintf(out, cap, "Saved marker");
+}
+
 static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const FvUiScreenLayout *layout) {
     FvCanvas *c = ui->c;
     const float d = ui->d, x = ui->x0, w = ui->w;
@@ -1035,9 +1057,10 @@ static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const Fv
         fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,12.0f),x,wave_y,w,wave_h,label,0xFFBBBBBB,false);
     }
     if (p->duration_ms>0) {
-        for (size_t i=0;i<p->bookmark_count;i++) {
-            const float bx=x+w*(float)((double)p->bookmarks[i]/(double)p->duration_ms);
-            fvg_line(c,bx,wave_y,bx,wave_y+wave_h,d,0xFFFFD166);
+        for (size_t i=0;i<p->timeline.count;i++) {
+            const FvTimelineMarker *marker=&p->timeline.markers[i];
+            const float bx=x+w*(float)((double)marker->ms/(double)p->duration_ms);
+            fvg_line(c,bx,wave_y,bx,wave_y+wave_h,d,timeline_color(marker->kinds));
         }
         const float cx=x+w*(float)((double)p->position_ms/(double)p->duration_ms);
         fvg_line(c,cx,wave_y,cx,wave_y+wave_h,2.0f*d,0xFF6FE7FF);
@@ -1047,9 +1070,24 @@ static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const Fv
     snprintf(clock,sizeof(clock),"%s / %s",elapsed,duration);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,wave_y+wave_h,w,20.0f*d,clock,0xFFFFFFFF,false);
     char status[160];
-    if (p->ready) snprintf(status,sizeof(status),"On this phone • drag waveform to seek • %zu bookmarks",p->bookmark_count);
-    else snprintf(status,sizeof(status),"%s",p->status);
-    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),status,w,false),x,buttons_y-21.0f*d,w,20.0f*d,status,p->error ? 0xFFFF7777 : 0xFFBBBBBB,false);
+    uint32_t status_color=p->error ? 0xFFFF7777u : 0xFFBBBBBBu;
+    if (p->status[0]) {
+        snprintf(status,sizeof(status),"%s",p->status);
+    } else if (p->timeline.count) {
+        const bool selected=!p->playing && p->marker_seek_ms>=0;
+        const int64_t position=selected ? p->marker_seek_ms : p->position_ms;
+        const FvTimelineMarker *last=fv_timeline_step(&p->timeline,position+1,false);
+        const FvTimelineMarker *marker=last ? last : &p->timeline.markers[0];
+        char stamp[32], label[96];
+        playback_time(stamp,sizeof(stamp),marker->ms);
+        timeline_label(label,sizeof(label),marker->kinds);
+        snprintf(status,sizeof(status),"%s %s  •  %s",
+                 selected ? "Marker" : (last ? "Last" : "Next"),stamp,label);
+        status_color=timeline_color(marker->kinds);
+    } else {
+        snprintf(status,sizeof(status),"No markers yet • tap MARK to add one");
+    }
+    fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),status,w,false),x,buttons_y-21.0f*d,w,20.0f*d,status,status_color,false);
     const WidgetId ids[]={W_PLAY_REWIND_10,W_PLAY_REWIND_5,W_PLAY_TOGGLE,W_PLAY_FORWARD_5};
     const char *labels[]={"-10 SEC","-5 SEC",p->playing ? "PAUSE" : "PLAY","+5 SEC"};
     for (int i=0;i<4;i++) draw_placed_pill(ui,ids[i],labels[i],i==2 ? PILL_ACTIVE : PILL_IDLE);
@@ -2464,9 +2502,10 @@ static void *audio_thread_func(void *arg) {
         const unsigned hits = atomic_exchange(&g_app.mark_hit_requests, 0u);
         if (recording && !g_record_file) begin_recording();
         if (!recording && g_record_file) finish_recording();
-        if (admitted) record_active_timeline_marker(now, 500LL);
-        else if (rem_alert) record_active_timeline_marker(now, 750LL);
-        if (hits > 0u) record_active_timeline_marker(now, 0LL);
+        const unsigned kinds = (admitted ? FV_MARK_FRAGMENT : 0u) |
+                               (rem_alert ? FV_MARK_REM_POD : 0u) |
+                               (hits > 0u ? FV_MARK_HIT : 0u);
+        if (kinds) record_active_timeline_marker(now, kinds);
         for (unsigned k = 0; k < hits && g_app.activity && g_app.activity->internalDataPath; k++) {
             char dir[512];
             snprintf(dir, sizeof(dir), "%s/fieldvox-hits", g_app.activity->internalDataPath);

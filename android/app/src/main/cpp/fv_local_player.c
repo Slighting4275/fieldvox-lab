@@ -230,13 +230,15 @@ static bool open_media(JNIEnv *env,const PlayerMethods *m,const char *path,uint6
         uint32_t *pixels=calloc((size_t)dw*(size_t)dh,sizeof(*pixels));if (!pixels) return false;
         pthread_mutex_lock(&p.mutex);p.pixels=pixels;p.pixel_w=dw;p.pixel_h=dh;pthread_mutex_unlock(&p.mutex);
     }
-    int64_t marks[FV_BOOKMARKS_MAX]={0};size_t count=0;
-    const bool marks_ok=fv_bookmarks_load(path,marks,&count);
+    FvTimeline timeline={0};
+    const bool marks_ok=fv_timeline_load(path,&timeline);
+    while (timeline.count && timeline.markers[timeline.count-1].ms>duration) timeline.count--;
     pthread_mutex_lock(&p.mutex);
     if (generation!=p.generation || p.pending_close) { pthread_mutex_unlock(&p.mutex);return false; }
     p.state.ready=true;p.state.duration_ms=duration;p.state.video=width>0 && height>0;
-    for (size_t i=0;i<count;i++) if (marks[i]<=duration) fv_bookmark_add(p.state.bookmarks,&p.state.bookmark_count,marks[i]);
-    snprintf(p.state.status,sizeof(p.state.status),"%s",marks_ok ? "Local recording • waveform loading" : "Local recording • bookmark file unreadable");
+    p.state.timeline=timeline;
+    p.state.timeline_readable=marks_ok;
+    snprintf(p.state.status,sizeof(p.state.status),"%s",marks_ok ? "" : "Timeline could not be read");
     snprintf(p.analysis.path,sizeof(p.analysis.path),"%s",path);p.analysis.generation=p.generation;
     p.analysis.fallback_duration_us=(int64_t)duration*1000LL;
     pthread_mutex_unlock(&p.mutex);
@@ -285,6 +287,10 @@ static void *player_worker(void *arg) {
         }
         if (player) {
             pthread_mutex_lock(&p.mutex);
+            if (generation!=p.generation || p.pending_close) {
+                pthread_mutex_unlock(&p.mutex);
+                continue;
+            }
             const bool desired=p.desired_playing,muted=p.desired_muted,mark=p.add_mark;
             const int64_t seek=p.pending_seek;p.pending_seek=-1;p.add_mark=false;
             const int64_t duration=p.state.duration_ms;
@@ -303,20 +309,45 @@ static void *player_worker(void *arg) {
             if (!fv_jni_check(env,"FieldVoxPlayer","playback controls",true)) {
                 release_media(env,&m,&player,&reader);player_error("Playback failed • reopen the recording");
             } else {
-                int64_t marks[FV_BOOKMARKS_MAX]={0};size_t count=0;bool save=false;
+                FvTimeline revised;
+                bool save=false;
                 pthread_mutex_lock(&p.mutex);
+                if (generation!=p.generation || p.pending_close) {
+                    pthread_mutex_unlock(&p.mutex);
+                    continue;
+                }
                 p.state.position_ms=fv_playback_clamp_seek(position,duration);
                 p.state.playing=playing;p.state.muted=muted;
-                if (!playing && desired && duration-p.state.position_ms<=100) { p.desired_playing=false;was_playing=false;LOGI("Local playback completed"); }
+                if (playing && seek<0 && p.state.marker_seek_ms>=0 &&
+                    p.state.position_ms>p.state.marker_seek_ms+250)
+                    p.state.marker_seek_ms=-1;
+                if (!playing && desired && duration-p.state.position_ms<=100) {
+                    p.desired_playing=false;
+                    was_playing=false;
+                    p.state.marker_seek_ms=-1;
+                    LOGI("Local playback completed");
+                }
                 if (mark) {
-                    save=fv_bookmark_add(p.state.bookmarks,&p.state.bookmark_count,p.state.position_ms);
-                    count=p.state.bookmark_count;memcpy(marks,p.state.bookmarks,count*sizeof(*marks));
-                    if (!save) snprintf(p.state.status,sizeof(p.state.status),"Bookmark limit reached (256)");
+                    revised=p.state.timeline;
+                    save=fv_timeline_add(&revised,p.state.position_ms,FV_MARK_BOOKMARK);
+                    if (!save) snprintf(p.state.status,sizeof(p.state.status),"Timeline is full");
                 }
                 pthread_mutex_unlock(&p.mutex);
-                if (save && !fv_bookmarks_save(path,marks,count)) {
-                    pthread_mutex_lock(&p.mutex);snprintf(p.state.status,sizeof(p.state.status),"Bookmark not saved • check free storage");pthread_mutex_unlock(&p.mutex);
-                } else if (save) LOGI("Local bookmark saved: %d ms",position);
+                if (save) {
+                    const bool saved=fv_timeline_save(path,&revised);
+                    pthread_mutex_lock(&p.mutex);
+                    if (generation==p.generation && !p.pending_close) {
+                        if (saved) {
+                            p.state.timeline=revised;
+                            p.state.marker_seek_ms=-1;
+                            p.state.status[0]='\0';
+                        } else {
+                            snprintf(p.state.status,sizeof(p.state.status),"Bookmark save failed • check free storage");
+                        }
+                    }
+                    pthread_mutex_unlock(&p.mutex);
+                    if (saved) LOGI("Local bookmark saved: %d ms",position);
+                }
                 video_image(reader);
             }
         }
@@ -342,7 +373,7 @@ void fv_local_player_shutdown(void) {
 void fv_local_player_open(const char *path,bool muted) {
     if (!path || path[0]!='/' || strlen(path)>=sizeof(p.path)) return;
     pthread_mutex_lock(&p.mutex);
-    p.generation++;p.state=(FvLocalPlayerSnapshot){.visible=true,.muted=muted};
+    p.generation++;p.state=(FvLocalPlayerSnapshot){.visible=true,.muted=muted,.marker_seek_ms=-1};
     snprintf(p.path,sizeof(p.path),"%s",path);
     const char *name=strrchr(path,'/');snprintf(p.state.name,sizeof(p.state.name),"%s",name ? name+1 : path);
     snprintf(p.state.status,sizeof(p.state.status),"Loading local recording…");
@@ -360,20 +391,29 @@ void fv_local_player_pause(void) {
 void fv_local_player_toggle(void) {
     pthread_mutex_lock(&p.mutex);
     if (p.state.ready) {
-        if (!p.desired_playing && p.state.position_ms>=p.state.duration_ms-100) p.pending_seek=0;
+        if (!p.desired_playing && p.state.position_ms>=p.state.duration_ms-100) {
+            p.pending_seek=0;
+            p.state.marker_seek_ms=-1;
+        }
         p.desired_playing=!p.desired_playing;
     }
     pthread_mutex_unlock(&p.mutex);
 }
 void fv_local_player_mute(void) { pthread_mutex_lock(&p.mutex);p.desired_muted=!p.desired_muted;pthread_mutex_unlock(&p.mutex); }
 void fv_local_player_seek(int64_t ms) {
-    pthread_mutex_lock(&p.mutex);if (p.state.ready) p.pending_seek=fv_playback_clamp_seek(ms,p.state.duration_ms);pthread_mutex_unlock(&p.mutex);
+    pthread_mutex_lock(&p.mutex);
+    if (p.state.ready) {
+        p.pending_seek=fv_playback_clamp_seek(ms,p.state.duration_ms);
+        p.state.marker_seek_ms=-1;
+    }
+    pthread_mutex_unlock(&p.mutex);
 }
 void fv_local_player_seek_delta(int64_t delta_ms) {
     pthread_mutex_lock(&p.mutex);
     if (p.state.ready) {
         const int64_t base = p.pending_seek >= 0 ? p.pending_seek : p.state.position_ms;
         p.pending_seek = fv_playback_clamp_seek(base + delta_ms, p.state.duration_ms);
+        p.state.marker_seek_ms = -1;
     }
     pthread_mutex_unlock(&p.mutex);
 }
@@ -383,11 +423,25 @@ void fv_local_player_scrub_begin(void) {
 void fv_local_player_scrub_end(void) {
     pthread_mutex_lock(&p.mutex);p.desired_playing=p.scrub_resume;p.scrub_resume=false;pthread_mutex_unlock(&p.mutex);
 }
-void fv_local_player_bookmark(void) { pthread_mutex_lock(&p.mutex);p.add_mark=p.state.ready;pthread_mutex_unlock(&p.mutex); }
+void fv_local_player_bookmark(void) {
+    pthread_mutex_lock(&p.mutex);
+    p.add_mark=p.state.ready && p.state.timeline_readable;
+    pthread_mutex_unlock(&p.mutex);
+}
 void fv_local_player_jump_mark(bool forward) {
     pthread_mutex_lock(&p.mutex);
-    const int64_t ms=fv_bookmark_next(p.state.bookmarks,p.state.bookmark_count,p.state.position_ms,forward);
-    if (ms>=0 && p.state.ready) p.pending_seek=ms;
+    if (p.state.ready) {
+        int64_t base=p.pending_seek>=0 ? p.pending_seek : p.state.position_ms;
+        if (p.state.marker_seek_ms>=0 &&
+            (!p.desired_playing || llabs(base-p.state.marker_seek_ms)<=250))
+            base=p.state.marker_seek_ms;
+        const FvTimelineMarker *marker=fv_timeline_step(&p.state.timeline,base,forward);
+        if (marker) {
+            p.pending_seek=marker->ms;
+            p.state.marker_seek_ms=marker->ms;
+            p.state.status[0]='\0';
+        }
+    }
     pthread_mutex_unlock(&p.mutex);
 }
 bool fv_local_player_active(void) { pthread_mutex_lock(&p.mutex);const bool active=p.state.visible;pthread_mutex_unlock(&p.mutex);return active; }

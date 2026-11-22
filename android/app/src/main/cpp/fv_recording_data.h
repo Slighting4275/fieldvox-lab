@@ -7,7 +7,7 @@
 #include <stdatomic.h>
 #include <time.h>
 
-enum { FV_PLAYBACK_BINS = 256, FV_BOOKMARKS_MAX = 256 };
+enum { FV_PLAYBACK_BINS = 256, FV_TIMELINE_MAX = 256 };
 typedef struct {
     char path[512], name[256];
     int64_t bytes;
@@ -35,19 +35,34 @@ bool fv_wav_write_file(const char *path, uint32_t sample_rate, uint16_t channels
                        const int16_t *pcm, size_t frames);
 int64_t fv_playback_clamp_seek(int64_t target_ms, int64_t duration_ms);
 size_t fv_adts_sync_offset(const uint8_t *buf, size_t len);
-bool fv_bookmark_add(int64_t marks[FV_BOOKMARKS_MAX], size_t *count, int64_t ms);
-int64_t fv_bookmark_next(const int64_t *marks, size_t count, int64_t ms, bool forward);
-bool fv_bookmarks_load(const char *recording, int64_t marks[FV_BOOKMARKS_MAX], size_t *count);
-bool fv_bookmarks_save(const char *recording, const int64_t *marks, size_t count);
+/* These flag values are stored in version 2 of the .fvmarks sidecar. */
+enum {
+    FV_MARK_FRAGMENT = 1u << 0,
+    FV_MARK_REM_POD = 1u << 1,
+    FV_MARK_HIT = 1u << 2,
+    FV_MARK_BOOKMARK = 1u << 3,
+    FV_MARK_LEGACY = 1u << 4,
+};
+typedef struct {
+    int64_t ms;
+    unsigned kinds;
+} FvTimelineMarker;
+typedef struct {
+    FvTimelineMarker markers[FV_TIMELINE_MAX];
+    size_t count;
+} FvTimeline;
+
+bool fv_timeline_add(FvTimeline *timeline, int64_t ms, unsigned kinds);
+const FvTimelineMarker *fv_timeline_step(const FvTimeline *timeline, int64_t ms, bool forward);
+bool fv_timeline_load(const char *recording, FvTimeline *timeline);
+bool fv_timeline_save(const char *recording, const FvTimeline *timeline);
 
 typedef struct {
-    int64_t marks[FV_BOOKMARKS_MAX];
-    bool automatic[FV_BOOKMARKS_MAX];
-    size_t count;
+    FvTimeline timeline;
     int64_t last_auto_ms;
 } FvMarkerRecorder;
 void fv_marker_recorder_reset(FvMarkerRecorder *rec);
-bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, int64_t min_gap_ms);
+bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, unsigned kinds);
 
 void fv_waveform_accumulate_sample(float peaks[FV_PLAYBACK_BINS], int64_t pts_us,
                                    int64_t duration_us, float abs_level);
