@@ -41,6 +41,7 @@ typedef struct {
     int height;
     int sample_rate;
     int channels;
+    FvVideoFrameSource source;
 
     AMediaCodec *video_codec;
     AMediaCodec *audio_codec;
@@ -229,8 +230,10 @@ static void drain_encoder_locked(bool is_video, int64_t timeout_us, bool wait_fo
     }
 }
 
-bool fv_video_recorder_start(const char *output_mp4_path, int width, int height, int sample_rate, int channels) {
-    if (!output_mp4_path || width <= 0 || height <= 0 || sample_rate <= 0) return false;
+bool fv_video_recorder_start(const char *output_mp4_path, int width, int height, int sample_rate,
+                             int channels, FvVideoFrameSource source) {
+    if (!output_mp4_path || width <= 0 || height <= 0 || sample_rate <= 0 ||
+        (source != FV_VIDEO_VIEWFINDER && source != FV_VIDEO_CAMERA_ONLY)) return false;
 
     pthread_mutex_lock(&s_rec.mutex);
     if (s_rec.active) {
@@ -344,6 +347,7 @@ bool fv_video_recorder_start(const char *output_mp4_path, int width, int height,
     snprintf(s_rec.path, sizeof(s_rec.path), "%s", output_mp4_path);
     s_rec.width = width;
     s_rec.height = height;
+    s_rec.source = source;
     s_rec.sample_rate = sample_rate;
     s_rec.channels = channels;
     s_rec.video_codec = vcodec;
@@ -417,11 +421,12 @@ void fv_video_recorder_feed_audio(const int16_t *pcm, int frames) {
     pthread_mutex_unlock(&s_rec.mutex);
 }
 
-void fv_video_recorder_feed_frame(const uint32_t *argb, int src_w, int src_h, int stride_px) {
-    if (!argb || src_w <= 0 || src_h <= 0) return;
+void fv_video_recorder_feed_frame(const uint32_t *rgba, int src_w, int src_h, int stride_px,
+                                  FvVideoFrameSource source) {
+    if (!rgba || src_w <= 0 || src_h <= 0 || stride_px < src_w) return;
 
     pthread_mutex_lock(&s_rec.mutex);
-    if (!s_rec.active || !s_rec.video_codec) {
+    if (!s_rec.active || !s_rec.video_codec || source != s_rec.source) {
         pthread_mutex_unlock(&s_rec.mutex);
         return;
     }
@@ -432,6 +437,22 @@ void fv_video_recorder_feed_frame(const uint32_t *argb, int src_w, int src_h, in
     if (now_us - s_rec.last_frame_time_us < 33333ULL) {
         pthread_mutex_unlock(&s_rec.mutex);
         return;
+    }
+
+    if (source == FV_VIDEO_CAMERA_ONLY) {
+        const int64_t source_width = (int64_t)src_w * s_rec.height;
+        const int64_t target_width = (int64_t)src_h * s_rec.width;
+        if (source_width > target_width) {
+            const int crop_w = (int)(target_width / s_rec.height);
+            const int width = crop_w > 0 ? crop_w : 1;
+            rgba += (src_w - width) / 2;
+            src_w = width;
+        } else if (source_width < target_width) {
+            const int crop_h = (int)(source_width / s_rec.width);
+            const int height = crop_h > 0 ? crop_h : 1;
+            rgba += (size_t)((src_h - height) / 2) * (size_t)stride_px;
+            src_h = height;
+        }
     }
 
     const ssize_t in_idx = AMediaCodec_dequeueInputBuffer(s_rec.video_codec, 0);
@@ -476,7 +497,7 @@ void fv_video_recorder_feed_frame(const uint32_t *argb, int src_w, int src_h, in
                      s_rec.width, s_rec.height, stride, slice_h, in_size);
             }
 
-            argb_to_nv12_bt709(argb, src_w, src_h, stride_px, buf,
+            argb_to_nv12_bt709(rgba, src_w, src_h, stride_px, buf,
                                s_rec.width, s_rec.height,
                                s_rec.input_stride, s_rec.input_slice_height);
 

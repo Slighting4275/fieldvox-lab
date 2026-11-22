@@ -148,9 +148,9 @@ static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, fl
     const WidgetId r3[6] = {W_SOURCE_MODE, W_VOCAL, W_PAN, W_REMPOD, W_ESTES, W_AUTO_GATE};
     const WidgetId r4[4] = {W_SENS_LOW, W_SENS_MED, W_SENS_HIGH, W_COOL_CYCLE};
     const WidgetId r5[4] = {W_CAMHUD, W_CAM_LENS, W_VIS_LAYOUT, W_MIC};
-    const WidgetId r6[3] = {W_REC, W_VIDEO_REC, W_SESS};
+    const WidgetId r6[4] = {W_REC, W_VIDEO_REC, W_VIDEO_SOURCE, W_SESS};
     const WidgetId *rows[6] = {r1, r2, r3, r4, r5, r6};
-    const size_t counts[6] = {4u, 4u, 6u, 4u, 4u, 3u};
+    const size_t counts[6] = {4u, 4u, 6u, 4u, 4u, 4u};
 
     for (size_t i = 0; i < 6u; i++) {
         layout_row(rects, row_x, cur_y, row_w, pill_h, gap, rows[i], counts[i]);

@@ -232,10 +232,16 @@ static void test_ui_controller_and_layout(void) {
     assert(layout.landscape);
     assert(rects[W_START].visible && rects[W_ECHO_LEVEL].visible && rects[W_CLOSE_DRAWER].visible);
     assert(rects[W_RADIO_TUNER].visible);
+    assert(!rects[W_VIDEO_SOURCE].visible);
 
     st.advanced_controls = true;
     fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 0, is_video, &layout);
     assert(rects[W_CADENCE].visible && rects[W_ADVANCED].visible && rects[W_CLOSE_DRAWER].visible);
+    assert(rects[W_VIDEO_SOURCE].visible && rects[W_VIDEO_REC].visible);
+    assert(rects[W_VIDEO_REC].x + rects[W_VIDEO_REC].w < rects[W_VIDEO_SOURCE].x);
+    fv_ui_layout_active(rects, 1080, 2400, 3.0f, &st, 0, is_video, &layout);
+    const WidgetRect *source = &rects[W_VIDEO_SOURCE];
+    assert(fv_ui_resolve_tap(rects, source->x + source->w / 2, source->y + source->h / 2) == W_VIDEO_SOURCE);
 
     /* Radio Tuner modal overlay in portrait and landscape */
     st = (FvUiState){.tuner_visible = true};
