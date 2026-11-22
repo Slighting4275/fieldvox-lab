@@ -46,6 +46,8 @@ The timeline records the audio blocks actually included in the WAVs. Its complet
 
 Tap the red **REC** button to start a **Clean MP4**, then tap **STOP** to save it. Clean mode saves the filtered camera view, session audio, and timeline markers. The camera view retains its proportions and is cropped to fill the MP4 frame. Select **Screen MP4** above the same red button to include FieldVox's on-screen controls and overlays.
 
+If the camera is starting, Clean MP4 waits for the preview after you press **REC**. Tap the shutter again to cancel while it waits. Entering Estes during a recording keeps the display dark and shows the active recording mode in the title. Clean MP4 continues saving the camera view during Estes.
+
 Both modes record H.264 video at up to 30 fps and 3.5 Mbps, with BT.709 limited-range color and 48 kHz mono AAC audio at 128 kbps. Capture timestamps follow the actual frame cadence.
 
 **LIBRARY** lists saved WAV and MP4 captures. Playback shows a waveform with labeled markers for VOX fragments, REM-POD alerts, manual hits, and bookmarks added during review. Use **< MARK** and **MARK >** to jump between events. Older recordings keep their saved markers. **BANK** selects a saved PCM WAV as the LOCAL fragment source. **PLAY** replays the recording. Explicit exports use Android MediaStore under `Music/FieldVox` or `Movies/FieldVox`.

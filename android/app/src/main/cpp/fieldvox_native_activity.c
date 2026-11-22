@@ -146,6 +146,8 @@ typedef struct {
     FvCameraFilter cam_filter;
     int display_rotation_deg;
     bool video_recording_active;
+    bool window_focused, awaiting_camera_permission;
+    long clean_start_deadline_ms;
     FvVideoFrameSource video_source;
     char video_artifact[512];
     bool monitor_active;
@@ -269,6 +271,50 @@ static void set_status(const char *message) {
     pthread_mutex_lock(&g_state_mutex);
     set_status_locked(message);
     pthread_mutex_unlock(&g_state_mutex);
+}
+
+/* Caller holds g_state_mutex. A permission prompt may temporarily pause the activity. */
+static void clear_clean_start_locked(void) {
+    g_app.clean_start_deadline_ms = 0;
+    g_app.awaiting_camera_permission = false;
+}
+
+static void start_video_recording_locked(void) {
+    clear_clean_start_locked();
+    pthread_mutex_lock(&g_window_mutex);
+    const bool have_window = g_app.window != NULL;
+    const bool landscape = have_window &&
+        ANativeWindow_getWidth(g_app.window) > ANativeWindow_getHeight(g_app.window);
+    pthread_mutex_unlock(&g_window_mutex);
+    if (!have_window || !atomic_load(&g_app.resumed)) {
+        set_status_locked("Recording needs a visible viewfinder");
+        return;
+    }
+
+    const char *base = g_app.activity->externalDataPath ? g_app.activity->externalDataPath
+                                                       : g_app.activity->internalDataPath;
+    char dir[512], path[512];
+    if (!base || snprintf(dir, sizeof(dir), "%s/fieldvox-recordings", base) >= (int)sizeof(dir) ||
+        (mkdir(dir, 0755) != 0 && errno != EEXIST) ||
+        snprintf(path, sizeof(path), "%s/session-%lld.mp4", dir, get_wall_time_ms()) >= (int)sizeof(path)) {
+        set_status_locked("Recording storage is unavailable");
+        return;
+    }
+
+    const int width = landscape ? 1280 : 720;
+    const int height = landscape ? 720 : 1280;
+    if (!fv_video_recorder_start(path, width, height, SAMPLE_RATE, 1, g_app.video_source)) {
+        set_status_locked("Video recording failed to start");
+        return;
+    }
+    g_app.video_recording_active = true;
+    snprintf(g_app.video_artifact, sizeof(g_app.video_artifact), "%s", path);
+    pthread_mutex_lock(&g_record_mutex);
+    fv_marker_recorder_reset(&g_vid_markers);
+    g_vid_rec_start_ms = get_time_ms();
+    g_vid_markers_active = true;
+    pthread_mutex_unlock(&g_record_mutex);
+    set_status_locked(g_app.video_source == FV_VIDEO_CAMERA_ONLY ? "Clean MP4 recording started" : "Screen MP4 recording started");
 }
 
 static const char *cadence_label(int idx) {
@@ -437,23 +483,24 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
     draw_placed_pill(ui, W_VIS_COLOR, visualizer_color_names[s->visualizer_color % 4], PILL_IDLE);
 }
 
-static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w, int h, float d, long now) {
-    if (s->cam_filter != FV_CAM_FILTER_OFF) {
-        int rot_deg = 0;
-        bool front_facing = false, torch_on = false;
-        int cam_w = FV_CAMERA_WIDTH, cam_h = FV_CAMERA_HEIGHT;
-        if (fv_camera_copy_argb(g_camera_source, s->display_rotation_deg, &rot_deg, &front_facing, &torch_on) &&
-            fv_camera_filter_frame_ex(g_camera_source, FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT, g_camera_argb,
-                                      (size_t)FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT, rot_deg,
-                                      front_facing, s->cam_filter, torch_on, &cam_w, &cam_h)) {
-            fvg_blit_cover(c, g_camera_argb, cam_w, cam_h);
-        } else {
-            fvg_clear(c, 0xFF060B11);
-        }
+static void draw_filtered_camera(FvCanvas *canvas, const FieldVoxApp *state) {
+    int rotation = 0;
+    bool front_facing = false, torch_on = false;
+    int width = FV_CAMERA_WIDTH, height = FV_CAMERA_HEIGHT;
+    if (fv_camera_copy_argb(g_camera_source, state->display_rotation_deg, &rotation, &front_facing, &torch_on) &&
+        fv_camera_filter_frame_ex(g_camera_source, FV_CAMERA_WIDTH, FV_CAMERA_HEIGHT, g_camera_argb,
+                                  (size_t)FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT, rotation,
+                                  front_facing, state->cam_filter, torch_on, &width, &height)) {
+        fvg_blit_cover(canvas, g_camera_argb, width, height);
+    } else {
+        fvg_clear(canvas, 0xFF060B11);
+    }
+}
 
-        if (s->video_recording_active && s->video_source == FV_VIDEO_CAMERA_ONLY) {
-            fv_video_recorder_feed_frame(c->px, c->w, c->h, c->stride, FV_VIDEO_CAMERA_ONLY);
-        }
+static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w, int h,
+                                       float d, long now, bool camera_drawn) {
+    if (s->cam_filter != FV_CAM_FILTER_OFF) {
+        if (!camera_drawn) draw_filtered_camera(c, s);
 
         /* Viewfinder reticle and perimeter recording indicator */
         const float rx = (float)w * 0.5f, ry = (float)h * 0.38f, r = 18.0f * d;
@@ -649,9 +696,9 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
             fvg_circle(c, cx, cy, r_inner, 0xFFFF1744, 0x44000000, fmaxf(1.0f, 1.2f * d));
             /* Subtle glossy 3D sheen */
             fvg_circle(c, cx, cy - r_inner * 0.35f, r_inner * 0.45f, 0x22FFFFFF, 0, 0);
-            /* Centered white text label */
+            const char *label = s->clean_start_deadline_ms ? "WAIT" : "REC";
             fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), cx - r_inner, cy - r_inner,
-                            r_inner * 2.0f, r_inner * 2.0f, "REC", 0xFFFFFFFF, true);
+                            r_inner * 2.0f, r_inner * 2.0f, label, 0xFFFFFFFF, true);
         } else {
             /* RECORDING STATE: Pulsating red aura, morphing into rounded red stop square */
             const float pulse = 0.5f + 0.5f * sinf((float)(now % 900) * (2.0f * 3.14159265f / 900.0f));
@@ -698,7 +745,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         fvg_text_center(c, FVG_FONT_SANS, s4, b4_x, btn_y, btn_w, btn_h, b4_label, 0xFFFFFFFF, false);
     }
     draw_placed_pill(ui, W_CAPTURE_CLEAN, "CLEAN MP4", s->video_source == FV_VIDEO_CAMERA_ONLY ? PILL_ACTIVE : PILL_IDLE);
-    draw_placed_pill(ui, W_CAPTURE_SCREEN, "SCREEN MP4", s->video_source == FV_VIDEO_VIEWFINDER ? PILL_ACTIVE : PILL_IDLE);
+    draw_placed_pill(ui, W_CAPTURE_SCREEN, "SCREEN MP4", s->video_source == FV_VIDEO_SCREEN ? PILL_ACTIVE : PILL_IDLE);
 }
 
 static void draw_placed_slider(Ui *ui, WidgetId id, const char *label, int level, const char *value) {
@@ -968,22 +1015,25 @@ static void set_window_fullscreen(ANativeActivity *activity, bool fullscreen) {
                                    fullscreen ? 0u : AWINDOW_FLAG_FULLSCREEN);
 }
 
+static const struct { unsigned kind; uint32_t color; const char *label; } timeline_styles[] = {
+    {FV_MARK_HIT, 0xFFFFD166u, "Manual hit"},
+    {FV_MARK_REM_POD, 0xFFD6A6FFu, "REM-POD alert"},
+    {FV_MARK_FRAGMENT, 0xFF80DFC1u, "VOX fragment"},
+    {FV_MARK_BOOKMARK, 0xFFCBCDD4u, "Playback bookmark"},
+};
+static const uint32_t legacy_marker_color = 0xFFCBCDD4u;
+
 static uint32_t timeline_color(unsigned kinds) {
-    if (kinds & FV_MARK_HIT) return 0xFFFFD166u;
-    if (kinds & FV_MARK_REM_POD) return 0xFFD6A6FFu;
-    if (kinds & FV_MARK_FRAGMENT) return 0xFF80DFC1u;
-    return 0xFFCBCDD4u;
+    for (size_t i = 0; i < sizeof(timeline_styles) / sizeof(timeline_styles[0]); i++)
+        if (kinds & timeline_styles[i].kind) return timeline_styles[i].color;
+    return legacy_marker_color;
 }
 
 static void timeline_label(char *out, size_t cap, unsigned kinds) {
-    static const struct { unsigned flag; const char *label; } labels[] = {
-        {FV_MARK_HIT, "Manual hit"}, {FV_MARK_REM_POD, "REM-POD alert"},
-        {FV_MARK_FRAGMENT, "VOX fragment"}, {FV_MARK_BOOKMARK, "Playback bookmark"},
-    };
     size_t used = 0;
-    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
-        if (!(kinds & labels[i].flag)) continue;
-        const int n = snprintf(out + used, cap - used, "%s%s", used ? " + " : "", labels[i].label);
+    for (size_t i = 0; i < sizeof(timeline_styles) / sizeof(timeline_styles[0]); i++) {
+        if (!(kinds & timeline_styles[i].kind)) continue;
+        const int n = snprintf(out + used, cap - used, "%s%s", used ? " + " : "", timeline_styles[i].label);
         if (n < 0 || (size_t)n >= cap - used) return;
         used += (size_t)n;
     }
@@ -1057,17 +1107,14 @@ static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const Fv
     uint32_t status_color=p->error ? 0xFFFF7777u : 0xFFBBBBBBu;
     if (p->status[0]) {
         snprintf(status,sizeof(status),"%s",p->status);
-    } else if (p->timeline.count) {
-        const bool selected=!p->playing && p->marker_seek_ms>=0;
-        const int64_t position=selected ? p->marker_seek_ms : p->position_ms;
-        const FvTimelineMarker *last=fv_timeline_step(&p->timeline,position+1,false);
-        const FvTimelineMarker *marker=last ? last : &p->timeline.markers[0];
+    } else if (p->cue_type != FV_CUE_NONE) {
         char stamp[32], label[96];
-        playback_time(stamp,sizeof(stamp),marker->ms);
-        timeline_label(label,sizeof(label),marker->kinds);
+        playback_time(stamp,sizeof(stamp),p->cue.ms);
+        timeline_label(label,sizeof(label),p->cue.kinds);
         snprintf(status,sizeof(status),"%s %s  •  %s",
-                 selected ? "Marker" : (last ? "Last" : "Next"),stamp,label);
-        status_color=timeline_color(marker->kinds);
+                 p->cue_type == FV_CUE_SELECTED ? "Marker" : (p->cue_type == FV_CUE_LAST ? "Last" : "Next"),
+                 stamp,label);
+        status_color=timeline_color(p->cue.kinds);
     } else {
         snprintf(status,sizeof(status),"No markers yet • tap MARK to add one");
     }
@@ -1084,7 +1131,12 @@ static void draw_estes(Ui *ui, const FieldVoxApp *s, int w, int h) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
     fvg_clear(c, 0xFF000000);
-    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,20), 0, (float)h * 0.40f, (float)w, 40 * d, "ESTES PROTOCOL", 0xFF881111, true);
+    const char *title = "ESTES PROTOCOL";
+    if (s->video_recording_active)
+        title = s->video_source == FV_VIDEO_CAMERA_ONLY ? "ESTES • CLEAN MP4 REC" : "ESTES • SCREEN MP4 REC";
+    const float title_size = fit_size(FVG_FONT_SANS, text_sp(ui,20.0f), title, (float)w - 24.0f * d, true);
+    fvg_text_center(c, FVG_FONT_SANS, title_size, 0, (float)h * 0.40f, (float)w, 40 * d,
+                    title, 0xFF881111, true);
     char hits[64];
     snprintf(hits, sizeof(hits), "Hits logged: %d", s->estes_hit_count);
     fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,16), 0, (float)h * 0.40f + 48 * d, (float)w, 30 * d, hits, 0xFF2A6A78, false);
@@ -1125,18 +1177,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     const float top_inset = layout.top_inset;
     Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
 
-    if (s.ui.estes_mode) {
-        draw_estes(&ui, &s, w, h);
-        pthread_mutex_lock(&g_state_mutex);
-        memcpy(g_app.widgets, rects, sizeof(rects));
-        pthread_mutex_unlock(&g_state_mutex);
-        if (s.video_recording_active && s.video_source == FV_VIDEO_VIEWFINDER) {
-            fv_video_recorder_feed_frame(canvas.px, w, h, canvas.stride, FV_VIDEO_VIEWFINDER);
-        }
-        return;
-    }
-
-    if (s.ui.playback_visible) {
+    if (s.ui.playback_visible && !s.ui.estes_mode) {
         FvLocalPlayerSnapshot playback;
         fv_local_player_snapshot(&playback);
         draw_local_playback(&ui, &playback, &layout);
@@ -1147,8 +1188,18 @@ static void render_frame(ANativeWindow_Buffer *buf) {
         return;
     }
 
+    const bool clean_capture = s.video_recording_active && s.video_source == FV_VIDEO_CAMERA_ONLY;
+    if (clean_capture) {
+        draw_filtered_camera(&canvas, &s);
+        fv_video_recorder_feed_frame(canvas.px, w, h, canvas.stride, FV_VIDEO_CAMERA_ONLY);
+    }
+    if (s.ui.estes_mode) {
+        draw_estes(&ui, &s, w, h);
+        goto publish_frame;
+    }
+
     /* 1. Camera Viewfinder Background */
-    draw_viewfinder_background(&canvas, &s, w, h, d, now);
+    draw_viewfinder_background(&canvas, &s, w, h, d, now, clean_capture);
 
     /* 2. Top Status Header HUD */
     draw_top_header(&ui, &s, ui.x0, top_inset, ui.w, layout.header_h, now);
@@ -1178,7 +1229,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     draw_perimeter_badges(&ui, &s, layout.badge_y, layout.badge_h, now);
 
     /* 5-7. The shutter dock stays visible while the drawer is open. */
-    if (!s.ui.controls_visible) {
+    if (rects[W_CAM_PREVIEW].visible) {
         draw_floating_visualizer(&ui, &s, ui.x0, layout.vis_top, ui.w, layout.vis_h, now);
     }
     draw_bottom_action_bar(&ui, &s, ui.x0, layout.bottom_bar_y, ui.w, layout.bottom_bar_h, now);
@@ -1217,6 +1268,7 @@ static void render_frame(ANativeWindow_Buffer *buf) {
         if (s.ui.help_visible) draw_help_overlay(&ui, &layout, (float)h);
     }
 
+publish_frame:
     /* Save widget hit rects */
     pthread_mutex_lock(&g_state_mutex);
     memcpy(g_app.widgets, rects, sizeof(rects));
@@ -1225,8 +1277,8 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     pthread_mutex_unlock(&g_state_mutex);
 
     /* Feed video recorder frame if active */
-    if (s.video_recording_active && s.video_source == FV_VIDEO_VIEWFINDER) {
-        fv_video_recorder_feed_frame(canvas.px, w, h, canvas.stride, FV_VIDEO_VIEWFINDER);
+    if (s.video_recording_active && s.video_source == FV_VIDEO_SCREEN) {
+        fv_video_recorder_feed_frame(canvas.px, w, h, canvas.stride, FV_VIDEO_SCREEN);
     }
 }
 
@@ -1345,6 +1397,7 @@ static void handle_widget(WidgetId id) {
         case W_NOISE: g_app.noise_fx = !g_app.noise_fx; break;
         case W_REV: g_app.reverse_fx = !g_app.reverse_fx; break;
         case W_SESS: {
+            clear_clean_start_locked();
             g_app.evidence_page=0;
             refresh_evidence_locked();
             g_app.ui.evidence_visible = true;
@@ -1382,10 +1435,7 @@ static void handle_widget(WidgetId id) {
         case W_REMPOD: g_app.rem_pod_active = !g_app.rem_pod_active; break;
         case W_PAN: g_app.spatial_pan = !g_app.spatial_pan; break;
         case W_ESTES:
-            if (g_app.video_recording_active && g_app.video_source == FV_VIDEO_CAMERA_ONLY) {
-                set_status_locked("Stop the clean recording before entering Estes mode");
-                break;
-            }
+            clear_clean_start_locked();
             g_app.ui.estes_mode = true;
             g_app.vocal_filter = true;
             break;
@@ -1405,6 +1455,7 @@ static void handle_widget(WidgetId id) {
                 }
                 set_status_locked("Camera preview ON");
             } else {
+                clear_clean_start_locked();
                 g_app.cam_filter = FV_CAM_FILTER_OFF;
                 g_app.cam_hud_active = false;
                 set_status_locked("Camera preview OFF");
@@ -1494,73 +1545,42 @@ static void handle_widget(WidgetId id) {
             break;
         }
         case W_CAPTURE_CLEAN:
-        case W_CAPTURE_SCREEN:
+        case W_CAPTURE_SCREEN: {
+            const FvVideoFrameSource source = id == W_CAPTURE_CLEAN ? FV_VIDEO_CAMERA_ONLY : FV_VIDEO_SCREEN;
+            if (g_app.video_source == source) break;
             if (g_app.video_recording_active) {
                 set_status_locked("Stop recording before changing the capture mode");
                 break;
             }
-            if (id == W_CAPTURE_CLEAN) {
-                g_app.video_source = FV_VIDEO_CAMERA_ONLY;
-                set_status_locked("Clean MP4 saves the camera view and session audio");
-            } else {
-                g_app.video_source = FV_VIDEO_VIEWFINDER;
-                set_status_locked("Screen MP4 includes the FieldVox controls and overlays");
-            }
+            clear_clean_start_locked();
+            g_app.video_source = source;
+            set_status_locked(source == FV_VIDEO_CAMERA_ONLY ? "Clean MP4 saves the camera view and session audio"
+                                                              : "Screen MP4 includes the FieldVox controls and overlays");
             break;
+        }
         case W_RECORD: {
-            if (!fv_video_recorder_is_active()) {
-                const bool camera_allowed = fv_android_has_permission(g_app.activity, "android.permission.CAMERA");
-                if (!camera_allowed ||
-                    !fv_android_has_permission(g_app.activity, "android.permission.RECORD_AUDIO")) {
-                    fv_android_request_runtime_permissions(g_app.activity);
-                }
-                const bool clean = g_app.video_source == FV_VIDEO_CAMERA_ONLY;
-                if (clean && (g_app.cam_filter == FV_CAM_FILTER_OFF || !camera_allowed ||
-                              !fv_camera_is_healthy(2000))) {
-                    set_status_locked("Clean MP4 needs a live camera • try Screen MP4");
-                    break;
-                }
-                char dir[512];
-                const char *base = g_app.activity->externalDataPath ? g_app.activity->externalDataPath : g_app.activity->internalDataPath;
-                snprintf(dir, sizeof(dir), "%s/fieldvox-recordings", base ? base : "/sdcard");
-                mkdir(dir, 0755);
-                char path[512];
-                snprintf(path, sizeof(path), "%s/session-%lld.mp4", dir, get_wall_time_ms());
-
-                bool land = false;
-                pthread_mutex_lock(&g_window_mutex);
-                ANativeWindow *win = g_app.window;
-                if (win) {
-                    ANativeWindow_acquire(win);
-                    land = ANativeWindow_getWidth(win) > ANativeWindow_getHeight(win);
-                    ANativeWindow_release(win);
-                }
-                pthread_mutex_unlock(&g_window_mutex);
-
-                const int vw = land ? 1280 : 720;
-                const int vh = land ? 720 : 1280;
-                if (fv_video_recorder_start(path, vw, vh, SAMPLE_RATE, 1, g_app.video_source)) {
-                    g_app.video_recording_active = true;
-                    snprintf(g_app.video_artifact, sizeof(g_app.video_artifact), "%s", path);
-                    pthread_mutex_lock(&g_record_mutex);
-                    fv_marker_recorder_reset(&g_vid_markers);
-                    g_vid_rec_start_ms = get_time_ms();
-                    g_vid_markers_active = true;
-                    pthread_mutex_unlock(&g_record_mutex);
-                    set_status_locked(clean ? "Clean MP4 recording started" : "Screen MP4 recording started");
-                } else {
-                    set_status_locked("Video recording failed to start");
-                }
-            } else {
+            if (g_app.video_recording_active) {
                 char saved_path[512] = {0};
                 stop_video_recording_locked(saved_path, sizeof(saved_path));
-                char vmsg[256];
-                if (saved_path[0] != '\0') {
-                    snprintf(vmsg, sizeof(vmsg), "Video saved: %s", saved_path);
+                set_status_locked(saved_path[0] ? "Video saved to Library" : "Video recording stopped");
+            } else if (g_app.clean_start_deadline_ms) {
+                clear_clean_start_locked();
+                set_status_locked("Recording request canceled");
+            } else if (g_app.video_source == FV_VIDEO_SCREEN) {
+                start_video_recording_locked();
+            } else if (g_app.cam_filter == FV_CAM_FILTER_OFF) {
+                set_status_locked("Turn on the camera or choose Screen MP4");
+            } else {
+                const bool allowed = fv_android_has_permission(g_app.activity, "android.permission.CAMERA");
+                if (allowed && fv_camera_has_frame(2000)) {
+                    start_video_recording_locked();
                 } else {
-                    snprintf(vmsg, sizeof(vmsg), "Video recording stopped");
+                    g_app.awaiting_camera_permission = !allowed;
+                    g_app.clean_start_deadline_ms = get_time_ms() + (allowed ? 7000L : 30000L);
+                    set_status_locked(allowed ? "Camera starting • tap the shutter to cancel"
+                                              : "Allow camera access to start Clean MP4");
+                    if (!allowed) fv_android_request_permission(g_app.activity, "android.permission.CAMERA", 61);
                 }
-                set_status_locked(vmsg);
             }
             break;
         }
@@ -1690,6 +1710,7 @@ static void handle_tap(float x, float y_screen) {
             if (g_app.video_recording_active) {
                 set_status_locked("Stop recording before local playback");
             } else {
+                clear_clean_start_locked();
                 const bool is_mp4 = strcmp(g_app.evidence[idx].mime, "video/mp4") == 0;
                 snprintf(open_path, sizeof(open_path), "%s", g_app.evidence[idx].path);
                 open_muted = g_app.audio_muted;
@@ -2529,6 +2550,18 @@ static void *camera_thread_func(void *arg) {
         } else if (fv_camera_is_active()) {
             fv_camera_stop();
         }
+        pthread_mutex_lock(&g_state_mutex);
+        if (g_app.clean_start_deadline_ms) {
+            if (get_time_ms() >= g_app.clean_start_deadline_ms) {
+                set_status_locked(g_app.awaiting_camera_permission ? "Clean MP4 needs camera permission"
+                                                                   : "Camera did not start • try Screen MP4");
+                clear_clean_start_locked();
+            } else if (atomic_load(&g_app.resumed) && g_app.window_focused &&
+                       !g_app.awaiting_camera_permission && has_perm && fv_camera_has_frame(2000)) {
+                start_video_recording_locked();
+            }
+        }
+        pthread_mutex_unlock(&g_state_mutex);
         usleep(250000);
     }
     fv_camera_stop();
@@ -2608,6 +2641,7 @@ static void onPause(ANativeActivity *activity) {
     g_app.monitor_active = false;
     g_app.torch_active = false;
     fv_hold_cancel(&g_app.vis_hold);
+    if (!g_app.awaiting_camera_permission) clear_clean_start_locked();
     if (g_app.video_recording_active) {
         stop_video_recording_locked(NULL, 0);
     }
@@ -2617,7 +2651,31 @@ static void onPause(ANativeActivity *activity) {
 static void onResume(ANativeActivity *activity) {
     ANativeActivity_setWindowFlags(activity, AWINDOW_FLAG_KEEP_SCREEN_ON, 0u);
     atomic_store(&g_app.resumed, true);
-    fv_android_request_runtime_permissions(activity);
+}
+
+static void onStop(ANativeActivity *activity) {
+    (void)activity;
+    pthread_mutex_lock(&g_state_mutex);
+    clear_clean_start_locked();
+    pthread_mutex_unlock(&g_state_mutex);
+}
+
+static void onWindowFocusChanged(ANativeActivity *activity, int focused) {
+    pthread_mutex_lock(&g_state_mutex);
+    g_app.window_focused = focused != 0;
+    if (focused && g_app.awaiting_camera_permission) {
+        g_app.awaiting_camera_permission = false;
+        if (fv_android_has_permission(activity, "android.permission.CAMERA")) {
+            g_app.clean_start_deadline_ms = get_time_ms() + 7000L;
+            set_status_locked("Camera starting • tap the shutter to cancel");
+        } else {
+            clear_clean_start_locked();
+            set_status_locked("Clean MP4 needs camera permission");
+        }
+    } else if (!focused && !g_app.awaiting_camera_permission) {
+        clear_clean_start_locked();
+    }
+    pthread_mutex_unlock(&g_state_mutex);
 }
 
 static void onDestroy(ANativeActivity *activity) {
@@ -2730,6 +2788,8 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     activity->callbacks->onConfigurationChanged = onConfigurationChanged;
     activity->callbacks->onPause = onPause;
     activity->callbacks->onResume = onResume;
+    activity->callbacks->onStop = onStop;
+    activity->callbacks->onWindowFocusChanged = onWindowFocusChanged;
     activity->callbacks->onDestroy = onDestroy;
 
     fv_local_player_init(activity->vm);

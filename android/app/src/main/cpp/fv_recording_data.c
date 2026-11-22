@@ -359,7 +359,7 @@ bool fv_timeline_save(const char *recording, const FvTimeline *timeline) {
 
 void fv_marker_recorder_reset(FvMarkerRecorder *rec) {
     if (!rec) return;
-    *rec = (FvMarkerRecorder){.last_auto_ms = -1};
+    *rec = (FvMarkerRecorder){.last_fragment_ms = -1, .last_rem_pod_ms = -1};
 }
 
 bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, unsigned kinds) {
@@ -368,10 +368,13 @@ bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, unsign
         (kinds & ~(automatic | FV_MARK_HIT)) != 0u)
         return false;
     FvTimeline *timeline = &rec->timeline;
-    const int64_t min_gap_ms = kinds & FV_MARK_FRAGMENT ? 500 : 750;
-    if ((kinds & automatic) && rec->last_auto_ms >= 0 &&
-        elapsed_ms - rec->last_auto_ms < min_gap_ms) kinds &= ~automatic;
-    if (!kinds) return false;
+    const bool new_fragment = (kinds & FV_MARK_FRAGMENT) &&
+        (rec->last_fragment_ms < 0 || elapsed_ms - rec->last_fragment_ms >= 500);
+    const bool new_rem_pod = (kinds & FV_MARK_REM_POD) &&
+        (rec->last_rem_pod_ms < 0 || elapsed_ms - rec->last_rem_pod_ms >= 750);
+    const size_t pos = timeline_position(timeline, elapsed_ms);
+    const bool coincident = pos < timeline->count && timeline->markers[pos].ms == elapsed_ms;
+    if (!(kinds & FV_MARK_HIT) && !new_fragment && !new_rem_pod && !coincident) return false;
 
     if (!fv_timeline_add(timeline, elapsed_ms, kinds)) {
         if (!(kinds & FV_MARK_HIT)) return false;
@@ -384,7 +387,8 @@ bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, unsign
         memmove(oldest, oldest + 1, (timeline->count - oldest_auto) * sizeof(*oldest));
         if (!fv_timeline_add(timeline, elapsed_ms, kinds)) return false;
     }
-    if (kinds & automatic) rec->last_auto_ms = elapsed_ms;
+    if (kinds & FV_MARK_FRAGMENT) rec->last_fragment_ms = elapsed_ms;
+    if (kinds & FV_MARK_REM_POD) rec->last_rem_pod_ms = elapsed_ms;
     return true;
 }
 

@@ -253,6 +253,19 @@ static void test_ui_controller_and_layout(void) {
         }
     }
 
+    /* Short landscape fits the recording dock beside the shutter and leaves the HUD clear. */
+    capture = (FvUiState){0};
+    fv_ui_layout_active(rects, 1920, 720, 3.0f, &capture, 0, is_video, &layout);
+    assert(layout.vis_top >= layout.badge_y + layout.badge_h && rects[W_CAM_PREVIEW].visible);
+    assert(rects[W_CAPTURE_CLEAN].x + rects[W_CAPTURE_CLEAN].w < rects[W_RECORD].x);
+    assert(rects[W_RECORD].x + rects[W_RECORD].w < rects[W_CAPTURE_SCREEN].x);
+    capture.controls_visible = true;
+    fv_ui_layout_active(rects, 1920, 720, 3.0f, &capture, 0, is_video, &layout);
+    const WidgetRect advanced_button = rects[W_ADVANCED];
+    assert(advanced_button.h >= 12.0f * 3.0f);
+    assert(fv_ui_resolve_tap(rects, advanced_button.x + advanced_button.w / 2,
+                            advanced_button.y + advanced_button.h / 2) == W_ADVANCED);
+
     /* Landscape with standard VOX drawer & advanced drawer open */
     FvUiState st = {.controls_visible = true, .advanced_controls = false};
     fv_ui_layout_active(rects, 2400, 1080, 3.0f, &st, 0, is_video, &layout);

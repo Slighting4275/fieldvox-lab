@@ -37,14 +37,28 @@ static struct {
     atomic_bool running;
     uint64_t generation;
     bool pending_open, pending_close, desired_playing, desired_muted;
-    bool scrub_resume, add_mark;
-    int64_t pending_seek;
+    bool scrub_resume, add_mark, timeline_readable;
+    int64_t pending_seek, marker_target_ms;
     char path[512];
     FvLocalPlayerSnapshot state;
     uint32_t *pixels;
     int pixel_w, pixel_h;
     WaveformJob analysis;
-} p = {.mutex=PTHREAD_MUTEX_INITIALIZER,.pending_seek=-1};
+} p = {.mutex=PTHREAD_MUTEX_INITIALIZER,.pending_seek=-1,.marker_target_ms=-1};
+
+/* Caller holds p.mutex. A normal seek clears the marker selection. */
+static void queue_seek_locked(int64_t ms, bool marker) {
+    p.pending_seek = ms;
+    p.marker_target_ms = marker ? ms : -1;
+}
+
+static int64_t marker_position_locked(bool *selected) {
+    const int64_t position = p.pending_seek >= 0 ? p.pending_seek : p.state.position_ms;
+    *selected = p.marker_target_ms >= 0 &&
+                (p.pending_seek == p.marker_target_ms || !p.desired_playing ||
+                 llabs(position - p.marker_target_ms) <= 250);
+    return *selected ? p.marker_target_ms : position;
+}
 
 typedef struct {
     jclass cls, pfd_cls;
@@ -237,7 +251,7 @@ static bool open_media(JNIEnv *env,const PlayerMethods *m,const char *path,uint6
     if (generation!=p.generation || p.pending_close) { pthread_mutex_unlock(&p.mutex);return false; }
     p.state.ready=true;p.state.duration_ms=duration;p.state.video=width>0 && height>0;
     p.state.timeline=timeline;
-    p.state.timeline_readable=marks_ok;
+    p.timeline_readable=marks_ok;
     snprintf(p.state.status,sizeof(p.state.status),"%s",marks_ok ? "" : "Timeline could not be read");
     snprintf(p.analysis.path,sizeof(p.analysis.path),"%s",path);p.analysis.generation=p.generation;
     p.analysis.fallback_duration_us=(int64_t)duration*1000LL;
@@ -318,13 +332,14 @@ static void *player_worker(void *arg) {
                 }
                 p.state.position_ms=fv_playback_clamp_seek(position,duration);
                 p.state.playing=playing;p.state.muted=muted;
-                if (playing && seek<0 && p.state.marker_seek_ms>=0 &&
-                    p.state.position_ms>p.state.marker_seek_ms+250)
-                    p.state.marker_seek_ms=-1;
-                if (!playing && desired && duration-p.state.position_ms<=100) {
+                if (playing && seek<0 && p.pending_seek<0 && p.marker_target_ms>=0 &&
+                    p.state.position_ms>p.marker_target_ms+250)
+                    p.marker_target_ms=-1;
+                if (!playing && desired && seek<0 && p.pending_seek<0 &&
+                    duration-p.state.position_ms<=100) {
                     p.desired_playing=false;
                     was_playing=false;
-                    p.state.marker_seek_ms=-1;
+                    queue_seek_locked(-1,false);
                     LOGI("Local playback completed");
                 }
                 if (mark) {
@@ -339,7 +354,6 @@ static void *player_worker(void *arg) {
                     if (generation==p.generation && !p.pending_close) {
                         if (saved) {
                             p.state.timeline=revised;
-                            p.state.marker_seek_ms=-1;
                             p.state.status[0]='\0';
                         } else {
                             snprintf(p.state.status,sizeof(p.state.status),"Bookmark save failed • check free storage");
@@ -368,16 +382,16 @@ bool fv_local_player_init(JavaVM *vm) {
 }
 void fv_local_player_shutdown(void) {
     if (p.started) { atomic_store(&p.running,false);pthread_join(p.thread,NULL);p.started=false; }
-    pthread_mutex_lock(&p.mutex);p.state=(FvLocalPlayerSnapshot){0};p.pending_open=p.pending_close=false;p.pending_seek=-1;pthread_mutex_unlock(&p.mutex);
+    pthread_mutex_lock(&p.mutex);p.state=(FvLocalPlayerSnapshot){0};p.pending_open=p.pending_close=false;queue_seek_locked(-1,false);pthread_mutex_unlock(&p.mutex);
 }
 void fv_local_player_open(const char *path,bool muted) {
     if (!path || path[0]!='/' || strlen(path)>=sizeof(p.path)) return;
     pthread_mutex_lock(&p.mutex);
-    p.generation++;p.state=(FvLocalPlayerSnapshot){.visible=true,.muted=muted,.marker_seek_ms=-1};
+    p.generation++;p.state=(FvLocalPlayerSnapshot){.visible=true,.muted=muted};
     snprintf(p.path,sizeof(p.path),"%s",path);
     const char *name=strrchr(path,'/');snprintf(p.state.name,sizeof(p.state.name),"%s",name ? name+1 : path);
     snprintf(p.state.status,sizeof(p.state.status),"Loading local recording…");
-    p.pending_open=true;p.pending_close=false;p.pending_seek=-1;p.add_mark=false;
+    p.pending_open=true;p.pending_close=false;queue_seek_locked(-1,false);p.add_mark=false;
     p.desired_playing=true;p.desired_muted=muted;
     if (!p.started || p.backend_failed) { p.state.error=true;p.pending_open=false;snprintf(p.state.status,sizeof(p.state.status),"Local player could not start"); }
     pthread_mutex_unlock(&p.mutex);
@@ -391,10 +405,8 @@ void fv_local_player_pause(void) {
 void fv_local_player_toggle(void) {
     pthread_mutex_lock(&p.mutex);
     if (p.state.ready) {
-        if (!p.desired_playing && p.state.position_ms>=p.state.duration_ms-100) {
-            p.pending_seek=0;
-            p.state.marker_seek_ms=-1;
-        }
+        if (!p.desired_playing && p.state.position_ms>=p.state.duration_ms-100)
+            queue_seek_locked(0,false);
         p.desired_playing=!p.desired_playing;
     }
     pthread_mutex_unlock(&p.mutex);
@@ -403,8 +415,7 @@ void fv_local_player_mute(void) { pthread_mutex_lock(&p.mutex);p.desired_muted=!
 void fv_local_player_seek(int64_t ms) {
     pthread_mutex_lock(&p.mutex);
     if (p.state.ready) {
-        p.pending_seek=fv_playback_clamp_seek(ms,p.state.duration_ms);
-        p.state.marker_seek_ms=-1;
+        queue_seek_locked(fv_playback_clamp_seek(ms,p.state.duration_ms),false);
     }
     pthread_mutex_unlock(&p.mutex);
 }
@@ -412,8 +423,7 @@ void fv_local_player_seek_delta(int64_t delta_ms) {
     pthread_mutex_lock(&p.mutex);
     if (p.state.ready) {
         const int64_t base = p.pending_seek >= 0 ? p.pending_seek : p.state.position_ms;
-        p.pending_seek = fv_playback_clamp_seek(base + delta_ms, p.state.duration_ms);
-        p.state.marker_seek_ms = -1;
+        queue_seek_locked(fv_playback_clamp_seek(base + delta_ms,p.state.duration_ms),false);
     }
     pthread_mutex_unlock(&p.mutex);
 }
@@ -425,27 +435,36 @@ void fv_local_player_scrub_end(void) {
 }
 void fv_local_player_bookmark(void) {
     pthread_mutex_lock(&p.mutex);
-    p.add_mark=p.state.ready && p.state.timeline_readable;
+    p.add_mark=p.state.ready && p.timeline_readable;
     pthread_mutex_unlock(&p.mutex);
 }
 void fv_local_player_jump_mark(bool forward) {
     pthread_mutex_lock(&p.mutex);
     if (p.state.ready) {
-        int64_t base=p.pending_seek>=0 ? p.pending_seek : p.state.position_ms;
-        if (p.state.marker_seek_ms>=0 &&
-            (!p.desired_playing || llabs(base-p.state.marker_seek_ms)<=250))
-            base=p.state.marker_seek_ms;
+        bool selected;
+        const int64_t base=marker_position_locked(&selected);
         const FvTimelineMarker *marker=fv_timeline_step(&p.state.timeline,base,forward);
         if (marker) {
-            p.pending_seek=marker->ms;
-            p.state.marker_seek_ms=marker->ms;
+            queue_seek_locked(marker->ms,true);
             p.state.status[0]='\0';
         }
     }
     pthread_mutex_unlock(&p.mutex);
 }
 bool fv_local_player_active(void) { pthread_mutex_lock(&p.mutex);const bool active=p.state.visible;pthread_mutex_unlock(&p.mutex);return active; }
-void fv_local_player_snapshot(FvLocalPlayerSnapshot *out) { if (out) { pthread_mutex_lock(&p.mutex);*out=p.state;pthread_mutex_unlock(&p.mutex); } }
+void fv_local_player_snapshot(FvLocalPlayerSnapshot *out) {
+    if (!out) return;
+    pthread_mutex_lock(&p.mutex);
+    *out=p.state;
+    if (out->timeline.count) {
+        bool selected;
+        const int64_t position=marker_position_locked(&selected);
+        const FvTimelineMarker *last=fv_timeline_step(&out->timeline,position+1,false);
+        out->cue=last ? *last : out->timeline.markers[0];
+        out->cue_type=selected ? FV_CUE_SELECTED : (last ? FV_CUE_LAST : FV_CUE_NEXT);
+    }
+    pthread_mutex_unlock(&p.mutex);
+}
 void fv_local_player_draw_video(FvCanvas *c) {
     if (!c) return;
     pthread_mutex_lock(&p.mutex);

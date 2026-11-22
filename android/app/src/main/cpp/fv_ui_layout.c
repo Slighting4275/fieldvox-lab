@@ -77,10 +77,10 @@ static void layout_perimeter_badges(WidgetRect rects[static W_COUNT], float x, f
 static void layout_floating_visualizer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
     const float inset = 40.0f * d;
     const float plot_y = y + 8.0f * d;
-    const float plot_h = fmaxf(12.0f * d, h - 46.0f * d);
+    const float footer_h = fminf(30.0f * d, h * 0.42f);
+    const float plot_h = fmaxf(12.0f * d, h - footer_h - 16.0f * d);
     const float plot_w = w - inset * 2.0f;
     const float arrow_h = fminf(44.0f * d, h);
-    const float footer_h = 30.0f * d;
     const float footer_y = y + h - footer_h - 2.0f * d;
     fv_ui_place(rects, W_CAM_PREVIEW, x + inset, plot_y, plot_w, plot_h);
     fv_ui_place(rects, W_VIS_PREV, x + 2.0f * d, y + (h - arrow_h) * 0.5f, 34.0f * d, arrow_h);
@@ -88,7 +88,8 @@ static void layout_floating_visualizer(WidgetRect rects[static W_COUNT], float x
     fv_ui_place(rects, W_VIS_COLOR, x + inset + plot_w * 0.62f, footer_y, plot_w * 0.38f, footer_h);
 }
 
-static void layout_bottom_action_bar(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
+static void layout_bottom_action_bar(WidgetRect rects[static W_COUNT], float x, float y, float w, float h,
+                                     float d, bool inline_modes) {
     const float cx = x + w * 0.5f;
     const float cy = y + h * 0.5f;
     const float r_outer = (h >= 52.0f * d ? 28.0f : 21.0f) * d;
@@ -97,21 +98,23 @@ static void layout_bottom_action_bar(WidgetRect rects[static W_COUNT], float x, 
     const float btn_y = cy - btn_h * 0.5f;
     const float side_clearance = r_outer + 8.0f * d;
     const float avail_w = (w * 0.5f) - side_clearance;
-    const float btn_w = (avail_w - gap) * 0.5f;
     const float hit_pad = 6.0f * d;
 
-    fv_ui_place(rects, W_SESS, x, btn_y, btn_w, btn_h);
-    fv_ui_place(rects, W_MARK_HIT, x + btn_w + gap, btn_y, btn_w, btn_h);
     fv_ui_place(rects, W_RECORD, cx - r_outer - hit_pad, cy - r_outer - hit_pad,
                 (r_outer + hit_pad) * 2.0f, (r_outer + hit_pad) * 2.0f);
-    fv_ui_place(rects, W_CAM_TINT, cx + side_clearance, btn_y, btn_w, btn_h);
-    fv_ui_place(rects, W_CTRL, cx + side_clearance + btn_w + gap, btn_y, btn_w, btn_h);
+    const WidgetId left[] = {W_SESS, W_MARK_HIT, W_CAPTURE_CLEAN};
+    const WidgetId right[] = {W_CAM_TINT, W_CTRL};
+    const WidgetId inline_right[] = {W_CAPTURE_SCREEN, W_CAM_TINT, W_CTRL};
+    const size_t count = inline_modes ? 3u : 2u;
+    layout_row(rects, x, btn_y, avail_w, btn_h, gap, left, count);
+    layout_row(rects, cx + side_clearance, btn_y, avail_w, btn_h, gap,
+               inline_modes ? inline_right : right, count);
 }
 
 static void layout_vox_drawer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
     fv_ui_place(rects, W_CLOSE_DRAWER, x + w - 42.0f * d, y + 4.0f * d, 36.0f * d, 32.0f * d);
-    const bool wide = w > 600.0f * d;
-    const float row = (h - 44.0f * d) / (wide ? 4.0f : 6.0f);
+    const bool wide = w > 600.0f * d || (h < 216.0f * d && w >= 440.0f * d);
+    const float row = fmaxf(0.0f, h - 44.0f * d) / (wide ? 4.0f : 6.0f);
     const float slider_w = wide ? (w - 24.0f * d) * 0.5f : w - 16.0f * d;
     const float slider_x = x + 8.0f * d, second_x = slider_x + slider_w + 8.0f * d;
     float ry = y + 40.0f * d;
@@ -127,9 +130,10 @@ static void layout_vox_drawer(WidgetRect rects[static W_COUNT], float x, float y
 
     const WidgetId row_a[3] = {W_START, W_NOISE, W_VOICE_DUCK};
     const WidgetId row_b[4] = {W_AUTO_GATE, W_RADIO_TUNER, W_ADVANCED, W_SOURCE_MODE};
-    layout_row(rects, x + 8.0f * d, ry + 4.0f * d, w - 16.0f * d, row - 8.0f * d, 4.0f * d, row_a, 3u);
+    const float inset = fminf(4.0f * d, row * 0.15f);
+    layout_row(rects, x + 8.0f * d, ry + inset, w - 16.0f * d, row - 2.0f * inset, 4.0f * d, row_a, 3u);
     ry += row;
-    layout_row(rects, x + 8.0f * d, ry + 4.0f * d, w - 16.0f * d, row - 8.0f * d, 4.0f * d, row_b, 4u);
+    layout_row(rects, x + 8.0f * d, ry + inset, w - 16.0f * d, row - 2.0f * inset, 4.0f * d, row_b, 4u);
 }
 
 static void layout_advanced_drawer(WidgetRect rects[static W_COUNT], float x, float y, float w, float h, float d) {
@@ -177,18 +181,19 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
     const float badge_h = (landscape ? 24.0f : 30.0f) * d;
     const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
     const float bottom_bar_y = (float)screen_h - bottom_inset - bottom_bar_h;
-    const float capture_h = 48.0f * d;
+    const bool inline_modes = landscape && (float)screen_h < 300.0f * d && ui_w >= 370.0f * d;
+    const float capture_h = inline_modes ? 0.0f : 48.0f * d;
     const float capture_y = bottom_bar_y - 8.0f * d - capture_h;
     const float capture_w = fminf(ui_w, 214.0f * d);
-    const float max_vis_span = fmaxf(44.0f * d, capture_y - (badge_y + badge_h + 12.0f * d));
+    const float vis_bottom = inline_modes ? capture_y : capture_y - 8.0f * d;
+    const float vis_min_y = badge_y + badge_h + 6.0f * d;
+    const float max_vis_span = vis_bottom - vis_min_y;
     const float base_vis_h = (vis_layout == FV_VIS_LAYOUT_COMPACT)
                                  ? (landscape ? 52.0f : 76.0f) * d
                                  : (landscape ? 74.0f : 130.0f) * d;
-    const float vis_h = fminf(base_vis_h, max_vis_span);
-    const float vis_top = (vis_layout == FV_VIS_LAYOUT_TOP)
-                              ? (badge_y + badge_h + 6.0f * d)
-                              : (capture_y - vis_h - 8.0f * d);
-    const float drawer_bottom = capture_y - 8.0f * d;
+    const float vis_h = max_vis_span >= 40.0f * d ? fminf(base_vis_h, max_vis_span) : 0.0f;
+    const float vis_top = vis_layout == FV_VIS_LAYOUT_TOP ? vis_min_y : vis_bottom - vis_h;
+    const float drawer_bottom = vis_bottom;
     const float drawer_h = fminf(drawer_bottom - top_inset - 12.0f * d,
                                  (advanced_controls ? (landscape ? 216.0f : 280.0f)
                                                     : (landscape ? 260.0f : 380.0f)) * d);
@@ -196,12 +201,14 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
 
     layout_top_header(rects, ui_x0, top_inset, ui_w, header_h, d);
     layout_perimeter_badges(rects, ui_x0, badge_y, ui_w, badge_h, d);
-    layout_bottom_action_bar(rects, ui_x0, bottom_bar_y, ui_w, bottom_bar_h, d);
-    const WidgetId capture_ids[] = {W_CAPTURE_CLEAN, W_CAPTURE_SCREEN};
-    layout_row(rects, ui_x0 + (ui_w - capture_w) * 0.5f, capture_y, capture_w,
-               capture_h, 4.0f * d, capture_ids, 2u);
+    layout_bottom_action_bar(rects, ui_x0, bottom_bar_y, ui_w, bottom_bar_h, d, inline_modes);
+    if (!inline_modes) {
+        const WidgetId capture_ids[] = {W_CAPTURE_CLEAN, W_CAPTURE_SCREEN};
+        layout_row(rects, ui_x0 + (ui_w - capture_w) * 0.5f, capture_y, capture_w,
+                   capture_h, 4.0f * d, capture_ids, 2u);
+    }
     if (!controls_visible) {
-        layout_floating_visualizer(rects, ui_x0, vis_top, ui_w, vis_h, d);
+        if (vis_h > 0.0f) layout_floating_visualizer(rects, ui_x0, vis_top, ui_w, vis_h, d);
     } else if (advanced_controls) {
         layout_advanced_drawer(rects, ui_x0, drawer_y, ui_w, drawer_h, d);
     } else {

@@ -101,11 +101,13 @@ int main(void) {
     fv_marker_recorder_reset(&recorder);
     assert(!fv_marker_recorder_record(&recorder, -10, FV_MARK_FRAGMENT));
     assert(fv_marker_recorder_record(&recorder, 1200, FV_MARK_FRAGMENT));
-    assert(!fv_marker_recorder_record(&recorder, 1500, FV_MARK_REM_POD));
+    assert(fv_marker_recorder_record(&recorder, 1500, FV_MARK_REM_POD));
     assert(fv_marker_recorder_record(&recorder, 1500, FV_MARK_HIT | FV_MARK_REM_POD));
+    assert(!fv_marker_recorder_record(&recorder, 1600, FV_MARK_REM_POD | FV_MARK_FRAGMENT));
     assert(fv_marker_recorder_record(&recorder, 1950, FV_MARK_REM_POD | FV_MARK_HIT));
     assert(recorder.timeline.count == 3u);
-    assert(recorder.timeline.markers[1].ms == 1500 && recorder.timeline.markers[1].kinds == FV_MARK_HIT);
+    assert(recorder.timeline.markers[1].ms == 1500 &&
+           recorder.timeline.markers[1].kinds == (FV_MARK_REM_POD | FV_MARK_HIT));
     assert(recorder.timeline.markers[2].kinds == (FV_MARK_REM_POD | FV_MARK_HIT));
     assert(fv_timeline_save(path, &recorder.timeline));
     assert(fv_timeline_load(path, &timeline) && timeline.count == 3u);

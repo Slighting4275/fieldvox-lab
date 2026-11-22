@@ -11,7 +11,7 @@ extern "C" {
 #endif
 
 typedef enum {
-    FV_VIDEO_VIEWFINDER,
+    FV_VIDEO_SCREEN,
     FV_VIDEO_CAMERA_ONLY,
 } FvVideoFrameSource;
 

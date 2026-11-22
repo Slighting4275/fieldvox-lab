@@ -8,11 +8,12 @@
 typedef struct {
     bool visible, ready, playing, video, muted, error, waveform_ready;
     bool waveform_unavailable;
-    bool timeline_readable;
-    int64_t position_ms, duration_ms, marker_seek_ms;
+    int64_t position_ms, duration_ms;
     char name[256], status[128];
     float waveform[FV_PLAYBACK_BINS];
     FvTimeline timeline;
+    FvTimelineMarker cue;
+    enum { FV_CUE_NONE, FV_CUE_SELECTED, FV_CUE_LAST, FV_CUE_NEXT } cue_type;
     uint64_t video_frames;
 } FvLocalPlayerSnapshot;
 bool fv_local_player_init(JavaVM *vm);

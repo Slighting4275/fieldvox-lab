@@ -59,7 +59,7 @@ bool fv_timeline_save(const char *recording, const FvTimeline *timeline);
 
 typedef struct {
     FvTimeline timeline;
-    int64_t last_auto_ms;
+    int64_t last_fragment_ms, last_rem_pod_ms;
 } FvMarkerRecorder;
 void fv_marker_recorder_reset(FvMarkerRecorder *rec);
 bool fv_marker_recorder_record(FvMarkerRecorder *rec, int64_t elapsed_ms, unsigned kinds);

@@ -509,19 +509,26 @@ bool fv_camera_is_active(void) {
     return active;
 }
 
-bool fv_camera_is_healthy(uint64_t max_age_ms) {
-    pthread_mutex_lock(&s_camera.mutex);
-    if (!s_camera.active || s_camera.failed) {
-        pthread_mutex_unlock(&s_camera.mutex);
-        return false;
-    }
+static bool camera_healthy_locked(uint64_t max_age_ms) {
+    if (!s_camera.active || s_camera.failed) return false;
     const uint64_t now = current_camera_time_ms();
     const uint64_t elapsed = (now > s_camera.last_frame_ms) ? (now - s_camera.last_frame_ms) : 0;
-    const bool healthy = elapsed <= max_age_ms;
+    return elapsed <= max_age_ms;
+}
+
+bool fv_camera_is_healthy(uint64_t max_age_ms) {
+    pthread_mutex_lock(&s_camera.mutex);
+    const bool healthy = camera_healthy_locked(max_age_ms);
     pthread_mutex_unlock(&s_camera.mutex);
     return healthy;
 }
 
+bool fv_camera_has_frame(uint64_t max_age_ms) {
+    pthread_mutex_lock(&s_camera.mutex);
+    const bool ready = s_camera.frame_ready && camera_healthy_locked(max_age_ms);
+    pthread_mutex_unlock(&s_camera.mutex);
+    return ready;
+}
 bool fv_camera_set_torch(bool enable) {
     pthread_mutex_lock(&s_camera_control_mutex);
     pthread_mutex_lock(&s_camera.mutex);

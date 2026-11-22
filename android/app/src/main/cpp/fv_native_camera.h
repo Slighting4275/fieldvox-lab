@@ -16,6 +16,7 @@ bool fv_camera_copy_argb(uint32_t out_argb[FV_CAMERA_WIDTH * FV_CAMERA_HEIGHT],
                         bool *torch_on);
 bool fv_camera_is_active(void);
 bool fv_camera_is_healthy(uint64_t max_age_ms);
+bool fv_camera_has_frame(uint64_t max_age_ms);
 bool fv_camera_set_torch(bool enable);
 bool fv_camera_is_torch_on(void);
 size_t fv_camera_current_lens(void);

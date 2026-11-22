@@ -233,7 +233,7 @@ static void drain_encoder_locked(bool is_video, int64_t timeout_us, bool wait_fo
 bool fv_video_recorder_start(const char *output_mp4_path, int width, int height, int sample_rate,
                              int channels, FvVideoFrameSource source) {
     if (!output_mp4_path || width <= 0 || height <= 0 || sample_rate <= 0 ||
-        (source != FV_VIDEO_VIEWFINDER && source != FV_VIDEO_CAMERA_ONLY)) return false;
+        (source != FV_VIDEO_SCREEN && source != FV_VIDEO_CAMERA_ONLY)) return false;
 
     pthread_mutex_lock(&s_rec.mutex);
     if (s_rec.active) {
