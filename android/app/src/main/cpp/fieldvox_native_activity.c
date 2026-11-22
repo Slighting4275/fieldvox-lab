@@ -448,10 +448,11 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
 static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float y, float h, long now_ms) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
-    const float half_w = ui->rects[W_CAL].w;
+    const float gap = 6.0f * d;
+    const float half_w = (ui->w - gap) * 0.5f;
 
     /* Left Badge: EMF Meter - tap to zero-calibrate! */
-    const float lx = ui->rects[W_CAL].x;
+    const float lx = ui->x0;
     const bool cal = now_ms < s->cal_flash_until_ms;
     const uint32_t emf_stroke = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF1744 :
                                 (s->emf_delta >= 1.5f ? 0xFFFFD600 : 0x55FFFFFF));
@@ -487,7 +488,7 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float y, float h
     }
 
     /* Right Badge: Environment Telemetry - tap to toggle REM-POD! */
-    const float rx = ui->rects[W_REMPOD].x;
+    const float rx = ui->x0 + half_w + gap;
     char telem[96];
     uint32_t tel_bg = 0xA8000000;
     uint32_t tel_stroke = 0x55FFFFFF;
@@ -892,7 +893,11 @@ static void render_frame(ANativeWindow_Buffer *buf) {
 
     FvUiScreenLayout layout;
     WidgetRect rects[W_COUNT];
-    fv_ui_layout_active(rects, w, h, d, &s.ui, s.evidence_count, is_video, &layout);
+    if (s.ui.estes_mode || s.ui.playback_visible) {
+        fv_ui_layout_active(rects, w, h, d, &s.ui, s.evidence_count, is_video, &layout);
+    } else {
+        fv_ui_layout_main_screen(rects, w, h, d, s.ui.controls_visible, s.ui.advanced_controls, &layout);
+    }
     const float top_inset = layout.top_inset;
     Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
 
@@ -972,8 +977,11 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     }
 
     /* Modal overlays are drawn last and their touch handlers mask everything beneath. */
-    if (s.ui.evidence_visible) draw_evidence_overlay(&ui, &s, &layout, is_video, (float)h);
-    if (s.ui.help_visible) draw_help_overlay(&ui, &layout, (float)h);
+    if (s.ui.evidence_visible || s.ui.help_visible) {
+        fv_ui_layout_active(rects, w, h, d, &s.ui, s.evidence_count, is_video, &layout);
+        if (s.ui.evidence_visible) draw_evidence_overlay(&ui, &s, &layout, is_video, (float)h);
+        if (s.ui.help_visible) draw_help_overlay(&ui, &layout, (float)h);
+    }
 
     /* Save widget hit rects */
     pthread_mutex_lock(&g_state_mutex);
