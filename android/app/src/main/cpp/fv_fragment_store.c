@@ -75,32 +75,11 @@ static bool save_job(const Job *job) {
     struct timespec time;
     if (clock_gettime(CLOCK_REALTIME, &time) != 0) return false;
     const uint64_t stamp = (uint64_t)time.tv_sec * 1000000000u + (uint64_t)time.tv_nsec;
-    char final[640], temp[660];
+    char final[640];
     const int n = snprintf(final, sizeof(final), "%s/clip-%020llu-%03d-%06u.wav", store.directory,
                            (unsigned long long)stamp, job->station, store.sequence++);
     if (n < 0 || (size_t)n >= sizeof(final)) return false;
-    const int nt = snprintf(temp, sizeof(temp), "%s.tmp-XXXXXX", final);
-    if (nt < 0 || (size_t)nt >= sizeof(temp)) return false;
-    int fd = mkstemp(temp);
-    if (fd < 0) return false;
-    FILE *f = fdopen(fd, "wb");
-    if (!f) { close(fd); unlink(temp); return false; }
-    uint8_t header[44];
-    fv_wav_build_header(header, FV_FRAGMENT_RATE, 1u, (uint32_t)job->frames * 2u);
-    bool ok = fwrite(header, 1, sizeof(header), f) == sizeof(header);
-    uint8_t bytes[2048];
-    for (size_t off = 0; ok && off < job->frames;) {
-        size_t count = job->frames - off; if (count > 1024u) count = 1024u;
-        for (size_t i = 0; i < count; i++) {
-            const uint16_t v = (uint16_t)job->pcm[off + i];
-            bytes[2u*i] = (uint8_t)v; bytes[2u*i+1u] = (uint8_t)(v >> 8u);
-        }
-        ok = fwrite(bytes, 2u, count, f) == count; off += count;
-    }
-    if (fflush(f) != 0 || fsync(fd) != 0) ok = false;
-    if (fclose(f) != 0) ok = false;
-    if (ok) ok = rename(temp, final) == 0;
-    if (!ok) unlink(temp);
+    const bool ok = fv_wav_write_file(final, FV_FRAGMENT_RATE, 1u, job->pcm, job->frames);
     if (ok) {
         if (job->fd>=0) save_original(job->fd,final);
         fv_local_bank_enforce_cache_cap(store.directory, FV_FRAGMENT_CACHE_MAX);
@@ -157,7 +136,7 @@ bool fv_fragment_store_start(const char *app_directory, FvFragmentEngine *engine
                     char original[820]; snprintf(original,sizeof(original),"%s.audio",path);
                     int fd=open(original,O_RDONLY|O_CLOEXEC);
                     if (fd<0) fd=open(path,O_RDONLY|O_CLOEXEC);
-                    fv_fragment_cache_add_source(engine,pcm,frames,station,fd);
+                    fv_fragment_cache_add(engine,pcm,frames,station,fd);
                     if (fd>=0) close(fd);
                 }
                 free(pcm);
@@ -171,10 +150,14 @@ bool fv_fragment_store_start(const char *app_directory, FvFragmentEngine *engine
     if (!store.started) store.running = false;
     return store.started;
 }
-bool fv_fragment_store_submit(const int16_t *pcm, size_t frames, int station) {
-    return fv_fragment_store_submit_source(pcm,frames,station,-1);
+static bool store_adapter_submit(void *context, const int16_t *pcm, size_t frames, int station, int source_fd) {
+    (void)context;
+    return fv_fragment_store_submit(pcm, frames, station, source_fd);
 }
-bool fv_fragment_store_submit_source(const int16_t *pcm, size_t frames, int station, int source_fd) {
+FvFragmentClipStore fv_fragment_store_adapter(void) {
+    return (FvFragmentClipStore){.context = NULL, .submit = store_adapter_submit};
+}
+bool fv_fragment_store_submit(const int16_t *pcm, size_t frames, int station, int source_fd) {
     if (!pcm || !frames || frames > FV_FRAGMENT_CLIP_FRAMES) return false;
     int16_t *copy = malloc(frames * sizeof(*copy)); if (!copy) return false;
     const int fd=source_fd>=0 ? fcntl(source_fd,F_DUPFD_CLOEXEC,0) : -1;

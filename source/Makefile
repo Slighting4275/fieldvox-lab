@@ -10,10 +10,10 @@ CSV_BIN := fv-csvvox
 TEST_BIN := fv-unit-test
 TYPOGRAPHY_FONT ?= $(shell fc-match -f "%{file}" sans 2>/dev/null)
 
-MAIN_SRC := src/main.c src/fv_core.c ../android/app/src/main/cpp/fv_recording_data.c
-DUMP_SRC := src/fv_blobdump.c src/fv_core.c ../android/app/src/main/cpp/fv_recording_data.c
-CSV_SRC := src/fv_csvvox.c src/fv_core.c ../android/app/src/main/cpp/fv_recording_data.c
-TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_grain_gate.c ../android/app/src/main/cpp/fv_hit_capture.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_ui_layout.c
+MAIN_SRC := src/main.c src/fv_core.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_sensor_dsp.c
+DUMP_SRC := src/fv_blobdump.c src/fv_core.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_sensor_dsp.c
+CSV_SRC := src/fv_csvvox.c src/fv_core.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_sensor_dsp.c
+TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_hit_capture.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_ui_layout.c ../android/app/src/main/cpp/fv_camera_effects.c ../android/app/src/main/cpp/fv_fragment_engine.c ../android/app/src/main/cpp/fv_environment_reverb.c .audio-build/LVREV_ApplyNewSettings.o .audio-build/LVREV_ClearAudioBuffers.o .audio-build/LVREV_GetControlParameters.o .audio-build/LVREV_GetInstanceHandle.o .audio-build/LVREV_GetMemoryTable.o .audio-build/LVREV_Process.o .audio-build/LVREV_SetControlParameters.o .audio-build/LVREV_Tables.o .audio-build/Add2_Sat_32x32.o .audio-build/Copy_16.o .audio-build/Core_MixHard_2St_D32C31_SAT.o .audio-build/Core_MixInSoft_D32C31_SAT.o .audio-build/Core_MixSoft_1St_D32C31_WRA.o .audio-build/FO_1I_D32F32C31_TRC_WRA_01.o .audio-build/FO_1I_D32F32Cll_TRC_WRA_01_Init.o .audio-build/From2iToMono_32.o .audio-build/InstAlloc.o .audio-build/JoinTo2i_32x32.o .audio-build/LoadConst_32.o .audio-build/LVM_FO_HPF.o .audio-build/LVM_FO_LPF.o .audio-build/LVM_GetOmega.o .audio-build/LVM_Mixer_TimeConstant.o .audio-build/LVM_Polynomial.o .audio-build/LVM_Power10.o .audio-build/Mac3s_Sat_32x16.o .audio-build/MixInSoft_D32C31_SAT.o .audio-build/MixSoft_1St_D32C31_WRA.o .audio-build/MixSoft_2St_D32C31_SAT.o .audio-build/MonoTo2I_32.o .audio-build/Mult3s_32x16.o .audio-build/Shift_Sat_v32xv32.o .audio-build/sonic.o
 HDR := src/fv_core.h
 
 .PHONY: all clean run inspect dump extract csvtest audition test blobgen
@@ -29,8 +29,8 @@ $(DUMP_BIN): $(DUMP_SRC) $(HDR)
 $(CSV_BIN): $(CSV_SRC) $(HDR)
 >$(CC) $(CFLAGS) -o $@ $(CSV_SRC) $(LDFLAGS)
 
-$(TEST_BIN): $(TEST_SRC) $(wildcard ../android/app/src/main/cpp/*.h)
->$(CC) $(CFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
+$(TEST_BIN): $(TEST_SRC) $(ALGORITHM_OBJ) $(wildcard ../android/app/src/main/cpp/*.h)
+>$(CC) $(CFLAGS) $(ALGORITHM_FLAGS) -o $@ $(TEST_SRC) $(LDFLAGS) -pthread
 
 fv-recording-test: tests/test_recordings.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_recording_data.h
 >$(CC) $(CFLAGS) -o $@ tests/test_recordings.c ../android/app/src/main/cpp/fv_recording_data.c $(LDFLAGS)
@@ -86,8 +86,8 @@ fv-fragment-test: $(FRAGMENT_SRC) $(ALGORITHM_SRC) $(ALGORITHM_OBJ) $(wildcard .
 fv-typography-test: tests/test_typography.c ../android/app/src/main/cpp/fv_gfx.c ../android/app/src/main/cpp/fv_gfx.h ../android/app/src/main/cpp/fv_android_text.c ../android/app/src/main/cpp/fv_android_text.h ../android/app/src/main/cpp/third_party/stb_truetype.h
 >$(CC) -std=c23 -O2 -g -Wall -Wextra -Wpedantic -Wno-unused-function -o $@ tests/test_typography.c ../android/app/src/main/cpp/fv_gfx.c ../android/app/src/main/cpp/fv_android_text.c -lm
 
-fv-camera-test: tests/test_camera_effects.c ../android/app/src/main/cpp/fv_camera_effects.c ../android/app/src/main/cpp/fv_camera_effects.h ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_recording_data.h
->$(CC) $(CFLAGS) -o $@ tests/test_camera_effects.c ../android/app/src/main/cpp/fv_camera_effects.c ../android/app/src/main/cpp/fv_recording_data.c $(LDFLAGS)
+fv-camera-test: tests/test_camera_effects.c ../android/app/src/main/cpp/fv_camera_effects.c ../android/app/src/main/cpp/fv_camera_effects.h
+>$(CC) $(CFLAGS) -o $@ tests/test_camera_effects.c ../android/app/src/main/cpp/fv_camera_effects.c $(LDFLAGS)
 
 fv-station-blob-gen: src/station_blob_gen.c src/station_catalog.h
 >$(CC) $(CFLAGS) -o $@ src/station_blob_gen.c

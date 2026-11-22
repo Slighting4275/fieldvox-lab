@@ -23,8 +23,6 @@ float fv_vox_calc_speech_band_energy(const int16_t *mic, int frames, uint32_t sa
  */
 bool fv_vox_detect_voice(FvVoxDucker *state, const int16_t *mic, int frames,
                          uint64_t clock, uint32_t sample_rate);
-/* Original bounded C effects. Percentages clamp to 0..100. No heap allocations. */
-void fv_vox_apply_effects(int16_t *pcm, int frames, int echo, int reverb, int distortion);
 /* Shared slider geometry: the first/last 12% of the row are endpoint padding. */
 int fv_vox_slider_percent(float x, float left, float width);
 

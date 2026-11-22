@@ -25,11 +25,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "fv_core.h"
+#include "fv_android_platform.h"
 #include "fv_gfx.h"
 #include "fv_ui_layout.h"
 #include "fv_android_text.h"
-#include "fv_grain_gate.h"
 #include "fv_hit_capture.h"
 #include "fv_vox_controls.h"
 #include "fv_recording_data.h"
@@ -122,8 +121,8 @@ typedef struct {
     long cal_flash_until_ms;
 
     /* Gate requests raised by the sensor thread, consumed by the audio thread. */
-    unsigned pending_gates; /* bit per FvGateReason */
-    float pending_delta[FV_GATE_REASON_COUNT];
+    bool proximity_pending;
+    FvVoxDecimalTrigger proximity_trigger;
     FvVoxDecimalTrigger pending_fragment;
     FvGateReason pending_fragment_reason;
     bool fragment_pending, fragment_fetching, local_only, cached_source;
@@ -132,7 +131,7 @@ typedef struct {
     /* Controls */
     bool sweep_active;
     bool auto_gate;
-    bool advanced_controls, voice_duck, voice_detected, voice_input_ready;
+    bool voice_duck, voice_detected, voice_input_ready;
     int echo_percent, reverb_percent, distortion_percent, grain_ms;
     int visualizer_style, visualizer_color;
     int cadence_idx;
@@ -141,23 +140,21 @@ typedef struct {
     FvPitchOverride pitch_override;
     bool echo_fx, reverb_fx, noise_fx, reverse_fx;
     bool sb11_dual, vocal_filter, rem_pod_active, spatial_pan;
-    bool estes_mode, cam_hud_active, cam_hud_red;
+    bool cam_hud_active, cam_hud_red;
     FvCameraFilter cam_filter;
+    int display_rotation_deg;
     bool video_recording_active;
     char video_artifact[512];
     bool recording_active, monitor_active;
-    bool controls_visible;
     bool torch_active;
     bool audio_muted;
-    bool help_visible;
-    bool evidence_visible;
+    FvUiState ui;
     int session_hit_count;
     long hit_marker_until_ms;
     long last_spike_vibrate_ms;
     int evidence_count;
     size_t evidence_page, evidence_total;
-    bool playback_visible;
-    int64_t playback_position_ms, playback_duration_ms;
+    int64_t playback_duration_ms;
     EvidenceEntry evidence[EVIDENCE_MAX];
     float threshold;         /* uT, Java default 1.65 */
     int cooldown_ms;         /* Java default 450 */
@@ -166,7 +163,6 @@ typedef struct {
     /* Sweep status for the UI */
     int channel_counter;
     long last_channel_tick_ms;
-    long last_vox_trigger_ms;
     int carrier_station;
     int carrier_b_station;
     bool carrier_ready;
@@ -372,7 +368,7 @@ static void draw_viewfinder_background(FvCanvas *c, const FieldVoxApp *s, int w,
         if (frame) {
             int cam_w = FV_CAMERA_WIDTH;
             int cam_h = FV_CAMERA_HEIGHT;
-            const int rot_deg = fv_camera_get_display_compensation_degrees(s->activity);
+            const int rot_deg = fv_camera_get_compensation_for_display(s->display_rotation_deg);
             static int s_view_logged = 0;
             if (s_view_logged++ < 3) {
                 LOGI("viewfinder: w=%d, h=%d, rot_deg=%d", w, h, rot_deg);
@@ -618,9 +614,9 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
 
         /* Button 4: W_CTRL (DSP & Paranormal Settings Drawer) */
         const float b4_x = r4->x;
-        const uint32_t b4_bg = s->controls_visible ? 0xDD280A35 : 0xC0181818;
+        const uint32_t b4_bg = s->ui.controls_visible ? 0xDD280A35 : 0xC0181818;
         fvg_round_rect(c, b4_x, btn_y, btn_w, btn_h, 10.0f * d, b4_bg, 0xFFAAAAAA, fmaxf(1.0f, 1.2f * d));
-        const char *b4_label = s->controls_visible ? "CLOSE" : "CONTROLS";
+        const char *b4_label = s->ui.controls_visible ? "CLOSE" : "CONTROLS";
         const float s4 = fit_size(FVG_FONT_SANS, text_sp(ui,12.0f), b4_label, btn_w - 6.0f * d, true);
         fvg_text_center(c, FVG_FONT_SANS, s4, b4_x, btn_y, btn_w, btn_h, b4_label, 0xFFFFFFFF, false);
     }
@@ -653,7 +649,7 @@ static void draw_vox_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, floa
     snprintf(value, sizeof(value), "%d%%", s->distortion_percent);
     draw_placed_slider(ui, W_DISTORTION_LEVEL, "Distortion", s->distortion_percent, value);
     snprintf(value, sizeof(value), "%d ms", s->grain_ms);
-    draw_placed_slider(ui, W_GRAIN_LEVEL, "Radio sweep rate", (s->grain_ms-65)*100/935, value);
+    draw_placed_slider(ui, W_GRAIN_LEVEL, "Radio sweep rate", fv_ui_grain_ms_to_percent(s->grain_ms), value);
     draw_placed_pill(ui, W_START, s->sweep_active ? "RUNNING" : "STOPPED", s->sweep_active ? PILL_ACTIVE : PILL_IDLE);
     draw_placed_pill(ui, W_NOISE, "WHITE NOISE", s->noise_fx ? PILL_ACTIVE : PILL_IDLE);
     draw_placed_pill(ui, W_VOICE_DUCK, "SPEAKING MUTE", s->voice_duck ? PILL_ACTIVE : PILL_IDLE);
@@ -663,7 +659,7 @@ static void draw_vox_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, floa
 }
 
 static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
-    if (!s->advanced_controls) { draw_vox_drawer(ui, s, x, y, w, h); return; }
+    if (!s->ui.advanced_controls) { draw_vox_drawer(ui, s, x, y, w, h); return; }
     FvCanvas *c = ui->c;
     const float d = ui->d;
 
@@ -740,13 +736,12 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
     }
 }
 
-static void draw_help_overlay(Ui *ui, float screen_h) {
+static void draw_help_overlay(Ui *ui, const FvUiScreenLayout *layout, float screen_h) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
     const float x = ui->x0;
     const float w = ui->w;
-    float y = 0.0f, h = 0.0f;
-    fv_ui_layout_help_overlay(ui->rects, x, w, screen_h, d, &y, &h);
+    const float y = layout->help_y, h = layout->help_h;
     fvg_fill_rect(c, 0, 0, (float)c->w, screen_h, 0xB8000000);
     fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xF70A121C, 0xFF6FE7FF, fmaxf(1.0f, 1.5f * d));
     fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,16.0f), x, y + 8.0f * d, w, 30.0f * d,
@@ -772,12 +767,11 @@ static void draw_help_overlay(Ui *ui, float screen_h) {
     draw_placed_pill(ui, W_CLOSE_HELP, "GOT IT", PILL_ACTIVE);
 }
 
-static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, float screen_h) {
+static void draw_evidence_overlay(Ui *ui, const FieldVoxApp *s, const FvUiScreenLayout *layout,
+                                  const bool is_video[EVIDENCE_MAX], float screen_h) {
     FvCanvas *c=ui->c;const float d=ui->d,x=ui->x0,w=ui->w;
-    bool is_video[EVIDENCE_MAX] = {false};
-    for (int i=0;i<s->evidence_count && i<EVIDENCE_MAX;i++) is_video[i]=strcmp(s->evidence[i].mime,"video/mp4")==0;
-    float y=0.0f,h=0.0f,row_y=0.0f,row_h=0.0f;
-    fv_ui_layout_evidence_overlay(ui->rects,x,w,screen_h,d,s->evidence_count,is_video,&y,&h,&row_y,&row_h);
+    const float y=layout->evidence_y,h=layout->evidence_h,row_h=layout->evidence_row_h;
+    float row_y=layout->evidence_row_y;
     fvg_fill_rect(c,0,0,(float)c->w,screen_h,0xD0000000);
     fvg_round_rect(c,x,y,w,h,14.0f*d,0xFA101010,0xFF888888,d);
     fvg_text(c,FVG_FONT_SANS, text_sp(ui,16.0f),x+14.0f*d,y+29.0f*d,"LOCAL RECORDINGS",0xFFFFFFFF,true);
@@ -814,11 +808,11 @@ static void playback_time(char *out,size_t capacity,int64_t ms) {
     if (ms<0) ms=0;
     snprintf(out,capacity,"%lld:%02lld.%03lld",(long long)(ms/60000),(long long)(ms/1000%60),(long long)(ms%1000));
 }
-static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float width,float height) {
+static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,const FvUiScreenLayout *layout) {
     FvCanvas *c=ui->c;const float d=ui->d,x=ui->x0,w=ui->w;
-    const bool landscape=width>height;
-    float top=0.0f,preview_y=0.0f,preview_h=0.0f,wave_y=0.0f,wave_h=0.0f,buttons_y=0.0f;
-    fv_ui_layout_local_playback(ui->rects,x,w,width,height,d,&top,&preview_y,&preview_h,&wave_y,&wave_h,&buttons_y);
+    const bool landscape=layout->landscape;
+    const float top=layout->play_top,preview_y=layout->play_preview_y,preview_h=layout->play_preview_h;
+    const float wave_y=layout->play_wave_y,wave_h=layout->play_wave_h,buttons_y=layout->play_buttons_y;
     fvg_clear(c,0xFF080808);
     draw_placed_pill(ui,W_PLAY_BACK,"< LIBRARY",PILL_IDLE);
     draw_placed_pill(ui,W_PLAY_MUTE,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
@@ -864,7 +858,9 @@ static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,float widt
     draw_placed_pill(ui,W_PLAY_MARK_NEXT,"MARK >",PILL_IDLE);
 }
 
-static void draw_estes(FvCanvas *c, float d, const FieldVoxApp *s, int w, int h) {
+static void draw_estes(Ui *ui, const FieldVoxApp *s, int w, int h) {
+    FvCanvas *c = ui->c;
+    const float d = ui->d;
     fvg_clear(c, 0xFF000000);
     fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,20), 0, (float)h * 0.40f, (float)w, 40 * d, "ESTES PROTOCOL", 0xFF881111, true);
     char hits[64];
@@ -872,15 +868,9 @@ static void draw_estes(FvCanvas *c, float d, const FieldVoxApp *s, int w, int h)
     fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,16), 0, (float)h * 0.40f + 48 * d, (float)w, 30 * d, hits, 0xFF2A6A78, false);
     fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,12), 0, (float)h - 90 * d, (float)w, 30 * d, "Tap anywhere to log a hit",
                     0xFF3A3A3A, false);
-    const float bw = 150 * d, bh = 44 * d, bx = (float)w - bw - 16 * d, by = 60 * d;
-    fvg_round_rect(c, bx, by, bw, bh, 10 * d, 0xFF210707, 0xFF661111, d);
-    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,14), bx, by, bw, bh, "EXIT ESTES", 0xFFAA2222, true);
-}
-
-/* Estes exit box, in screen coordinates (matches draw_estes). */
-static bool estes_exit_hit(float d, int w, float x, float y) {
-    const float bw = 150 * d, bh = 44 * d, bx = (float)w - bw - 16 * d, by = 60 * d;
-    return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+    const WidgetRect *er = &ui->rects[W_ESTES_EXIT];
+    fvg_round_rect(c, er->x, er->y, er->w, er->h, 10 * d, 0xFF210707, 0xFF661111, d);
+    fvg_text_center(c, FVG_FONT_SANS, fv_text_sp(&s->text_scale,14), er->x, er->y, er->w, er->h, "EXIT ESTES", 0xFFAA2222, true);
 }
 
 static void render_frame(ANativeWindow_Buffer *buf) {
@@ -895,28 +885,35 @@ static void render_frame(ANativeWindow_Buffer *buf) {
 
     const float d = s.density > 0.5f ? s.density : 3.0f;
     const long now = get_time_ms();
-    if (s.estes_mode) {
-        draw_estes(&canvas, d, &s, w, h);
+    bool is_video[EVIDENCE_MAX] = {false};
+    for (int i = 0; i < s.evidence_count && i < EVIDENCE_MAX; i++) {
+        is_video[i] = strcmp(s.evidence[i].mime, "video/mp4") == 0;
+    }
+
+    FvUiScreenLayout layout;
+    WidgetRect rects[W_COUNT];
+    fv_ui_layout_active(rects, w, h, d, &s.ui, s.evidence_count, is_video, &layout);
+    const float top_inset = layout.top_inset;
+    Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
+
+    if (s.ui.estes_mode) {
+        draw_estes(&ui, &s, w, h);
+        pthread_mutex_lock(&g_state_mutex);
+        memcpy(g_app.widgets, rects, sizeof(rects));
+        pthread_mutex_unlock(&g_state_mutex);
         if (fv_video_recorder_is_active()) {
             fv_video_recorder_feed_frame((const uint32_t *)buf->bits, buf->width, buf->height, buf->stride);
         }
         return;
     }
 
-    FvUiScreenLayout layout;
-    WidgetRect rects[W_COUNT];
-    fv_ui_layout_main_screen(rects, w, h, d, s.controls_visible, s.advanced_controls, &layout);
-    const float top_inset = layout.top_inset;
-    Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
-
-    if (s.playback_visible) {
-        memset(rects, 0, sizeof(rects));
+    if (s.ui.playback_visible) {
         FvLocalPlayerSnapshot playback;
         fv_local_player_snapshot(&playback);
-        draw_local_playback(&ui,&playback,(float)w,(float)h);
+        draw_local_playback(&ui, &playback, &layout);
         pthread_mutex_lock(&g_state_mutex);
-        memcpy(g_app.widgets,rects,sizeof(rects));
-        g_app.playback_position_ms=playback.position_ms;g_app.playback_duration_ms=playback.duration_ms;
+        memcpy(g_app.widgets, rects, sizeof(rects));
+        g_app.playback_duration_ms = playback.duration_ms;
         pthread_mutex_unlock(&g_state_mutex);
         return;
     }
@@ -950,13 +947,13 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     draw_perimeter_badges(&ui, &s, layout.badge_y, layout.badge_h, now);
 
     /* 5-7. Floating Visualizer & Bottom Action Bar (only rendered and clickable when drawer is closed) */
-    if (!s.controls_visible) {
+    if (!s.ui.controls_visible) {
         draw_floating_visualizer(&ui, &s, ui.x0, layout.vis_top, ui.w, layout.vis_h, now);
         draw_bottom_action_bar(&ui, &s, ui.x0, layout.bottom_bar_y, ui.w, layout.bottom_bar_h, now);
     }
 
     /* 8. Slide-Up Drawer Overlay (if toggled) */
-    if (s.controls_visible) {
+    if (s.ui.controls_visible) {
         draw_slide_up_drawer(&ui, &s, ui.x0, layout.drawer_y, ui.w, layout.drawer_h, now);
     }
 
@@ -975,8 +972,8 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     }
 
     /* Modal overlays are drawn last and their touch handlers mask everything beneath. */
-    if (s.evidence_visible) draw_evidence_overlay(&ui, &s, (float)h);
-    if (s.help_visible) draw_help_overlay(&ui, (float)h);
+    if (s.ui.evidence_visible) draw_evidence_overlay(&ui, &s, &layout, is_video, (float)h);
+    if (s.ui.help_visible) draw_help_overlay(&ui, &layout, (float)h);
 
     /* Save widget hit rects */
     pthread_mutex_lock(&g_state_mutex);
@@ -1091,7 +1088,7 @@ static void handle_widget(WidgetId id) {
         case W_VIS_PREV: g_app.visualizer_style = (g_app.visualizer_style+2)%3; break;
         case W_VIS_NEXT: g_app.visualizer_style = (g_app.visualizer_style+1)%3; break;
         case W_VIS_COLOR: g_app.visualizer_color = (g_app.visualizer_color+1)%4; break;
-        case W_ADVANCED: g_app.advanced_controls = !g_app.advanced_controls; break;
+        case W_ADVANCED: g_app.ui.advanced_controls = !g_app.ui.advanced_controls; break;
         case W_VOICE_DUCK:
             g_app.voice_duck = !g_app.voice_duck;
             if (g_app.voice_duck && !fv_android_has_permission(g_app.activity, "android.permission.RECORD_AUDIO")) {
@@ -1108,9 +1105,9 @@ static void handle_widget(WidgetId id) {
         case W_SESS: {
             g_app.evidence_page=0;
             refresh_evidence_locked();
-            g_app.evidence_visible = true;
-            g_app.help_visible = false;
-            g_app.controls_visible = false;
+            g_app.ui.evidence_visible = true;
+            g_app.ui.help_visible = false;
+            g_app.ui.controls_visible = false;
             break;
         }
         case W_REC:
@@ -1132,10 +1129,10 @@ static void handle_widget(WidgetId id) {
             }
             break;
         case W_CTRL:
-            g_app.controls_visible = !g_app.controls_visible;
-            g_app.advanced_controls = false;
-            g_app.help_visible = false;
-            g_app.evidence_visible = false;
+            g_app.ui.controls_visible = !g_app.ui.controls_visible;
+            g_app.ui.advanced_controls = false;
+            g_app.ui.help_visible = false;
+            g_app.ui.evidence_visible = false;
             break;
         case W_SB11: g_app.sb11_dual = !g_app.sb11_dual; break;
         case W_AUTO_GATE:
@@ -1147,8 +1144,11 @@ static void handle_widget(WidgetId id) {
         case W_REMPOD: g_app.rem_pod_active = !g_app.rem_pod_active; break;
         case W_PAN: g_app.spatial_pan = !g_app.spatial_pan; break;
         case W_ESTES:
-            g_app.estes_mode = true;
+            g_app.ui.estes_mode = true;
             g_app.vocal_filter = true;
+            break;
+        case W_ESTES_EXIT:
+            set_status_locked("Estes protocol ended");
             break;
         case W_CAMHUD:
             if (g_app.recording_active || g_app.video_recording_active) {
@@ -1197,9 +1197,9 @@ static void handle_widget(WidgetId id) {
             }
             break;
         case W_HELP:
-            g_app.help_visible = !g_app.help_visible;
-            g_app.evidence_visible = false;
-            g_app.controls_visible = false;
+            g_app.ui.help_visible = !g_app.ui.help_visible;
+            g_app.ui.evidence_visible = false;
+            g_app.ui.controls_visible = false;
             break;
         case W_MUTE:
             g_app.audio_muted = !g_app.audio_muted;
@@ -1286,7 +1286,7 @@ static void handle_widget(WidgetId id) {
             break;
         }
         case W_CLOSE_DRAWER: {
-            g_app.controls_visible = false;
+            g_app.ui.controls_visible = false;
             break;
         }
         case W_LIBRARY_PREV:
@@ -1297,128 +1297,82 @@ static void handle_widget(WidgetId id) {
             evidence_page_locked();break;
         case W_LIBRARY_REFRESH: refresh_evidence_locked();break;
         case W_PLAY_BACK:
-            fv_local_player_close();g_app.playback_visible=false;g_app.evidence_visible=true;
+            fv_local_player_close();g_app.ui.playback_visible=false;g_app.ui.evidence_visible=true;
             refresh_evidence_locked();break;
         case W_PLAY_TOGGLE: fv_local_player_toggle();break;
-        case W_PLAY_REWIND_5: fv_local_player_seek(g_app.playback_position_ms-5000);break;
-        case W_PLAY_REWIND_10: fv_local_player_seek(g_app.playback_position_ms-10000);break;
-        case W_PLAY_FORWARD_5: fv_local_player_seek(g_app.playback_position_ms+5000);break;
+        case W_PLAY_REWIND_5: fv_local_player_seek_delta(-5000);break;
+        case W_PLAY_REWIND_10: fv_local_player_seek_delta(-10000);break;
+        case W_PLAY_FORWARD_5: fv_local_player_seek_delta(5000);break;
         case W_PLAY_MUTE: fv_local_player_mute();break;
         case W_PLAY_MARK: fv_local_player_bookmark();break;
         case W_PLAY_MARK_PREV: fv_local_player_jump_mark(false);break;
         case W_PLAY_MARK_NEXT: fv_local_player_jump_mark(true);break;
-        case W_CLOSE_EVIDENCE: g_app.evidence_visible = false; break;
-        case W_CLOSE_HELP: g_app.help_visible = false; break;
+        case W_CLOSE_EVIDENCE: g_app.ui.evidence_visible = false; break;
+        case W_CLOSE_HELP: g_app.ui.help_visible = false; break;
         default: break;
     }
 }
 
-static void handle_tap(float x, float y_screen, int screen_w) {
+static void handle_tap(float x, float y_screen) {
     ANativeActivity *activity = NULL;
-    bool vibrate = false;
+    int vib_ms = 0;
     char open_path[512] = {0};
-    bool open_muted=false;
+    bool open_muted = false;
     pthread_mutex_lock(&g_state_mutex);
     activity = g_app.activity;
-    if (g_app.playback_visible) {
-        for (int id=W_PLAY_BACK;id<=W_PLAY_MARK_NEXT;id++) {
-            const WidgetRect *r=&g_app.widgets[id];
-            if (r->visible && x>=r->x && x<=r->x+r->w && y_screen>=r->y && y_screen<=r->y+r->h) {
-                handle_widget((WidgetId)id);break;
+    const float d = g_app.density > 0.5f ? g_app.density : 3.0f;
+    bool estes_hit = false;
+    const int hit = fv_ui_handle_tap(&g_app.ui, g_app.widgets, x, y_screen, d, &estes_hit);
+    if (estes_hit) {
+        g_app.estes_hit_count++;
+        atomic_fetch_add(&g_app.mark_hit_requests, 1u);
+        vib_ms = 18;
+    } else if (hit >= W_EVIDENCE_BANK_0 && hit < W_EVIDENCE_BANK_0 + EVIDENCE_MAX) {
+        const int idx = hit - W_EVIDENCE_BANK_0;
+        if (idx < g_app.evidence_count) {
+            fv_local_bank_load(g_app.evidence[idx].path);
+            g_app.local_only = true;
+            g_app.ui.evidence_visible = false;
+            set_status_locked("Loading WAV as the LOCAL fragment source");
+            vib_ms = 15;
+        }
+    } else if (hit >= W_EVIDENCE_OPEN_0 && hit < W_EVIDENCE_OPEN_0 + EVIDENCE_MAX) {
+        const int idx = hit - W_EVIDENCE_OPEN_0;
+        if (idx < g_app.evidence_count) {
+            if (g_app.recording_active || g_app.video_recording_active) {
+                set_status_locked("Stop recording before local playback");
+            } else {
+                snprintf(open_path, sizeof(open_path), "%s", g_app.evidence[idx].path);
+                open_muted = g_app.audio_muted;
+                g_app.ui.evidence_visible = false;
+                g_app.ui.playback_visible = true;
+                set_status_locked("Loading recording on this phone");
             }
+            vib_ms = 15;
         }
-        pthread_mutex_unlock(&g_state_mutex);fv_android_vibrate(activity,15);return;
-    }
-    if (g_app.estes_mode) {
-        if (estes_exit_hit(g_app.density, screen_w, x, y_screen)) {
-            g_app.estes_mode = false;
-            set_status_locked("Estes protocol ended");
-        } else {
-            g_app.estes_hit_count++;
-            atomic_fetch_add(&g_app.mark_hit_requests, 1u);
-        }
-        pthread_mutex_unlock(&g_state_mutex);
-        fv_android_vibrate(activity, 18);
-        return;
-    }
-
-    /* Modal overlays own all taps while visible; nothing can bleed through to the HUD. */
-    if (g_app.help_visible) {
-        g_app.help_visible = false;
-        pthread_mutex_unlock(&g_state_mutex);
-        fv_android_vibrate(activity, 15);
-        return;
-    }
-
-    if (g_app.evidence_visible) {
-        bool handled = false;
-        const WidgetRect *close = &g_app.widgets[W_CLOSE_EVIDENCE];
-        if (close->visible && x >= close->x && x <= close->x + close->w &&
-            y_screen >= close->y && y_screen <= close->y + close->h) {
-            g_app.evidence_visible = false;
-            handled = true;
-        }
-        for (int i = 0; !handled && i < g_app.evidence_count && i < EVIDENCE_MAX; i++) {
-            const WidgetRect *r = &g_app.widgets[W_EVIDENCE_BANK_0 + i];
-            if (r->visible && x >= r->x && x <= r->x+r->w && y_screen >= r->y && y_screen <= r->y+r->h) {
-                fv_local_bank_load(g_app.evidence[i].path);
-                g_app.local_only = true; g_app.evidence_visible = false;
-                set_status_locked("Loading WAV as the LOCAL fragment source"); handled = true;
-            }
-        }
-        for (int i = 0; !handled && i < g_app.evidence_count && i < EVIDENCE_MAX; i++) {
-            const WidgetRect *r = &g_app.widgets[W_EVIDENCE_OPEN_0 + i];
-            if (r->visible && x >= r->x && x <= r->x + r->w && y_screen >= r->y && y_screen <= r->y + r->h) {
-                snprintf(open_path, sizeof(open_path), "%s", g_app.evidence[i].path);
-                if (g_app.recording_active || g_app.video_recording_active) {
-                    open_path[0]=0;set_status_locked("Stop recording before local playback");
-                } else {
-                    open_muted=g_app.audio_muted;
-                    g_app.evidence_visible=false;g_app.playback_visible=true;
-                    set_status_locked("Loading recording on this phone");
-                }
-                handled = true;
-            }
-        }
-        for (int id=W_LIBRARY_PREV;!handled && id<=W_LIBRARY_REFRESH;id++) {
-            const WidgetRect *r=&g_app.widgets[id];
-            if (r->visible && x>=r->x && x<=r->x+r->w && y_screen>=r->y && y_screen<=r->y+r->h) {
-                handle_widget((WidgetId)id);handled=true;
-            }
-        }
-        if (!handled) g_app.evidence_visible = false;
-        pthread_mutex_unlock(&g_state_mutex);
-        fv_android_vibrate(activity, 15);
-        if (open_path[0]) fv_local_player_open(open_path,open_muted);
-        return;
-    }
-
-    const int hit = fv_ui_resolve_tap(g_app.widgets, x, y_screen);
-    if (hit >= 0) {
+    } else if (hit >= 0) {
         LOGI("tap widget %d", hit);
         handle_widget((WidgetId)hit);
-        vibrate = true;
-    } else {
-        const float d = g_app.density > 0.5f ? g_app.density : 3.0f;
-        if (fv_ui_tap_dismisses_drawer(g_app.widgets, g_app.controls_visible, hit, y_screen, d)) {
-            g_app.controls_visible = false;
-        }
+        vib_ms = g_app.ui.playback_visible ? 15 : 18;
+    } else if (g_app.ui.help_visible || g_app.ui.evidence_visible) {
+        vib_ms = 15;
     }
-
     pthread_mutex_unlock(&g_state_mutex);
-    if (vibrate) fv_android_vibrate(activity, 18);
+    if (vib_ms > 0) fv_android_vibrate(activity, vib_ms);
+    if (open_path[0]) fv_local_player_open(open_path, open_muted);
 }
 
 /* Caller holds g_state_mutex; overlays suppress slider interaction. */
 static int hit_slider_locked(float x, float y) {
-    if (g_app.playback_visible) {
+    if (g_app.ui.playback_visible) {
         const WidgetRect *r=&g_app.widgets[W_PLAY_SEEK];
         if (r->visible && x>=r->x && x<=r->x+r->w && y>=r->y && y<=r->y+r->h) {
             fv_local_player_scrub_begin();return W_PLAY_SEEK;
         }
         return -1;
     }
-    if (!g_app.controls_visible || g_app.advanced_controls || g_app.help_visible || g_app.evidence_visible || g_app.estes_mode) return -1;
+    if (!g_app.ui.controls_visible || g_app.ui.advanced_controls || g_app.ui.help_visible ||
+        g_app.ui.evidence_visible || g_app.ui.estes_mode) return -1;
     for (int id=W_ECHO_LEVEL; id<=W_GRAIN_LEVEL; id++) {
         const WidgetRect *r = &g_app.widgets[id];
         if (r->visible && x>=r->x && x<=r->x+r->w && y>=r->y && y<=r->y+r->h) return id;
@@ -1440,15 +1394,15 @@ static void update_slider_locked(int id, float x) {
     if (id==W_ECHO_LEVEL) { g_app.echo_percent=value; g_app.echo_fx=value>0; }
     else if (id==W_REVERB_LEVEL) { g_app.reverb_percent=value; g_app.reverb_fx=value>0; }
     else if (id==W_DISTORTION_LEVEL) g_app.distortion_percent=value;
-    else if (id==W_GRAIN_LEVEL) g_app.grain_ms=65+(value*935+50)/100;
+    else if (id==W_GRAIN_LEVEL) g_app.grain_ms = fv_ui_percent_to_grain_ms(value);
 }
 
 /* Caller holds g_state_mutex. Camera swipes never take gestures from overlays. */
 static bool camera_swipe_eligible_locked(void) {
     return atomic_load(&g_app.resumed) && g_app.cam_filter!=FV_CAM_FILTER_OFF &&
-        !g_app.recording_active && !g_app.video_recording_active && !g_app.estes_mode &&
-        !g_app.controls_visible && !g_app.help_visible && !g_app.evidence_visible &&
-        !g_app.playback_visible && fv_camera_is_healthy(2000);
+        !g_app.recording_active && !g_app.video_recording_active && !g_app.ui.estes_mode &&
+        !g_app.ui.controls_visible && !g_app.ui.help_visible && !g_app.ui.evidence_visible &&
+        !g_app.ui.playback_visible && fv_camera_is_healthy(2000);
 }
 static bool camera_swipe_start_locked(float x, float y) {
     if (!camera_swipe_eligible_locked()) return false;
@@ -1473,7 +1427,6 @@ static void *input_thread_func(void *arg) {
             AInputEvent *event = NULL;
             bool tap = false;
             float tap_x = 0, tap_y = 0;
-            int screen_w = 0;
             pthread_mutex_lock(&g_input_mutex);
             AInputQueue *queue = g_app.input_queue;
             if (!queue || AInputQueue_getEvent(queue, &event) < 0) {
@@ -1503,12 +1456,12 @@ static void *input_thread_func(void *arg) {
                 } else if (action == AMOTION_EVENT_ACTION_MOVE && tracking) {
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
                     fv_camera_gesture_move(&camera_gesture,ex,AMotionEvent_getEventTime(event));
-                    if (!dragging && fabsf(ey - down_y) > slop) dragging = true;
-                    const bool horizontal=camera_gesture.active && fabsf(ex-down_x)>fabsf(ey-down_y);
-                    if (dragging && !g_app.estes_mode && !horizontal) {
-                        float s = down_scroll - (ey - down_y);
-                        g_app.scroll_y = s < 0.0f ? 0.0f : (s > g_app.max_scroll ? g_app.max_scroll : s);
-                    }
+            if (!dragging && fabsf(ey - down_y) > slop) dragging = true;
+            const bool horizontal = camera_gesture.active && fabsf(ex - down_x) > fabsf(ey - down_y);
+            if (dragging && !g_app.ui.estes_mode && !horizontal) {
+                float s = down_scroll - (ey - down_y);
+                g_app.scroll_y = s < 0.0f ? 0.0f : (s > g_app.max_scroll ? g_app.max_scroll : s);
+            }
                 } else if (action == AMOTION_EVENT_ACTION_UP && tracking) {
                     tracking = false;
                     if (active_slider>=0) update_slider_locked(active_slider, ex);
@@ -1541,23 +1494,21 @@ static void *input_thread_func(void *arg) {
             }
             if (AInputEvent_getType(event)==AINPUT_EVENT_TYPE_KEY && AKeyEvent_getKeyCode(event)==AKEYCODE_BACK) {
                 pthread_mutex_lock(&g_state_mutex);
-                if (g_app.playback_visible || g_app.evidence_visible || g_app.help_visible || g_app.controls_visible) {
-                    handled=1;
-                    if (AKeyEvent_getAction(event)==AKEY_EVENT_ACTION_UP) {
-                        if (g_app.playback_visible) handle_widget(W_PLAY_BACK);
-                        else if (g_app.evidence_visible) g_app.evidence_visible=false;
-                        else if (g_app.help_visible) g_app.help_visible=false;
-                        else g_app.controls_visible=false;
+                const bool up = AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP;
+                if (g_app.ui.playback_visible || g_app.ui.evidence_visible ||
+                    g_app.ui.help_visible || g_app.ui.estes_mode || g_app.ui.controls_visible) {
+                    handled = 1;
+                    bool close_playback = false;
+                    if (up && fv_ui_back_pressed(&g_app.ui, &close_playback) && close_playback) {
+                        fv_local_player_close();
+                        refresh_evidence_locked();
                     }
                 }
                 pthread_mutex_unlock(&g_state_mutex);
             }
-            pthread_mutex_lock(&g_window_mutex);
-            if (g_app.window) screen_w = ANativeWindow_getWidth(g_app.window);
-            pthread_mutex_unlock(&g_window_mutex);
             AInputQueue_finishEvent(queue, event, handled);
             pthread_mutex_unlock(&g_input_mutex);
-            if (tap) handle_tap(tap_x, tap_y, screen_w);
+            if (tap) handle_tap(tap_x, tap_y);
         }
     }
     pthread_mutex_lock(&g_input_mutex);
@@ -1572,9 +1523,18 @@ static void *input_thread_func(void *arg) {
  * ------------------------------------------------------------------------------------------- */
 
 /* Caller holds g_state_mutex. */
-static void raise_gate(FvGateReason reason, float delta) {
-    g_app.pending_gates |= 1u << reason;
-    g_app.pending_delta[reason] = delta;
+static void raise_proximity_gate(float delta) {
+    const int min_grain = g_app.grain_ms < 400 ? 400 : g_app.grain_ms;
+    g_app.proximity_trigger = (FvVoxDecimalTrigger){
+        .passed = true,
+        .pitch_factor = 1.0f,
+        .speed_factor = 1.0f,
+        .grain_duration_ms = min_grain,
+        .seek_offset = 0.25f,
+        .prefer_live = true,
+        .channel_hop = (int)((uint32_t)(fabsf(delta) * 100.0f) % FV_FRAGMENT_DECKS)
+    };
+    g_app.proximity_pending = true;
 }
 
 static void *sensor_thread_func(void *arg) {
@@ -1629,9 +1589,7 @@ static void *sensor_thread_func(void *arg) {
             pthread_mutex_lock(&g_state_mutex);
             const bool was_emf_spike = g_app.emf_spike;
             const bool was_coldspot = g_app.baro_coldspot;
-            const long now_sensor_ms = get_time_ms();
-            const long sweep_cd_ms = 2000L + 80L * g_app.reverb_percent;
-            const bool in_vox_cooldown = (now_sensor_ms - g_app.last_vox_trigger_ms < sweep_cd_ms);
+            const bool can_eval = !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching;
 
             if (ev.type == ASENSOR_TYPE_MAGNETIC_FIELD) {
                 const double mx = (double)ev.magnetic.x;
@@ -1641,7 +1599,7 @@ static void *sensor_thread_func(void *arg) {
                 const float dist = (float)g_app.distortion_percent / 100.0f;
                 const int cache_cnt = (int)g_app.fragment_cache_count;
                 bool vox_pass = false;
-                if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching) {
+                if (can_eval) {
                     vox_pass = fv_vox_eval_decimal_trigger_ex(mx, my, mz, true, dist, cache_cnt, &trig);
 
                 }
@@ -1681,7 +1639,7 @@ static void *sensor_thread_func(void *arg) {
                 const float dist = (float)g_app.distortion_percent / 100.0f;
                 const int cache_cnt = (int)g_app.fragment_cache_count;
                 bool vox_pass = false;
-                if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching) {
+                if (can_eval) {
                     vox_pass = fv_vox_eval_decimal_trigger_ex((double)ev.acceleration.x,
                                                              (double)ev.acceleration.y,
                                                              (double)ev.acceleration.z,
@@ -1708,7 +1666,7 @@ static void *sensor_thread_func(void *arg) {
                     /* Gyroscope values participate in the same decimal gate as
                      * the other vector sensors, without a baseline threshold. */
                     (void)delta;
-                    if (!in_vox_cooldown && !g_app.voice_detected && !g_app.fragment_pending && !g_app.fragment_fetching) {
+                    if (can_eval) {
                         FvVoxDecimalTrigger trig;
                         if (fv_vox_eval_decimal_trigger_ex((double)ev.vector.x, (double)ev.vector.y,
                                 (double)ev.vector.z, false, (float)g_app.distortion_percent/100.0f,
@@ -1728,7 +1686,7 @@ static void *sensor_thread_func(void *arg) {
                         g_app.proximity_near = near;
                     } else if (near != g_app.proximity_near) {
                         g_app.proximity_near = near;
-                        raise_gate(FV_GATE_PROXIMITY, fabsf(v - g_app.proximity_last));
+                        raise_proximity_gate(fabsf(v - g_app.proximity_last));
                     }
                     g_app.proximity_last = v;
                 }
@@ -1910,11 +1868,19 @@ static void push_waterfall_column(uint32_t *img, const float *bins) {
     }
 }
 
+static size_t local_bank_read(void *context, float seek_offset, size_t frames,
+                              int16_t *output, size_t capacity) {
+    (void)context;
+    return fv_local_bank_fragment(seek_offset, frames, output, capacity);
+}
+
 static void *audio_thread_func(void *arg) {
     (void)arg;
     FvFragmentEngine *fragments = fv_fragment_create();
     if (!fragments) { LOGE("Fragment engine allocation failed"); return NULL; }
     if (!fv_fragment_store_start(g_app.activity->internalDataPath, fragments)) LOGW("Radio cache persistence unavailable");
+    fv_fragment_set_live_source(fragments, fv_radio_live_source());
+    fv_fragment_set_clip_store(fragments, fv_fragment_store_adapter());
     FvPlatformVoices *platform=fv_platform_voices_create(g_app.activity->vm);
     if (!platform) LOGW("Platform voices unavailable; native PCM speaker fallback");
     AAudioStream *stream = open_audio_stream(AAUDIO_DIRECTION_OUTPUT, 2);
@@ -1935,8 +1901,6 @@ static void *audio_thread_func(void *arg) {
     int16_t mic[BUFFER_FRAMES];
     int16_t stereo[BUFFER_FRAMES * 2];
     uint64_t clock = 0;
-    uint64_t next_auto = 0;
-    FvGateReason fragment_reason = FV_GATE_MAGNETOMETER;
     FvVoxDucker ducker = {0};
     float duck_gain = 1.0f;
     int wf_divider = 0;
@@ -1944,9 +1908,9 @@ static void *audio_thread_func(void *arg) {
 
     while (atomic_load(&g_app.running)) {
         const long now = get_time_ms();
+        const bool playback = fv_local_player_active();
         pthread_mutex_lock(&g_state_mutex);
         const bool resumed = atomic_load(&g_app.resumed);
-        const bool playback=fv_local_player_active();
         const bool sweep = g_app.sweep_active && resumed && !playback;
         const bool local_only = g_app.local_only;
         const bool auto_gate = g_app.auto_gate;
@@ -1966,9 +1930,12 @@ static void *audio_thread_func(void *arg) {
         const float azimuth = g_app.compass_azimuth;
         const float emf_delta = g_app.emf_delta, emf_threshold = g_app.threshold;
         const bool requested = sweep && g_app.fragment_pending;
-        FvVoxDecimalTrigger fragment = g_app.pending_fragment;
+        const FvVoxDecimalTrigger fragment = g_app.pending_fragment;
         const FvGateReason request_reason = g_app.pending_fragment_reason;
-        g_app.fragment_pending = false; g_app.pending_gates = 0;
+        const bool prox_requested = sweep && g_app.proximity_pending;
+        const FvVoxDecimalTrigger prox_fragment = g_app.proximity_trigger;
+        g_app.fragment_pending = false;
+        g_app.proximity_pending = false;
         /* Visible channel counter ticks at the cadence, independent of the audio. */
         if (sweep && now - g_app.last_channel_tick_ms >= FV_SWEEP_CADENCE_MS[g_app.cadence_idx]) {
             g_app.channel_counter = direction == FV_SWEEP_RND ? (int)((uint32_t)rand() % CHANNEL_RING)
@@ -1977,11 +1944,20 @@ static void *audio_thread_func(void *arg) {
         }
         pthread_mutex_unlock(&g_state_mutex);
 
+        const float pitch_override_f =
+            pitch_override == FV_PITCH_OVERRIDE_LOW ? 0.6f :
+            (pitch_override == FV_PITCH_OVERRIDE_NORMAL ? 1.0f :
+             (pitch_override == FV_PITCH_OVERRIDE_HIGH ? 1.2f : 0.0f));
         fv_fragment_set_settings(fragments, (FvFragmentSettings){
-            .echo = (float)echo_level/100.0f, .reverb = (float)reverb_level/100.0f,
-            .noise = noise, .paused = !sweep, .sweep_ms = (unsigned)grain_ms});
+            .echo = (float)echo_level / 100.0f,
+            .reverb = (float)reverb_level / 100.0f,
+            .pitch_override = pitch_override_f,
+            .noise = noise,
+            .paused = !sweep,
+            .auto_enabled = auto_gate && sweep,
+            .local_only = local_only,
+            .sweep_ms = (unsigned)grain_ms});
         fv_radio_set_enabled(sweep && !local_only);
-        if (local_only && fv_fragment_live_pending(fragments)) fv_fragment_finish_live(fragments, NULL, 0, clock, true);
         const int live = fv_radio_busy() ? 1 : 0;
         memset(mono, 0, sizeof(mono));
         if (!input && need_input && now >= next_input_retry_ms) {
@@ -2021,53 +1997,16 @@ static void *audio_thread_func(void *arg) {
         const bool platform_speaker=fv_platform_voices_healthy(platform) && !vocal && !reverse && !pan && !rem_pod;
         fv_platform_voices_control(platform,platform_speaker && sweep,muted || ducked || playback || !resumed,(float)reverb_level/100.0f);
         fv_fragment_set_speaker(fragments,platform_speaker ? fv_platform_voices_submit : NULL,platform);
-        bool admitted = false;
-        bool request_started = false;
-        int16_t *downloaded = NULL; size_t downloaded_frames = 0; int downloaded_station = -1, downloaded_fd = -1;
-        FvVoxDecimalTrigger downloaded_trigger = {0};
-        if (fv_radio_take_result(&downloaded, &downloaded_frames, &downloaded_station, &downloaded_trigger, &downloaded_fd)) {
-            if (sweep && !local_only && fv_fragment_live_pending(fragments)) {
-                if (downloaded && downloaded_frames) fv_fragment_store_submit_source(downloaded, downloaded_frames, downloaded_station, downloaded_fd);
-                admitted = fv_fragment_finish_live_source(fragments, downloaded, downloaded_frames, downloaded_fd, clock, ducked);
-                fragment = downloaded_trigger;
-            }
-            free(downloaded); if (downloaded_fd>=0) close(downloaded_fd);
+        if (sweep) {
+            if (prox_requested) fv_fragment_submit_trigger(fragments, FV_GATE_PROXIMITY, &prox_fragment);
+            if (requested) fv_fragment_submit_trigger(fragments, request_reason, &fragment);
         }
-        bool auto_request = false;
-        if (sweep && auto_gate && !requested && !admitted && !fv_fragment_live_pending(fragments) && clock >= next_auto) {
-            auto_request = true;
-            fragment = (FvVoxDecimalTrigger){.passed=true, .pitch_factor=1.0f, .speed_factor=1.0f,
-                .grain_duration_ms=grain_ms, .seek_offset=0.3f, .prefer_live=true,
-                .channel_hop=(int)((clock/48000u)%FV_FRAGMENT_DECKS)};
-            next_auto = clock + (uint64_t)(2000 + 80*reverb_level)*48u;
-        }
-        if (sweep && (requested || auto_request) && !admitted && !fv_fragment_live_pending(fragments) && !ducked) {
-            if (pitch_override != FV_PITCH_OVERRIDE_AUTO) {
-                fragment.pitch_factor = pitch_override == FV_PITCH_OVERRIDE_LOW ? 0.6f :
-                                        (pitch_override == FV_PITCH_OVERRIDE_NORMAL ? 1.0f : 1.2f);
-            }
-            if (local_only) {
-                static int16_t local_pcm[48000];
-                const size_t local_frames = fv_local_bank_fragment(fragment.seek_offset,
-                    (size_t)fragment.grain_duration_ms*48u, local_pcm, 48000u);
-                if (local_frames) {
-                    FvVoxDecimalTrigger local_trigger = fragment; local_trigger.seek_offset = 0.0f;
-                    admitted = fv_fragment_trigger_pcm(fragments, &local_trigger, local_pcm, local_frames, -1, clock, false);
-                }
-            }
-            if (!admitted) {
-                if (!local_only && fragment.prefer_live) {
-                    const int station = fv_radio_selected_station(fragment.channel_hop);
-                    if (!fv_radio_busy() && fv_fragment_begin_live(fragments, &fragment, station, clock, ducked)) {
-                        request_started = fv_radio_request(fragment.channel_hop, &fragment);
-                        if (!request_started) fv_fragment_finish_live(fragments, NULL, 0, clock, true);
-                    }
-                } else admitted = fv_fragment_trigger(fragments, &fragment, local_only, clock, ducked);
-            }
-            if (admitted || request_started) fragment_reason = auto_request ? FV_GATE_AUTO_SCAN : request_reason;
-        }
+        const FvFragmentLocalProvider local_prov = {.read_fragment = local_bank_read};
+        FvFragmentStepResult step_res = {0};
+        fv_fragment_step(fragments, clock, ducked, &local_prov, &step_res);
+        const bool admitted = step_res.admitted;
         FvFragmentStatus fragment_status = {0};
-        fv_fragment_render_aux(fragments, clean, mono, aux, BUFFER_FRAMES, clock, &fragment_status);
+        fv_fragment_render(fragments, clean, mono, aux, BUFFER_FRAMES, clock, &fragment_status);
         for (int i = 0; monitor && i < microphone_frames; i++) {
             const float input_sample = (float)mic[i]*MIC_MONITOR_GAIN;
             const float dry = (float)clean[i]+input_sample, wet = (float)mono[i]+input_sample;
@@ -2090,7 +2029,7 @@ static void *audio_thread_func(void *arg) {
             .seek_fraction = fragment_status.seek_fraction, .cached_source = fragment_status.cached,
             .active_voices = fragment_status.voices,
             .muted = muted, .station_a = fragment_status.station, .station_b = -1,
-            .reason_a = fragment_reason, .reason_b = FV_GATE_AUTO_SCAN,
+            .reason_a = fragment_status.reason, .reason_b = FV_GATE_AUTO_SCAN,
             .emf_delta = emf_delta, .emf_threshold = emf_threshold,
             .pitch_semitones = (int)lrintf(12.0f*log2f(fragment_status.pitch > 0.0f ? fragment_status.pitch : 1.0f)),
             .effects = (vocal ? FV_HIT_FX_VOCAL : 0u) | (echo ? FV_HIT_FX_ECHO : 0u) |
@@ -2133,19 +2072,18 @@ static void *audio_thread_func(void *arg) {
         g_app.carrier_station = fragment_status.station;
         g_app.carrier_b_station = -1;
         g_app.gate_open = fragment_status.playing;
-        g_app.gate_reason = fragment_reason;
+        g_app.gate_reason = fragment_status.reason;
         g_app.fragment_cache_count = fragment_status.cache_count;
-        g_app.fragment_fetching = fv_fragment_live_pending(fragments);
+        g_app.fragment_fetching = fragment_status.live_pending;
         g_app.cached_source = fragment_status.cached;
         g_app.packets_opened = fragment_status.admitted;
-        if (request_started || (admitted && !downloaded_trigger.passed)) g_app.last_vox_trigger_ms = now;
         if (admitted) {
             g_app.pitch_semitones = hit_block.pitch_semitones;
         }
         pthread_mutex_unlock(&g_state_mutex);
         if (admitted) LOGI("VOX fragment: source=%s station=%d pitch=%.2f speed=%.2f grain=%dms voices=%u cache=%u",
             fragment_status.cached ? "CACHE" : (local_only ? "LOCAL" : "LIVE"), fragment_status.station,
-            (double)fragment_status.pitch, (double)fragment_status.speed, fragment.grain_duration_ms,
+            (double)fragment_status.pitch, (double)fragment_status.speed, fragment_status.grain_ms,
             fragment_status.voices, fragment_status.cache_count);
         if (now - diag_last_ms >= 5000L) {
             LOGI("fragment diag: live=%d cache=%u voices=%u admitted=%u playing=%d local=%d speech=%d",
@@ -2283,9 +2221,11 @@ static void onNativeWindowCreated(ANativeActivity *activity, ANativeWindow *wind
     pthread_mutex_unlock(&g_window_mutex);
     ANativeWindow_setBuffersGeometry(window, 0, 0, WINDOW_FORMAT_RGBA_8888);
     const float density = read_density(activity);
+    const int disp_rot = fv_android_get_display_rotation_degrees(activity);
     pthread_mutex_lock(&g_state_mutex);
     g_app.density = density;
-    g_app.text_scale = fv_android_text_scale(activity->clazz,density);
+    g_app.text_scale = fv_android_text_scale(activity->clazz, density);
+    g_app.display_rotation_deg = disp_rot;
     pthread_mutex_unlock(&g_state_mutex);
     LOGI("ANativeWindow created: %dx%d density=%.2f", ANativeWindow_getWidth(window), ANativeWindow_getHeight(window),
          density);
@@ -2303,9 +2243,11 @@ static void onNativeWindowDestroyed(ANativeActivity *activity, ANativeWindow *wi
 
 static void onConfigurationChanged(ANativeActivity *activity) {
     const float density = read_density(activity);
+    const int disp_rot = fv_android_get_display_rotation_degrees(activity);
     pthread_mutex_lock(&g_state_mutex);
     g_app.density = density;
-    g_app.text_scale = fv_android_text_scale(activity->clazz,density);
+    g_app.text_scale = fv_android_text_scale(activity->clazz, density);
+    g_app.display_rotation_deg = disp_rot;
     g_app.scroll_y = 0.0f;
     pthread_mutex_unlock(&g_state_mutex);
 }
@@ -2405,6 +2347,7 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     fv_android_text_set_vm(activity->vm);
     g_app.density = read_density(activity);
     g_app.text_scale = fv_android_text_scale(activity->clazz,g_app.density);
+    g_app.display_rotation_deg = fv_android_get_display_rotation_degrees(activity);
     g_app.accel_gz = 9.81f;
     g_app.emf_baseline = -1.0f;
     g_app.gyro_baseline = -1.0f;

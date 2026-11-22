@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_local_player.h"
 #include "fv_jni_helpers.h"
+#include "fv_media_decode.h"
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include <media/NdkImageReader.h>
@@ -70,33 +71,16 @@ static bool methods(JNIEnv *env,PlayerMethods *m) {
 static bool cancelled(const WaveformJob *job) { return atomic_load(&job->cancel); }
 
 static bool compressed_waveform(const WaveformJob *job,float peaks[FV_PLAYBACK_BINS]) {
-    bool ok=false, codec_started=false, input_eos=false, output_eos=false;
-    uint64_t samples=0; int sample_rate=0,channels=0,encoding=2,idle=0;
+    bool ok=false, input_eos=false, output_eos=false;
+    uint64_t samples=0; int32_t sample_rate=0,channels=0; int encoding=2,idle=0;
     int fd=open(job->path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
     if (fd<0) return false;
     struct stat st;
-    AMediaExtractor *extractor=AMediaExtractor_new();AMediaCodec *codec=NULL;AMediaFormat *format=NULL;
+    AMediaExtractor *extractor=NULL; AMediaCodec *codec=NULL;
     int64_t duration_us=0;
-    if (!extractor || fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_size<=0 ||
-        AMediaExtractor_setDataSourceFd(extractor,fd,0,st.st_size)!=AMEDIA_OK) goto done;
-    const size_t tracks=AMediaExtractor_getTrackCount(extractor);
-    for (size_t i=0;i<tracks;i++) {
-        format=AMediaExtractor_getTrackFormat(extractor,i);
-        const char *mime=NULL;
-        if (format && AMediaFormat_getString(format,AMEDIAFORMAT_KEY_MIME,&mime) && !strncmp(mime,"audio/",6)) {
-            AMediaFormat_getInt32(format,AMEDIAFORMAT_KEY_SAMPLE_RATE,&sample_rate);
-            AMediaFormat_getInt32(format,AMEDIAFORMAT_KEY_CHANNEL_COUNT,&channels);
-            AMediaFormat_getInt64(format,AMEDIAFORMAT_KEY_DURATION,&duration_us);
-            codec=AMediaCodec_createDecoderByType(mime);
-            if (!codec || duration_us<=0 || duration_us>INT64_MAX/FV_PLAYBACK_BINS || AMediaExtractor_selectTrack(extractor,i)!=AMEDIA_OK) goto done;
-            AMediaFormat_setInt32(format,"pcm-encoding",2);
-            if (AMediaCodec_configure(codec,format,NULL,NULL,0)!=AMEDIA_OK || AMediaCodec_start(codec)!=AMEDIA_OK) goto done;
-            codec_started=true;break;
-        }
-        if (format) AMediaFormat_delete(format);
-        format=NULL;
-    }
-    if (!codec_started) goto done;
+    if (fstat(fd,&st)!=0 || !S_ISREG(st.st_mode) || st.st_size<=0 ||
+        !fv_media_open_audio_track(fd,st.st_size,true,&extractor,&codec,&sample_rate,&channels,&duration_us) ||
+        duration_us<=0 || duration_us>INT64_MAX/FV_PLAYBACK_BINS) goto done;
     while (!output_eos && !cancelled(job) && idle<200) {
         bool progress=false;
         if (!input_eos) {
@@ -156,9 +140,7 @@ static bool compressed_waveform(const WaveformJob *job,float peaks[FV_PLAYBACK_B
     }
     ok=output_eos && samples>0 && !cancelled(job);
 done:
-    if (codec_started) AMediaCodec_stop(codec);
-    if (codec) AMediaCodec_delete(codec);
-    if (format) AMediaFormat_delete(format);
+    if (codec) { AMediaCodec_stop(codec); AMediaCodec_delete(codec); }
     if (extractor) AMediaExtractor_delete(extractor);
     close(fd);return ok;
 }
@@ -184,19 +166,8 @@ static void stop_analysis(void) {
 static void video_image(AImageReader *reader) {
     AImage *image=NULL;
     if (!reader || AImageReader_acquireLatestImage(reader,&image)!=AMEDIA_OK || !image) return;
-    int32_t width=0,height=0;AImageCropRect crop={0};
-    const uint8_t *planes[3]={0};size_t lengths[3]={0};int strides[3]={0},steps[3]={0};
-    bool ok=AImage_getWidth(image,&width)==AMEDIA_OK && AImage_getHeight(image,&height)==AMEDIA_OK &&
-            AImage_getCropRect(image,&crop)==AMEDIA_OK;
-    for (int i=0;ok && i<3;i++) {
-        uint8_t *data=NULL;int length=0;
-        ok=AImage_getPlaneData(image,i,&data,&length)==AMEDIA_OK && length>0 &&
-           AImage_getPlaneRowStride(image,i,&strides[i])==AMEDIA_OK && AImage_getPlanePixelStride(image,i,&steps[i])==AMEDIA_OK;
-        planes[i]=data;lengths[i]=length>0 ? (size_t)length : 0;
-    }
     pthread_mutex_lock(&p.mutex);
-    if (ok && p.pixels && fv_yuv420_to_argb(p.pixels,p.pixel_w,p.pixel_h,width,height,
-                crop.left,crop.top,crop.right,crop.bottom,planes,lengths,strides,steps)) p.state.video_frames++;
+    if (p.pixels && fv_media_image_to_argb(image,p.pixels,p.pixel_w,p.pixel_h)) p.state.video_frames++;
     pthread_mutex_unlock(&p.mutex);
     AImage_delete(image);
 }
@@ -381,6 +352,14 @@ void fv_local_player_toggle(void) {
 void fv_local_player_mute(void) { pthread_mutex_lock(&p.mutex);p.desired_muted=!p.desired_muted;pthread_mutex_unlock(&p.mutex); }
 void fv_local_player_seek(int64_t ms) {
     pthread_mutex_lock(&p.mutex);if (p.state.ready) p.pending_seek=fv_playback_clamp_seek(ms,p.state.duration_ms);pthread_mutex_unlock(&p.mutex);
+}
+void fv_local_player_seek_delta(int64_t delta_ms) {
+    pthread_mutex_lock(&p.mutex);
+    if (p.state.ready) {
+        const int64_t base = p.pending_seek >= 0 ? p.pending_seek : p.state.position_ms;
+        p.pending_seek = fv_playback_clamp_seek(base + delta_ms, p.state.duration_ms);
+    }
+    pthread_mutex_unlock(&p.mutex);
 }
 void fv_local_player_scrub_begin(void) {
     pthread_mutex_lock(&p.mutex);p.scrub_resume=p.desired_playing;p.desired_playing=false;pthread_mutex_unlock(&p.mutex);

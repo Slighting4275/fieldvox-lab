@@ -1,12 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_vox_controls.h"
-#include "fv_native_audio.h"
 
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
-
-static int percent(int value) { return value < 0 ? 0 : (value > 100 ? 100 : value); }
 
 int fv_vox_slider_percent(float x, float left, float width) {
     if (!isfinite(x) || !isfinite(left) || !isfinite(width) || width <= 0.0f) return 0;
@@ -100,41 +97,4 @@ bool fv_vox_detect_voice(FvVoxDucker *state, const int16_t *mic, int frames,
         state->speech_detected = false;
     }
     return clock < state->hold_until;
-}
-
-static void blend(int16_t *pcm, const int16_t *dry, int frames, int amount) {
-    for (int i = 0; i < frames; i++) {
-        const int32_t value = ((int32_t)pcm[i] * amount + (int32_t)dry[i] * (100 - amount)) / 100;
-        pcm[i] = (int16_t)value;
-    }
-}
-
-void fv_vox_apply_effects(int16_t *pcm, int frames, int echo, int reverb, int distortion) {
-    if (!pcm || frames <= 0) return;
-    echo = percent(echo); reverb = percent(reverb); distortion = percent(distortion);
-    int16_t dry[256];
-    const int echo_delay_ms = echo > 0 ? (echo * 200 / 100) : 150;
-    const float reverb_mix = reverb > 0 ? ((float)reverb / 100.0f) : 0.75f;
-    for (int off = 0; off < frames;) {
-        const int count = frames - off > 256 ? 256 : frames - off;
-        int16_t *block = pcm + off;
-        memcpy(dry, block, (size_t)count * sizeof(*dry));
-        /* Advance delay state even at 0%, so enabling cannot replay an old session. */
-        fv_audio_apply_echo_ex(block, count, echo_delay_ms, 1.0f);
-        blend(block, dry, count, echo);
-        memcpy(dry, block, (size_t)count * sizeof(*dry));
-        fv_apply_schroeder_reverb_ex(block, count, reverb_mix);
-        blend(block, dry, count, reverb);
-        if (distortion) {
-            const float drive = 1.0f + (float)distortion * 0.07f;
-            const float normalization = tanhf(drive);
-            for (int i = 0; i < count; i++) {
-                const float clean = (float)block[i];
-                const float wet = tanhf(clean / 32768.0f * drive) / normalization * 32767.0f;
-                const float value = clean + (wet - clean) * ((float)distortion / 100.0f);
-                block[i] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, value));
-            }
-        }
-        off += count;
-    }
 }

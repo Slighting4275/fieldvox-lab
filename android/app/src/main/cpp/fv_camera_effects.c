@@ -143,3 +143,34 @@ int fv_camera_gesture_end(FvCameraGesture *g, float x, float y, int64_t ns, bool
     fv_camera_gesture_cancel(g);
     return direction;
 }
+static uint8_t clamp_u8(int value) { return (uint8_t)(value < 0 ? 0 : (value > 255 ? 255 : value)); }
+bool fv_yuv420_to_argb(uint32_t *dst, int dw, int dh, int sw, int sh, int left, int top, int right, int bottom,
+                       const uint8_t *planes[3], const size_t lengths[3], const int rs[3], const int ps[3]) {
+    if (!dst || !planes || !lengths || !rs || !ps || dw <= 0 || dh <= 0 || dw > 4096 || dh > 4096 ||
+        sw <= 0 || sh <= 0 || sw > 8192 || sh > 8192 || left < 0 || top < 0 || right > sw || bottom > sh ||
+        right <= left || bottom <= top) return false;
+    for (int p = 0; p < 3; p++) {
+        if (!planes[p] || rs[p] <= 0 || ps[p] <= 0 || rs[p] > 1048576 || ps[p] > 16) return false;
+        const size_t xx = (size_t)(right - 1) / (p ? 2u : 1u), yy = (size_t)(bottom - 1) / (p ? 2u : 1u);
+        if (xx * (size_t)ps[p] >= (size_t)rs[p] || yy * (size_t)rs[p] + xx * (size_t)ps[p] >= lengths[p]) return false;
+    }
+    for (int y = 0; y < dh; y++) {
+        const int sy = top + (int)((int64_t)y * (bottom - top) / dh);
+        for (int x = 0; x < dw; x++) {
+            const int sx = left + (int)((int64_t)x * (right - left) / dw);
+            const int l = (int)planes[0][(size_t)sy * (size_t)rs[0] + (size_t)sx * (size_t)ps[0]] - 16;
+            const int u = (int)planes[1][(size_t)(sy / 2) * (size_t)rs[1] + (size_t)(sx / 2) * (size_t)ps[1]] - 128;
+            const int v = (int)planes[2][(size_t)(sy / 2) * (size_t)rs[2] + (size_t)(sx / 2) * (size_t)ps[2]] - 128;
+            const uint32_t r = clamp_u8((298 * l + 459 * v + 128) >> 8);
+            const uint32_t g = clamp_u8((298 * l - 55 * u - 136 * v + 128) >> 8);
+            const uint32_t b = clamp_u8((298 * l + 541 * u + 128) >> 8);
+            dst[(size_t)y * (size_t)dw + (size_t)x] = 0xff000000u | (r << 16u) | (g << 8u) | b;
+        }
+    }
+    return true;
+}
+int fv_camera_compensation_degrees(int sensor_orientation_deg, int display_rotation_deg) {
+    const int s = ((sensor_orientation_deg % 360) + 360) % 360;
+    const int d = ((display_rotation_deg % 360) + 360) % 360;
+    return (s - d + 360) % 360;
+}

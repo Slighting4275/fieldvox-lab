@@ -19,20 +19,20 @@ add_library(
     fieldvox_native
     SHARED
     fieldvox_native_activity.c
+    fv_android_platform.c
+    fv_media_decode.c
     fv_native_camera.c
     fv_camera_effects.c
     fv_native_video_recorder.c
     fv_gfx.c
     fv_ui_layout.c
     fv_android_text.c
-    fv_grain_gate.c
     fv_hit_capture.c
     fv_vox_controls.c
     fv_recording_data.c
     fv_local_player.c
     fv_native_radio.c
     fv_platform_voices.c
-    fv_core.c
     fv_stage1r_native_audio.c
     fv_sensor_dsp.c
     fv_local_bank.c

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_core.h"
 #include "../../android/app/src/main/cpp/fv_recording_data.h"
+#include "../../android/app/src/main/cpp/fv_sensor_dsp.h"
 
 #include <errno.h>
 #include <math.h>
@@ -8,10 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-
-float fv_mag3(float x, float y, float z) {
-    return hypotf(hypotf(x, y), z);
-}
 
 void fv_trigger_init(FV_TriggerState *st, float baseline_mag, float threshold, uint64_t cooldown_ns) {
     memset(st, 0, sizeof(*st));

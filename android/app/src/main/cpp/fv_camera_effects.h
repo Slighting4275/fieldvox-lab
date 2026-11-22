@@ -34,4 +34,10 @@ void fv_camera_gesture_cancel(FvCameraGesture *gesture);
 /* +1 next (left swipe), -1 previous (right swipe), 0 no fling.
  * Eligibility is checked again at release to cover recording/overlay changes. */
 int fv_camera_gesture_end(FvCameraGesture *gesture, float x, float y, int64_t ns, bool eligible);
+/* Validates plane ranges, including interleaved chroma and decoder padding. */
+bool fv_yuv420_to_argb(uint32_t *dst, int dst_w, int dst_h, int src_w, int src_h,
+                       int left, int top, int right, int bottom,
+                       const uint8_t *planes[3], const size_t lengths[3],
+                       const int row_stride[3], const int pixel_stride[3]);
+int fv_camera_compensation_degrees(int sensor_orientation_deg, int display_rotation_deg);
 #endif

@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "fv_grain_gate.h"
+#include "fv_sensor_dsp.h"
 
 #define FV_HIT_RATE 48000u
 #define FV_HIT_FRAMES (3u * FV_HIT_RATE)

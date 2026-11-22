@@ -66,20 +66,8 @@ int main(void) {
     for (size_t i=1;i<catalog.count;i++) assert(catalog.items[i-1].modified>=catalog.items[i].modified);
     assert(fv_recording_catalog_load(&catalog,directory,NULL,path,NULL) && catalog.count==12);
     fv_recording_catalog_free(&catalog);assert(!catalog.items && !catalog.count);
-    uint8_t y[]={235,235,235,235},uv[]={128,128};
-    const uint8_t *planes[]={y,uv,uv+1};size_t lengths[]={4,2,1};int row[]={2,2,2},pixel[]={1,2,2};
-    uint32_t image[5]={0,0,0,0,0x12345678};
-    assert(fv_yuv420_to_argb(image,2,2,2,2,0,0,2,2,planes,lengths,row,pixel));
-    for (int i=0;i<4;i++) assert(image[i]==0xffffffffu);
-    assert(image[4]==0x12345678);
-    memset(y,16,sizeof(y));assert(fv_yuv420_to_argb(image,2,2,2,2,0,0,2,2,planes,lengths,row,pixel));assert(image[0]==0xff000000u);
-    memset(y,63,sizeof(y));uv[0]=102;uv[1]=240;
-    assert(fv_yuv420_to_argb(image,2,2,2,2,0,0,2,2,planes,lengths,row,pixel));assert((image[0]>>16&255u)>=254u && (image[0]>>8&255u)<=1u && (image[0]&255u)<=1u);
-    lengths[2]=0;assert(!fv_yuv420_to_argb(image,2,2,2,2,0,0,2,2,planes,lengths,row,pixel));
-    lengths[2]=1;row[0]=0;assert(!fv_yuv420_to_argb(image,2,2,2,2,0,0,2,2,planes,lengths,row,pixel));
-    row[0]=2;assert(!fv_yuv420_to_argb(image,2,2,2,2,-1,0,2,2,planes,lengths,row,pixel));
     unlink(other);for (int i=0;i<12;i++) { snprintf(other,sizeof(other),"%s/session-%02d.mp4",directory,i);unlink(other); }
     unlink(path);assert(rmdir(directory)==0);
-    puts("Local recording tests passed: PCM metadata/peaks, malformed files, paged catalog, bookmarks, seek bounds, padded/interleaved YUV and color.");
+    puts("Local recording tests passed: PCM metadata/peaks, malformed files, paged catalog, bookmarks, seek bounds.");
     return 0;
 }

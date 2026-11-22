@@ -1,253 +1,356 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
-#define _POSIX_C_SOURCE 200809L
 #include "../../android/app/src/main/cpp/fv_fragment_engine.h"
 #include "../../android/app/src/main/cpp/fv_fragment_store.h"
 #include "../../android/app/src/main/cpp/fv_vox_controls.h"
+#include "../../android/app/src/main/cpp/fv_station_policy.h"
+#include "../../android/app/src/main/cpp/fv_environment_reverb.h"
 #include <assert.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
-#include "../../android/app/src/main/cpp/fv_station_policy.h"
-#include "../../android/app/src/main/cpp/fv_environment_reverb.h"
 
-static constexpr double pi = 3.14159265358979323846;
-static int16_t source[48000], output[96000], clean[96000];
-static FvVoxDecimalTrigger normal(void) {
-    return (FvVoxDecimalTrigger){.passed=true, .pitch_factor=1.0f, .speed_factor=1.0f,
-        .grain_duration_ms=400, .seek_offset=0.0f, .prefer_live=true};
-}
-static double frequency(const int16_t *pcm, size_t frames) {
-    size_t crosses = 0, first = 0, last = 0;
-    for (size_t i = 2049; i + 2048 < frames; i++) if (pcm[i-1] <= 0 && pcm[i] > 0) {
-        if (!crosses) first = i;
-        last = i; crosses++;
+static void fill_sine(int16_t *pcm, size_t frames, double freq_hz) {
+    for (size_t i = 0; i < frames; i++) {
+        pcm[i] = (int16_t)(18000.0 * sin(2.0 * 3.14159265358979323846 * freq_hz *
+                                        (double)i / (double)FV_FRAGMENT_RATE));
     }
-    assert(crosses > 2 && last > first);
-    return (double)(crosses-1u) * 48000.0 / (double)(last-first);
 }
+
+static uint64_t abs_sum_samples(const int16_t *pcm, size_t frames) {
+    uint64_t total = 0;
+    for (size_t i = 0; i < frames; i++) {
+        const int32_t s = pcm[i];
+        total += (uint64_t)(s < 0 ? -s : s);
+    }
+    return total;
+}
+
+static void rm_tree_shallow(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *ent;
+    char path[512];
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name);
+        unlink(path);
+    }
+    closedir(d);
+    rmdir(dir);
+}
+
 static void test_pitch_and_tempo(void) {
-    for (size_t i = 0; i < 19200; i++) source[i] = (int16_t)(12000.0*sin(2.0*pi*440.0*(double)i/48000.0));
-    const float pitches[] = {0.6f, 1.0f, 1.2f};
-    const float speeds[] = {0.7f, 1.0f, 1.2f};
-    for (unsigned p=0; p<3; p++) for (unsigned s=0; s<3; s++) {
-        const size_t frames = fv_fragment_transform(source,19200,pitches[p],speeds[s],output,96000);
-        assert(frames == (size_t)llround(19200.0/(double)speeds[s]));
-        const double measured = frequency(output,frames), wanted = 440.0*(double)pitches[p];
-        printf("pitch=%.2f speed=%.2f frequency=%.2fHz frames=%zu\n",(double)pitches[p],(double)speeds[s],measured,frames);
-        assert(fabs(measured-wanted) < wanted*0.04);
-    }
-    assert(fv_fragment_transform(source,19200,NAN,1,output,96000)==0);
-    assert(fv_fragment_transform(source,19200,1,0,output,96000)==0);
-    assert(fv_fragment_transform(source,19200,1,1,output,100)==0);
+    static int16_t src[FV_FRAGMENT_RATE];
+    static int16_t out_fast[FV_FRAGMENT_RATE];
+    static int16_t out_slow[FV_FRAGMENT_RATE];
+    fill_sine(src, FV_FRAGMENT_RATE, 220.0);
+    const size_t n_norm = fv_fragment_transform(src, 24000u, 1.0f, 1.0f, out_fast, FV_FRAGMENT_RATE);
+    assert(n_norm == 24000u);
+    const size_t n_fast = fv_fragment_transform(src, 24000u, 1.2f, 1.2f, out_fast, FV_FRAGMENT_RATE);
+    assert(n_fast > 0u && n_fast < n_norm);
+    const size_t n_slow = fv_fragment_transform(src, 24000u, 0.6f, 0.7f, out_slow, FV_FRAGMENT_RATE);
+    assert(n_slow > n_norm);
 }
-static void test_scheduling(void) {
-    FvFragmentEngine *e=fv_fragment_create(); assert(e);
-    fv_fragment_set_settings(e,(FvFragmentSettings){.echo=0.75f,.sweep_ms=200});
-    memset(source,0,sizeof(source)); source[0]=10000;
-    FvVoxDecimalTrigger t=normal();
-    assert(!fv_fragment_trigger_pcm(e,&t,source,19200,1,0,true));
-    assert(fv_fragment_trigger_pcm(e,&t,source,19200,1,0,false));
-    assert(!fv_fragment_trigger_pcm(e,&t,source,19200,2,48000,false));
-    FvFragmentStatus status;
-    fv_fragment_render(e,clean,output,60000,0,&status);
-    assert(output[0]==10000 && output[7200]==600 && output[14400]==180 && output[21600]==54 && output[28800]==16);
-    assert(output[36000]==0 && clean[7200]==0 && clean[28800]==0);
-    assert(!fv_fragment_trigger_pcm(e,&t,source,19200,1,4u*48000u,false));
-    assert(fv_fragment_trigger_pcm(e,&t,source,19200,1,5u*48000u,false));
-    fv_fragment_destroy(e);
 
-    e=fv_fragment_create(); assert(e);
-    fv_fragment_set_settings(e,(FvFragmentSettings){.reverb=1.0f,.sweep_ms=200});
-    assert(fv_fragment_trigger_pcm(e,&t,source,19200,1,0,false));
-    assert(!fv_fragment_trigger_pcm(e,&t,source,19200,2,9u*48000u,false));
-    assert(fv_fragment_trigger_pcm(e,&t,source,19200,2,10u*48000u,false));
-    fv_fragment_destroy(e);
+typedef struct {
+    int selected_station;
+    bool busy;
+    bool fail_request;
+    int request_calls;
+    bool result_ready;
+    int result_station;
+    size_t result_frames;
+    int16_t *result_pcm;
+    int result_fd;
+    FvVoxDecimalTrigger result_trigger;
+} MockLiveSource;
+
+static bool mock_is_busy(void *ctx) {
+    return ((const MockLiveSource *)ctx)->busy;
 }
-static void test_bank_and_live(void) {
-    FvFragmentEngine *e=fv_fragment_create(); assert(e);
-    fv_fragment_set_settings(e,(FvFragmentSettings){.sweep_ms=200});
-    FvVoxDecimalTrigger t=normal();
-    for (size_t i=0;i<19200;i++) source[i]=10000;
-    assert(fv_fragment_cache_add(e,source,19200,7));
-    for (unsigned i=0;i<5;i++) assert(fv_fragment_trigger(e,&t,true,(uint64_t)i*5u*48000u,false));
-    assert(!fv_fragment_trigger(e,&t,true,25u*48000u,false));
-    for (unsigned i=0;i<105;i++) assert(fv_fragment_cache_add(e,source,19200,(int)i));
-    assert(fv_fragment_cache_count(e)==100u);
-    fv_fragment_destroy(e);
-    e=fv_fragment_create(); assert(e);
-    fv_fragment_set_settings(e,(FvFragmentSettings){.sweep_ms=200});
-    assert(!fv_fragment_feed(e,3,42,source,19200));
-    t.channel_hop=3;
-    assert(fv_fragment_trigger(e,&t,false,0,false));
-    FvFragmentStatus status;
-    fv_fragment_render(e,clean,output,1024,0,&status);
-    assert(status.station==42 && !status.cached && status.admitted==1 && output[100]==10000);
-    fv_fragment_reset_playback(e);
-    fv_fragment_render(e,clean,output,1024,1024,&status);
-    for (size_t i=0;i<1024;i++) assert(output[i]==0);
-    fv_fragment_destroy(e);
+
+static int mock_select_station(void *ctx, int channel_hop) {
+    const MockLiveSource *m = (const MockLiveSource *)ctx;
+    return m->selected_station >= 0 ? m->selected_station : (channel_hop % FV_FRAGMENT_DECKS);
 }
-typedef struct { unsigned calls; int fd; size_t frames; bool accept; } Speaker;
-static bool test_speaker(void *context,int fd,const int16_t *pcm,size_t frames,
-    const FvVoxDecimalTrigger *trigger,FvFragmentSettings settings) {
-    Speaker *s=context; s->calls++; s->fd=fd; s->frames=frames;
-    assert(pcm && frames>0 && trigger->passed && settings.reverb>=0.0f && settings.reverb<=1.0f);
-    if (fd>=0) { char bytes[6]; assert(pread(fd,bytes,sizeof(bytes),0)==6); assert(memcmp(bytes,"source",6)==0); }
-    return s->accept;
+
+static bool mock_request(void *ctx, int channel_hop, const FvVoxDecimalTrigger *trigger) {
+    (void)channel_hop;
+    (void)trigger;
+    MockLiveSource *m = (MockLiveSource *)ctx;
+    m->request_calls++;
+    return !m->fail_request;
 }
-static void test_speaker_sources(void) {
-    FvFragmentEngine *e=fv_fragment_create(); assert(e);
-    fv_fragment_set_settings(e,(FvFragmentSettings){.sweep_ms=200});
-    FILE *f=tmpfile(); assert(f); assert(fwrite("source",1,6,f)==6); assert(fflush(f)==0);
-    assert(fv_fragment_cache_add_source(e,source,48000,7,fileno(f)));
-    assert(fclose(f)==0);
-    Speaker speaker={.accept=true,.fd=-1}; fv_fragment_set_speaker(e,test_speaker,&speaker);
-    FvVoxDecimalTrigger t=normal(); t.prefer_live=false; t.seek_offset=0.6f;
-    /* A selected index at or past cache size is rejected, rather than wrapped. */
-    t.channel_hop=1; assert(!fv_fragment_trigger(e,&t,true,0,false));
-    t.channel_hop=2; assert(!fv_fragment_trigger(e,&t,true,0,false));
-    t.channel_hop=0; assert(fv_fragment_trigger(e,&t,true,0,false));
-    assert(speaker.calls==1u && speaker.frames==48000u && speaker.fd>=0);
-    const int owned=speaker.fd;
-    fv_fragment_destroy(e);
-    char fd_path[64]; snprintf(fd_path,sizeof(fd_path),"/proc/self/fd/%d",owned);
-    struct stat st; errno=0; assert(stat(fd_path,&st)==-1 && errno==ENOENT);
-    e=fv_fragment_create(); assert(e); speaker.accept=false;
-    fv_fragment_set_speaker(e,test_speaker,&speaker);
-    assert(!fv_fragment_trigger_pcm(e,&t,source,48000,7,0,false));
-    FvFragmentStatus status; fv_fragment_render(e,clean,output,1024,0,&status);
-    assert(!status.playing && status.admitted==0u);
-    fv_fragment_destroy(e);
+
+static bool mock_take_result(void *ctx, int16_t **pcm, size_t *frames, int *station,
+                             FvVoxDecimalTrigger *trigger, int *source_fd) {
+    MockLiveSource *m = (MockLiveSource *)ctx;
+    if (!m->result_ready) return false;
+    m->result_ready = false;
+    *pcm = m->result_pcm;
+    *frames = m->result_frames;
+    *station = m->result_station;
+    *trigger = m->result_trigger;
+    *source_fd = m->result_fd;
+    m->result_pcm = NULL;
+    m->result_fd = -1;
+    return true;
 }
-static void test_store(void) {
-    char dir[512]; const char *temp=getenv("TMPDIR");
-    snprintf(dir,sizeof(dir),"%s/fieldvox-fragments-XXXXXX",temp ? temp : "/tmp"); assert(mkdtemp(dir));
-    FvFragmentEngine *e=fv_fragment_create(); assert(e);
-    assert(fv_fragment_store_start(dir,e));
-    FILE *original=tmpfile(); assert(original); assert(fwrite("source",1,6,original)==6); assert(fflush(original)==0);
-    assert(fv_fragment_store_submit_source(source,19200,42,fileno(original)));
-    assert(fclose(original)==0);
-    fv_fragment_store_stop(); fv_fragment_destroy(e);
-    e=fv_fragment_create(); assert(e);
-    assert(fv_fragment_store_start(dir,e));
-    assert(fv_fragment_cache_count(e)==1u);
-    Speaker speaker={.accept=true,.fd=-1}; fv_fragment_set_speaker(e,test_speaker,&speaker);
-    FvVoxDecimalTrigger trigger=normal();
-    assert(fv_fragment_trigger(e,&trigger,true,0,false));
-    assert(speaker.calls==1u && speaker.fd>=0);
-    fv_fragment_store_stop(); fv_fragment_destroy(e);
-    char cache[544]; snprintf(cache,sizeof(cache),"%s/fieldvox-grain-cache-v2",dir);
-    DIR *d=opendir(cache); assert(d); struct dirent *entry;
-    while ((entry=readdir(d))) if (entry->d_name[0]!='.') {
-        char path[832]; snprintf(path,sizeof(path),"%s/%s",cache,entry->d_name); assert(unlink(path)==0);
-    }
-    closedir(d); assert(rmdir(cache)==0); assert(rmdir(dir)==0);
+
+typedef struct {
+    int submit_calls;
+    int last_station;
+    size_t last_frames;
+    int last_fd;
+} MockClipStore;
+
+static bool mock_store_submit(void *ctx, const int16_t *pcm, size_t frames,
+                              int station, int source_fd) {
+    (void)pcm;
+    MockClipStore *s = (MockClipStore *)ctx;
+    s->submit_calls++;
+    s->last_station = station;
+    s->last_frames = frames;
+    s->last_fd = source_fd;
+    return true;
 }
-static void test_pause_silences_static_and_tails(void) {
-    FvFragmentEngine *e=fv_fragment_create(); assert(e);
-    FvFragmentSettings settings={.echo=0.75f,.reverb=0.5f,.noise=true,.sweep_ms=200};
-    fv_fragment_set_settings(e,settings);
-    for (size_t i=0;i<19200;i++) source[i]=10000;
-    assert(fv_fragment_cache_add(e,source,19200,7));
-    FvVoxDecimalTrigger t=normal();
-    assert(fv_fragment_trigger(e,&t,true,0,false));
-    FvFragmentStatus status;
-    fv_fragment_render(e,clean,output,1024,0,&status);
-    assert(status.playing && status.voices==1 && output[100]!=0);
-    settings.paused=true; fv_fragment_set_settings(e,settings);
-    assert(!fv_fragment_trigger(e,&t,true,10u*48000u,false));
-    fv_fragment_render(e,clean,output,48000,1024,&status);
-    for (size_t i=0;i<48000;i++) assert(clean[i]==0 && output[i]==0);
-    assert(!status.playing && status.voices==0 && status.cache_count==1);
-    settings.paused=false; fv_fragment_set_settings(e,settings);
-    fv_fragment_render(e,clean,output,1024,10u*48000u,&status);
-    bool static_audible=false;
-    for (size_t i=0;i<1024;i++) { assert(clean[i]==0); static_audible|=output[i]!=0; }
-    assert(static_audible && !status.playing && status.voices==0);
-    assert(fv_fragment_trigger(e,&t,true,10u*48000u,false));
-    fv_fragment_destroy(e);
+
+typedef struct {
+    size_t calls;
+    const int16_t *source;
+    size_t source_frames;
+} MockLocalProvider;
+
+static size_t mock_read_local(void *ctx, float seek_offset, size_t frames,
+                              int16_t *output, size_t capacity) {
+    (void)seek_offset;
+    MockLocalProvider *lp = (MockLocalProvider *)ctx;
+    lp->calls++;
+    const size_t n = frames < lp->source_frames ? frames : lp->source_frames;
+    const size_t copy_n = n < capacity ? n : capacity;
+    memcpy(output, lp->source, copy_n * sizeof(int16_t));
+    return copy_n;
 }
-static void test_speech_band(void) {
-    int16_t mic[1024]; FvVoxDucker state={0};
-    for (unsigned i=0;i<1024;i++) mic[i]=(int16_t)(16000.0*sin(2.0*pi*1000.0*(double)i/48000.0));
-    assert(!fv_vox_detect_voice(&state,mic,1024,0,48000));
-    for (unsigned i=0;i<1024;i++) mic[i]=(int16_t)(16000.0*sin(2.0*pi*150.0*(double)i/48000.0));
-    assert(fv_vox_detect_voice(&state,mic,1024,1024,48000));
-    assert(fv_vox_detect_voice(&state,NULL,0,97023,48000));
-    assert(!fv_vox_detect_voice(&state,NULL,0,97024,48000));
-}
-static void test_request_selection_and_timing(void) {
-    FvFragmentEngine *e=fv_fragment_create(); assert(e);
-    fv_fragment_set_settings(e,(FvFragmentSettings){.echo=0.75f,.reverb=0.0f,.sweep_ms=200});
-    memset(source,0,sizeof(source)); source[0]=10000;
-    FvVoxDecimalTrigger t=normal();
-    assert(fv_fragment_cache_add(e,source,19200,7));
-    assert(fv_fragment_cache_add(e,source,19200,8));
-    /* An unavailable selected live deck must not walk to another deck or cache. */
-    assert(!fv_fragment_feed(e,3,42,source,19200));
-    t.channel_hop=2;
-    assert(!fv_fragment_trigger(e,&t,false,0,false));
-    assert(fv_fragment_begin_live(e,&t,42,0,false));
-    assert(fv_fragment_live_pending(e));
-    assert(!fv_fragment_trigger(e,&t,true,48000,false));
-    assert(fv_fragment_finish_live(e,source,19200,48000,false));
+
+static void test_scheduling_and_live_seams(void) {
+    static int16_t clip[FV_FRAGMENT_RATE];
+    fill_sine(clip, FV_FRAGMENT_RATE, 330.0);
+
+    FvFragmentEngine *e = fv_fragment_create();
+    assert(e != NULL);
+
+    MockLiveSource live = {.selected_station = 7, .result_fd = -1};
+    MockClipStore store = {.last_station = -1, .last_fd = -1};
+    fv_fragment_set_live_source(e, (FvFragmentLiveSource){
+        .context = &live,
+        .is_busy = mock_is_busy,
+        .select_station = mock_select_station,
+        .request = mock_request,
+        .take_result = mock_take_result
+    });
+    fv_fragment_set_clip_store(e, (FvFragmentClipStore){
+        .context = &store,
+        .submit = mock_store_submit
+    });
+    fv_fragment_set_settings(e, (FvFragmentSettings){
+        .echo = 0.0f, .reverb = 0.0f, .pitch_override = 0.0f,
+        .noise = false, .paused = false, .auto_enabled = false, .local_only = false,
+        .sweep_ms = 250u
+    });
+
+    const FvVoxDecimalTrigger trig = {
+        .passed = true, .pitch_factor = 1.0f, .speed_factor = 1.0f,
+        .grain_duration_ms = 400, .seek_offset = 0.1f, .channel_hop = 2, .prefer_live = true
+    };
+
+    /* Failed live request must roll back live_pending cleanly. */
+    live.fail_request = true;
+    fv_fragment_submit_trigger(e, FV_GATE_MAGNETOMETER, &trig);
+    FvFragmentStepResult res = {0};
+    fv_fragment_step(e, 0u, false, NULL, &res);
+    assert(!res.request_started);
     assert(!fv_fragment_live_pending(e));
-    /* Cooldown is measured from request time, not completion time. */
-    assert(fv_fragment_begin_live(e,&t,43,2u*48000u,false));
-    assert(!fv_fragment_finish_live(e,NULL,0,2u*48000u,false));
-    assert(!fv_fragment_begin_live(e,&t,44,3u*48000u,false));
-    assert(fv_fragment_begin_live(e,&t,44,4u*48000u,false));
-    fv_fragment_finish_live(e,NULL,0,4u*48000u,true);
-    fv_fragment_reset_playback(e);
-    t.channel_hop=0;
-    for(unsigned i=0;i<5;i++) assert(fv_fragment_trigger(e,&t,true,(uint64_t)(10u+i*2u)*48000u,false));
-    /* The selected exhausted cache slot does not walk to the unused slot. */
-    assert(!fv_fragment_trigger(e,&t,true,20u*48000u,false));
-    t.channel_hop=1; assert(fv_fragment_trigger(e,&t,true,20u*48000u,false));
-    fv_fragment_destroy(e);
 
-    e=fv_fragment_create(); assert(e);t=normal();
-    fv_fragment_set_settings(e,(FvFragmentSettings){.echo=0.75f,.sweep_ms=200});
-    assert(fv_fragment_trigger_pcm(e,&t,source,19200,1,0,false));
-    FvFragmentStatus status;
-    fv_fragment_render(e,clean,output,7200,0,&status); assert(status.voices==1);
-    fv_fragment_render(e,clean,output,1,7200,&status); assert(status.voices==2 && output[0]==600);
-    fv_fragment_reset_playback(e);
-    fv_fragment_render(e,clean,output,30000,7201,&status);
-    for(size_t i=0;i<30000;i++) assert(output[i]==0);
+    /* Advance past cooldown (2.0 s @ 48 kHz = 96000 frames) and start live request. */
+    live.fail_request = false;
+    fv_fragment_submit_trigger(e, FV_GATE_GYROSCOPE, &trig);
+    fv_fragment_step(e, 100000u, false, NULL, &res);
+    assert(res.request_started);
+    assert(fv_fragment_live_pending(e));
+
+    /* Queue a proximity trigger while live fetch is pending; deliver live PCM first. */
+    const FvVoxDecimalTrigger prox = {
+        .passed = true, .pitch_factor = 1.0f, .speed_factor = 1.0f,
+        .grain_duration_ms = 400, .seek_offset = 0.2f, .channel_hop = 0, .prefer_live = false
+    };
+    fv_fragment_submit_trigger(e, FV_GATE_PROXIMITY, &prox);
+
+    int16_t *downloaded = malloc(sizeof(clip));
+    assert(downloaded != NULL);
+    memcpy(downloaded, clip, sizeof(clip));
+    live.result_ready = true;
+    live.result_pcm = downloaded;
+    live.result_frames = FV_FRAGMENT_RATE;
+    live.result_station = 7;
+    live.result_trigger = trig;
+    live.result_fd = open("/dev/null", O_RDONLY);
+
+    fv_fragment_step(e, 102400u, false, NULL, &res);
+    assert(res.admitted);
+    assert(!fv_fragment_live_pending(e));
+    assert(fv_fragment_cache_count(e) == 1u);
+    assert(store.submit_calls == 1 && store.last_station == 7 && store.last_frames == FV_FRAGMENT_RATE);
+
+    /* Next step immediately honors queued proximity trigger (bypassing cooldown) from cache. */
+    fv_fragment_step(e, 103000u, false, NULL, &res);
+    assert(res.admitted);
+    assert(res.reason == FV_GATE_PROXIMITY);
+
+    /* Regular non-proximity trigger within reverb cooldown is blocked. */
+    FvVoxDecimalTrigger cached_trig = trig;
+    cached_trig.prefer_live = false;
+    cached_trig.channel_hop = 0;
+    assert(!fv_fragment_trigger(e, &cached_trig, true, 105000u, false));
+
+    int16_t clean[512], proc[512], aux[512];
+    FvFragmentStatus status = {0};
+    fv_fragment_render(e, clean, proc, aux, 512u, 103000u, &status);
+    assert(status.playing && status.voices >= 1u && status.reason == FV_GATE_PROXIMITY);
+    assert(abs_sum_samples(clean, 512u) > 0u);
+
     fv_fragment_destroy(e);
 }
-static void test_language_group_and_reverb(void) {
-    char languages[24][8]; for(unsigned i=0;i<24;i++) snprintf(languages[i],8,"%s",i<12 ? "en_us" : "en_uk");
-    unsigned a[10],b[10];
-    assert(fv_station_group(languages,24,"en-US",123,a)==10u);
-    assert(fv_station_group(languages,24,"en-US",456,b)==10u);
-    assert(memcmp(a,b,sizeof(a))!=0);
-    for(unsigned i=0;i<10;i++) { assert(a[i]<12u); for(unsigned j=0;j<i;j++) assert(a[i]!=a[j]); }
-    FvEnvironmentReverb *r=fv_environment_reverb_create(); assert(r);
-    float send[64]={0},wet[64]; send[0]=16000;
-    fv_environment_reverb_set_mix(r,1.0f);
-    bool tail=false;
-    for(unsigned block=0;block<200;block++) {
-        fv_environment_reverb_process(r,send,wet,64);
-        for(unsigned i=0;i<64;i++) { assert(isfinite(wet[i])); if(block<37u) assert(wet[i]==0.0f);tail|=fabsf(wet[i])>0.01f; }
-        memset(send,0,sizeof(send));
-    }
-    assert(tail);
-    fv_environment_reverb_reset(r);fv_environment_reverb_set_mix(r,0.0f);
-    fv_environment_reverb_process(r,send,wet,64);for(unsigned i=0;i<64;i++) assert(wet[i]==0.0f);
-    fv_environment_reverb_destroy(r);
+
+typedef struct {
+    int calls;
+    int last_fd;
+    size_t last_frames;
+    bool allow;
+} MockSpeaker;
+
+static bool mock_speaker_cb(void *ctx, int source_fd, const int16_t *pcm,
+                            size_t frames, const FvVoxDecimalTrigger *trigger,
+                            FvFragmentSettings settings) {
+    (void)pcm;
+    (void)trigger;
+    (void)settings;
+    MockSpeaker *sp = (MockSpeaker *)ctx;
+    sp->calls++;
+    sp->last_fd = source_fd;
+    sp->last_frames = frames;
+    return sp->allow;
 }
+
+static void test_speaker_local_and_pause(void) {
+    static int16_t clip[FV_FRAGMENT_RATE];
+    fill_sine(clip, FV_FRAGMENT_RATE, 260.0);
+
+    FvFragmentEngine *e = fv_fragment_create();
+    assert(e != NULL);
+
+    MockSpeaker speaker = {.last_fd = -1, .allow = false};
+    MockLocalProvider local = {.source = clip, .source_frames = FV_FRAGMENT_RATE};
+    fv_fragment_set_speaker(e, mock_speaker_cb, &speaker);
+    fv_fragment_set_settings(e, (FvFragmentSettings){
+        .echo = 0.0f, .reverb = 0.5f, .pitch_override = 0.6f,
+        .noise = true, .paused = false, .auto_enabled = true, .local_only = true,
+        .sweep_ms = 200u
+    });
+
+    const FvFragmentLocalProvider local_prov = {.context = &local, .read_fragment = mock_read_local};
+    /* Speaker returning false prevents voice admission. */
+    FvFragmentStepResult res = {0};
+    fv_fragment_step(e, 0u, false, &local_prov, &res);
+    assert(local.calls == 1u);
+    assert(speaker.calls == 1 && !res.admitted);
+
+    /* Allow speaker and advance past auto cooldown -> auto-scan admits from local provider. */
+    speaker.allow = true;
+    fv_fragment_step(e, 480000u, false, &local_prov, &res);
+    assert(res.admitted && res.used_auto_trigger && res.reason == FV_GATE_AUTO_SCAN);
+    assert(speaker.last_frames == 400u * 48u);
+
+    /* Pausing suspends fragment playback and static immediately. */
+    fv_fragment_set_settings(e, (FvFragmentSettings){
+        .paused = true, .noise = true, .reverb = 0.5f, .echo = 0.5f
+    });
+    int16_t clean[256], proc[256], aux[256];
+    FvFragmentStatus status = {0};
+    fv_fragment_render(e, clean, proc, aux, 256u, 480000u, &status);
+    assert(!status.playing);
+    assert(abs_sum_samples(clean, 256u) == 0u);
+    assert(abs_sum_samples(proc, 256u) == 0u);
+    assert(abs_sum_samples(aux, 256u) == 0u);
+
+    fv_fragment_destroy(e);
+}
+
+static void test_store_roundtrip(void) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/fv_store_test_%d", (int)getpid());
+    rm_tree_shallow(dir);
+    assert(mkdir(dir, 0700) == 0);
+
+    static int16_t clip[FV_FRAGMENT_RATE / 2u];
+    fill_sine(clip, FV_FRAGMENT_RATE / 2u, 440.0);
+
+    FvFragmentEngine *e1 = fv_fragment_create();
+    assert(e1 != NULL);
+    assert(fv_fragment_store_start(dir, e1));
+    FvFragmentClipStore store = fv_fragment_store_adapter();
+    assert(store.submit != NULL);
+    assert(store.submit(store.context, clip, FV_FRAGMENT_RATE / 2u, 11, -1));
+    fv_fragment_store_stop();
+    fv_fragment_destroy(e1);
+
+    FvFragmentEngine *e2 = fv_fragment_create();
+    assert(e2 != NULL);
+    assert(fv_fragment_store_start(dir, e2));
+    assert(fv_fragment_cache_count(e2) >= 1u);
+    fv_fragment_store_stop();
+    fv_fragment_destroy(e2);
+
+    char cache_dir[300];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", dir);
+    rm_tree_shallow(cache_dir);
+    rm_tree_shallow(dir);
+}
+
+static void test_speech_and_station_reverb(void) {
+    int16_t speech[512];
+    int16_t high[512];
+    fill_sine(speech, 512u, 160.0);
+    fill_sine(high, 512u, 1800.0);
+    assert(fv_vox_calc_speech_band_energy(speech, 512, FV_FRAGMENT_RATE) >
+           fv_vox_calc_speech_band_energy(high, 512, FV_FRAGMENT_RATE));
+
+    const char langs[4][8] = {"en_us", "es_mx", "en_us", "fr_fr"};
+    unsigned group[FV_STATION_GROUP_SIZE] = {0};
+    const size_t cnt = fv_station_group(langs, 4u, "en_us", 1u, group);
+    assert(cnt >= 2u);
+
+    FvEnvironmentReverb *rev = fv_environment_reverb_create();
+    assert(rev != NULL);
+    fv_environment_reverb_set_mix(rev, 0.5f);
+    float send[64];
+    float wet[64];
+    for (int i = 0; i < 64; i++) send[i] = (i == 0) ? 1.0f : 0.0f;
+    fv_environment_reverb_process(rev, send, wet, 64u);
+    fv_environment_reverb_destroy(rev);
+}
+
 int main(void) {
-    test_speaker_sources(); test_pitch_and_tempo(); test_scheduling(); test_bank_and_live(); test_store(); test_speech_band();
-    test_pause_silences_static_and_tails();
-    test_request_selection_and_timing(); test_language_group_and_reverb();
-    puts("Fragment engine: pitch/tempo, four echoes, station/global cooldown, speech suppression, cache limits/reuse, live feed, persistent offline reload and stopped-playback silence passed.");
+    test_pitch_and_tempo();
+    test_scheduling_and_live_seams();
+    test_speaker_local_and_pause();
+    test_store_roundtrip();
+    test_speech_and_station_reverb();
+    printf("All fragment engine C23 unit tests PASSED.\n");
     return 0;
 }

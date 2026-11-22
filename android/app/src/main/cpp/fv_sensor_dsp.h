@@ -1,9 +1,23 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #ifndef FV_SENSOR_DSP_H
 #define FV_SENSOR_DSP_H
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
+typedef enum {
+    FV_GATE_AUTO_SCAN = 0,
+    FV_GATE_MAGNETOMETER,
+    FV_GATE_GYROSCOPE,
+    FV_GATE_VIBE,
+    FV_GATE_PROXIMITY,
+    FV_GATE_REASON_COUNT
+} FvGateReason;
+
+const char *fv_gate_reason_name(FvGateReason reason);
+bool fv_gate_emf_exceeds_threshold(float delta, float threshold);
+
+float fv_mag3(float x, float y, float z);
 int32_t fv_update_barometer(float hpa, float *out_delta);
 float fv_get_barometer_baseline(void);
 void fv_reset_barometer_baseline(float hpa);
@@ -52,12 +66,6 @@ bool fv_vox_eval_decimal_trigger(double x, double y, double z, bool is_magnetome
 bool fv_vox_eval_decimal_trigger_ex(double x, double y, double z, bool is_magnetometer,
                                     float distortion, int cache_file_count,
                                     FvVoxDecimalTrigger *out_trigger);
-
-/*
- * Boundary-clamped grain seek & duration truncation.
- */
-void fv_vox_clamp_grain_boundary(int total_duration_ms, float seek_fraction,
-                                 int *inout_duration_ms, int *out_seek_ms);
 
 /*
  * Four scheduled echo repetitions: Volume_k = base_vol * 0.2 * (0.3)^k.

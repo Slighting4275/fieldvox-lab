@@ -15,7 +15,6 @@ bool fv_local_bank_init(const char *settings_directory);
 void fv_local_bank_shutdown(void);
 void fv_local_bank_load(const char *path);
 void fv_local_bank_info(FvLocalBankInfo *info);
-int fv_local_bank_pull(int deck, int16_t *output, int frames, FvLocalBankInfo *info);
 
 #define FV_LOCAL_BANK_MAX_FILES 100
 

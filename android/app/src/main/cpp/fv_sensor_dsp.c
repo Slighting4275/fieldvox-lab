@@ -15,6 +15,25 @@ static float pressure_baseline, rem_phase;
 static uint32_t rem_pulse_counter;
 static constexpr float fv_pi = 3.14159265358979323846f;
 
+const char *fv_gate_reason_name(FvGateReason reason) {
+    switch (reason) {
+        case FV_GATE_AUTO_SCAN: return "auto-scan";
+        case FV_GATE_MAGNETOMETER: return "magnetometer";
+        case FV_GATE_GYROSCOPE: return "gyroscope";
+        case FV_GATE_VIBE: return "vibe-geophone";
+        case FV_GATE_PROXIMITY: return "proximity";
+        default: return "unknown";
+    }
+}
+
+bool fv_gate_emf_exceeds_threshold(float delta, float threshold) {
+    return isfinite(delta) && isfinite(threshold) && threshold > 0.0f && delta >= threshold;
+}
+
+float fv_mag3(float x, float y, float z) {
+    return hypotf(hypotf(x, y), z);
+}
+
 int32_t fv_update_barometer(float hpa, float *out_delta) {
     if (!isfinite(hpa) || hpa <= 0.0f) {
         if (out_delta) *out_delta = 0.0f;
@@ -217,30 +236,6 @@ bool fv_vox_eval_decimal_trigger_ex(double x, double y, double z, bool is_magnet
 bool fv_vox_eval_decimal_trigger(double x, double y, double z, bool is_magnetometer,
                                  float distortion, FvVoxDecimalTrigger *out_trigger) {
     return fv_vox_eval_decimal_trigger_ex(x, y, z, is_magnetometer, distortion, 0, out_trigger);
-}
-
-void fv_vox_clamp_grain_boundary(int total_duration_ms, float seek_fraction,
-                                 int *inout_duration_ms, int *out_seek_ms) {
-    if (!inout_duration_ms || !out_seek_ms) return;
-    if (total_duration_ms <= 0) {
-        *inout_duration_ms = 0;
-        *out_seek_ms = 0;
-        return;
-    }
-    const float frac = fmaxf(0.0f, fminf(1.0f, seek_fraction));
-    int seek = (int)(frac * (float)total_duration_ms);
-    int dur = *inout_duration_ms;
-    if (dur <= 0) dur = 400;
-
-    /* FieldVox overrun protection */
-    if (seek + dur > total_duration_ms) {
-        const int shifted = total_duration_ms - dur - 10;
-        seek = shifted > 0 ? shifted : 0;
-        const int remaining = total_duration_ms - seek;
-        if (dur > remaining) dur = remaining > 0 ? remaining : 0;
-    }
-    *out_seek_ms = seek;
-    *inout_duration_ms = dur;
 }
 
 float fv_vox_echo_tap_volume(float base_vol, int tap_index) {

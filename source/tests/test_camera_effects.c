@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "../../android/app/src/main/cpp/fv_camera_effects.h"
-#include "../../android/app/src/main/cpp/fv_recording_data.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -88,6 +87,31 @@ int main(void) {
     fv_camera_gesture_begin(&g,600,900,100000000,true);
     fv_camera_gesture_move(&g,200,0); assert(!g.active);
     fv_camera_gesture_begin(&g,NAN,900,0,true); assert(!g.active);
+    assert(fv_camera_compensation_degrees(90, 0) == 90);
+    assert(fv_camera_compensation_degrees(90, 90) == 0);
+    assert(fv_camera_compensation_degrees(90, 270) == 180);
+
+    {
+        uint8_t iy[] = {235, 235, 235, 235}, iuv[] = {128, 128};
+        const uint8_t *iplanes[] = {iy, iuv, iuv + 1};
+        const size_t ilengths[] = {4, 2, 1};
+        int irow[] = {2, 2, 2}, ipixel[] = {1, 2, 2};
+        uint32_t image[5] = {0, 0, 0, 0, 0x12345678};
+        assert(fv_yuv420_to_argb(image, 2, 2, 2, 2, 0, 0, 2, 2, iplanes, ilengths, irow, ipixel));
+        for (int i = 0; i < 4; i++) assert(image[i] == 0xffffffffu);
+        assert(image[4] == 0x12345678);
+        memset(iy, 16, sizeof(iy));
+        assert(fv_yuv420_to_argb(image, 2, 2, 2, 2, 0, 0, 2, 2, iplanes, ilengths, irow, ipixel));
+        assert(image[0] == 0xff000000u);
+        memset(iy, 63, sizeof(iy)); iuv[0] = 102; iuv[1] = 240;
+        assert(fv_yuv420_to_argb(image, 2, 2, 2, 2, 0, 0, 2, 2, iplanes, ilengths, irow, ipixel));
+        assert(((image[0] >> 16) & 255u) >= 254u && ((image[0] >> 8) & 255u) <= 1u && (image[0] & 255u) <= 1u);
+        const size_t bad_len[] = {4, 2, 0};
+        assert(!fv_yuv420_to_argb(image, 2, 2, 2, 2, 0, 0, 2, 2, iplanes, bad_len, irow, ipixel));
+        irow[0] = 0; assert(!fv_yuv420_to_argb(image, 2, 2, 2, 2, 0, 0, 2, 2, iplanes, ilengths, irow, ipixel));
+        irow[0] = 2; assert(!fv_yuv420_to_argb(image, 2, 2, 2, 2, -1, 0, 2, 2, iplanes, ilengths, irow, ipixel));
+    }
+
     puts("Camera: six RGB filters, torch scaling, YUV chroma, rotation/bounds, wraparound and swipe admission passed");
     return 0;
 }

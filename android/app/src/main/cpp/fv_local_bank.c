@@ -104,20 +104,6 @@ void fv_local_bank_load(const char *path) {
     pthread_mutex_unlock(&bank.mutex);
 }
 void fv_local_bank_info(FvLocalBankInfo *info) { if (info) { pthread_mutex_lock(&bank.mutex);*info=bank.info;pthread_mutex_unlock(&bank.mutex); } }
-int fv_local_bank_pull(int deck,int16_t *out,int frames,FvLocalBankInfo *info) {
-    if (!out || frames<=0 || deck<0 || deck>=FV_LOCAL_DECKS) return 0;
-    pthread_mutex_lock(&bank.mutex);
-    if (info) { *info=bank.info;info->source_offset=bank.cursor[deck]; }
-    const bool ready=bank.samples && bank.frames;
-    if (ready) {
-        for (int i=0;i<frames;i++) {
-            out[i]=bank.samples[bank.cursor[deck]++];
-            if (bank.cursor[deck]>=bank.frames) bank.cursor[deck]=0;
-        }
-    } else memset(out,0,(size_t)frames*sizeof(*out));
-    pthread_mutex_unlock(&bank.mutex);
-    return ready ? frames : 0;
-}
 size_t fv_local_bank_fragment(float seek, size_t frames, int16_t *output, size_t capacity) {
     if (!output || !frames || frames > capacity || !isfinite(seek)) return 0;
     pthread_mutex_lock(&bank.mutex);

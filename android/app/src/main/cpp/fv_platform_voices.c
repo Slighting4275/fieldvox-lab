@@ -468,17 +468,9 @@ bool fv_platform_voices_healthy(FvPlatformVoices *v) {
     if (!v) return false;
     pthread_mutex_lock(&v->mutex); const bool healthy=v->healthy; pthread_mutex_unlock(&v->mutex); return healthy;
 }
-static bool write_all(int fd,const void *data,size_t bytes) {
-    const uint8_t *p=data;
-    while (bytes) { ssize_t n=write(fd,p,bytes); if (n<0 && errno==EINTR) continue; if (n<=0) return false; p+=(size_t)n; bytes-=(size_t)n; }
-    return true;
-}
 static int pcm_source(const int16_t *pcm,size_t frames) {
     const int fd=memfd_create("fieldvox-source",MFD_CLOEXEC); if (fd<0) return -1;
-    uint8_t header[44];
-    fv_wav_build_header(header,FV_FRAGMENT_RATE,1u,(uint32_t)frames*2u);
-    /* Android targets are little-endian; no conversion or short-grain flush. */
-    if (!write_all(fd,header,sizeof(header)) || !write_all(fd,pcm,frames*sizeof(*pcm))) { close(fd); return -1; }
+    if (!fv_wav_write_fd(fd,FV_FRAGMENT_RATE,1u,pcm,frames)) { close(fd); return -1; }
     return fd;
 }
 bool fv_platform_voices_submit(void *context,int source_fd,const int16_t *pcm,size_t frames,

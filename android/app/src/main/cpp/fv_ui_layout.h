@@ -23,6 +23,7 @@ typedef enum {
     W_PLAY_BACK, W_PLAY_TOGGLE, W_PLAY_REWIND_5, W_PLAY_REWIND_10, W_PLAY_FORWARD_5,
     W_PLAY_SEEK, W_PLAY_MUTE, W_PLAY_MARK, W_PLAY_MARK_PREV, W_PLAY_MARK_NEXT,
     W_SOURCE_MODE, W_EVIDENCE_BANK_0, W_EVIDENCE_BANK_1, W_EVIDENCE_BANK_2, W_EVIDENCE_BANK_3,
+    W_ESTES_EXIT,
     W_COUNT
 } WidgetId;
 
@@ -30,6 +31,15 @@ typedef struct {
     float x, y, w, h; /* content coordinates (before scrolling) */
     bool visible;
 } WidgetRect;
+
+typedef struct {
+    bool controls_visible;
+    bool advanced_controls;
+    bool help_visible;
+    bool evidence_visible;
+    bool playback_visible;
+    bool estes_mode;
+} FvUiState;
 
 typedef struct {
     bool landscape;
@@ -41,7 +51,13 @@ typedef struct {
     float bottom_bar_h, bottom_bar_y;
     float vis_h, vis_top;
     float drawer_y, drawer_h;
+    float help_y, help_h;
+    float evidence_y, evidence_h, evidence_row_y, evidence_row_h;
+    float play_top, play_preview_y, play_preview_h, play_wave_y, play_wave_h, play_buttons_y;
 } FvUiScreenLayout;
+
+int fv_ui_grain_ms_to_percent(int grain_ms);
+int fv_ui_percent_to_grain_ms(int percent);
 
 void fv_ui_place(WidgetRect rects[static W_COUNT], WidgetId id, float x, float y, float w, float h);
 int fv_ui_resolve_tap(const WidgetRect rects[static W_COUNT], float x, float y);
@@ -52,14 +68,15 @@ bool fv_ui_tap_dismisses_drawer(const WidgetRect rects[static W_COUNT], bool con
 void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
                               bool controls_visible, bool advanced_controls,
                               FvUiScreenLayout *out_layout);
-void fv_ui_layout_help_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                               float screen_h, float d, float *out_y, float *out_h);
-void fv_ui_layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                                   float screen_h, float d, int item_count, const bool is_video[4],
-                                   float *out_y, float *out_h, float *out_row_y, float *out_row_h);
-void fv_ui_layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                                 float width, float height, float d,
-                                 float *out_top, float *out_preview_y, float *out_preview_h,
-                                 float *out_wave_y, float *out_wave_h, float *out_buttons_y);
+void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
+                         const FvUiState *state, int evidence_count, const bool evidence_is_video[4],
+                         FvUiScreenLayout *out_layout);
+
+/* Handles modal/drawer dismissal and returns the triggered WidgetId (>= 0), or -1 if already handled. */
+int fv_ui_handle_tap(FvUiState *state, const WidgetRect rects[static W_COUNT],
+                     float x, float y, float d, bool *out_estes_hit);
+/* Handles Android Back button across modals/drawers. Returns true if consumed.
+ * Sets *out_close_playback when transitioning from local playback back to the library. */
+bool fv_ui_back_pressed(FvUiState *state, bool *out_close_playback);
 
 #endif

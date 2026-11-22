@@ -9,6 +9,18 @@
 #error FieldVox requires C23
 #endif
 
+int fv_ui_grain_ms_to_percent(int grain_ms) {
+    if (grain_ms <= 65) return 0;
+    if (grain_ms >= 1000) return 100;
+    return (grain_ms - 65) * 100 / 935;
+}
+
+int fv_ui_percent_to_grain_ms(int percent) {
+    if (percent <= 0) return 65;
+    if (percent >= 100) return 1000;
+    return 65 + (percent * 935 + 50) / 100;
+}
+
 void fv_ui_place(WidgetRect rects[static W_COUNT], WidgetId id, float x, float y, float w, float h) {
     rects[id] = (WidgetRect){.x = x, .y = y, .w = w, .h = h, .visible = true};
 }
@@ -204,8 +216,9 @@ void fv_ui_layout_main_screen(WidgetRect rects[static W_COUNT], int screen_w, in
     }
 }
 
-void fv_ui_layout_help_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                               float screen_h, float d, float *out_y, float *out_h) {
+static void layout_help_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                                float screen_h, float d, float *out_y, float *out_h) {
+    memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
     const float h = fminf(screen_h - 36.0f * d, 360.0f * d);
     const float y = (screen_h - h) * 0.5f;
     const float bw = fminf(150.0f * d, ui_w - 28.0f * d);
@@ -215,9 +228,10 @@ void fv_ui_layout_help_overlay(WidgetRect rects[static W_COUNT], float ui_x0, fl
     if (out_h) *out_h = h;
 }
 
-void fv_ui_layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                                   float screen_h, float d, int item_count, const bool is_video[4],
-                                   float *out_y, float *out_h, float *out_row_y, float *out_row_h) {
+static void layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                                    float screen_h, float d, int item_count, const bool is_video[4],
+                                    float *out_y, float *out_h, float *out_row_y, float *out_row_h) {
+    memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
     const float h = fminf(screen_h - 92.0f * d, 390.0f * d);
     const float y = (screen_h - h) * 0.5f;
     fv_ui_place(rects, W_CLOSE_EVIDENCE, ui_x0 + ui_w - 48.0f * d, y + 9.0f * d, 38.0f * d, 25.0f * d);
@@ -246,10 +260,11 @@ void fv_ui_layout_evidence_overlay(WidgetRect rects[static W_COUNT], float ui_x0
     if (out_row_h) *out_row_h = row_h;
 }
 
-void fv_ui_layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
-                                 float width, float height, float d,
-                                 float *out_top, float *out_preview_y, float *out_preview_h,
-                                 float *out_wave_y, float *out_wave_h, float *out_buttons_y) {
+static void layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, float ui_w,
+                                  float width, float height, float d,
+                                  float *out_top, float *out_preview_y, float *out_preview_h,
+                                  float *out_wave_y, float *out_wave_h, float *out_buttons_y) {
+    memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
     const bool landscape = width > height;
     const float top = (landscape ? 36.0f : 58.0f) * d;
     const float bottom = (landscape ? 12.0f : 32.0f) * d;
@@ -272,4 +287,79 @@ void fv_ui_layout_local_playback(WidgetRect rects[static W_COUNT], float ui_x0, 
     if (out_wave_y) *out_wave_y = wave_y;
     if (out_wave_h) *out_wave_h = wave_h;
     if (out_buttons_y) *out_buttons_y = buttons_y;
+}
+
+void fv_ui_layout_active(WidgetRect rects[static W_COUNT], int screen_w, int screen_h, float d,
+                         const FvUiState *state, int evidence_count, const bool evidence_is_video[4],
+                         FvUiScreenLayout *out_layout) {
+    FvUiScreenLayout layout = {0};
+    fv_ui_layout_main_screen(rects, screen_w, screen_h, d,
+                             state ? state->controls_visible : false,
+                             state ? state->advanced_controls : false, &layout);
+    if (state) {
+        if (state->estes_mode) {
+            memset(rects, 0, sizeof(WidgetRect) * (size_t)W_COUNT);
+            const float bw = 150.0f * d, bh = 44.0f * d;
+            fv_ui_place(rects, W_ESTES_EXIT, (float)screen_w - bw - 16.0f * d, 60.0f * d, bw, bh);
+        } else if (state->playback_visible) {
+            layout_local_playback(rects, layout.ui_x0, layout.ui_w, (float)screen_w, (float)screen_h, d,
+                                  &layout.play_top, &layout.play_preview_y, &layout.play_preview_h,
+                                  &layout.play_wave_y, &layout.play_wave_h, &layout.play_buttons_y);
+        } else if (state->help_visible) {
+            layout_help_overlay(rects, layout.ui_x0, layout.ui_w, (float)screen_h, d,
+                                &layout.help_y, &layout.help_h);
+        } else if (state->evidence_visible) {
+            static const bool empty_video[4] = {false, false, false, false};
+            layout_evidence_overlay(rects, layout.ui_x0, layout.ui_w, (float)screen_h, d,
+                                    evidence_count, evidence_is_video ? evidence_is_video : empty_video,
+                                    &layout.evidence_y, &layout.evidence_h,
+                                    &layout.evidence_row_y, &layout.evidence_row_h);
+        }
+    }
+    if (out_layout) *out_layout = layout;
+}
+
+int fv_ui_handle_tap(FvUiState *state, const WidgetRect rects[static W_COUNT],
+                     float x, float y, float d, bool *out_estes_hit) {
+    if (out_estes_hit) *out_estes_hit = false;
+    if (!state) return -1;
+    const int hit = fv_ui_resolve_tap(rects, x, y);
+    if (state->estes_mode) {
+        if (hit == W_ESTES_EXIT) {
+            state->estes_mode = false;
+            return W_ESTES_EXIT;
+        }
+        if (out_estes_hit) *out_estes_hit = true;
+        return -1;
+    }
+    if (state->help_visible) {
+        state->help_visible = false;
+        return hit == W_CLOSE_HELP ? W_CLOSE_HELP : -1;
+    }
+    if (state->evidence_visible && hit < 0) {
+        state->evidence_visible = false;
+        return -1;
+    }
+    if (state->playback_visible) return hit;
+    if (hit < 0 && fv_ui_tap_dismisses_drawer(rects, state->controls_visible, hit, y, d)) {
+        state->controls_visible = false;
+        return -1;
+    }
+    return hit;
+}
+
+bool fv_ui_back_pressed(FvUiState *state, bool *out_close_playback) {
+    if (out_close_playback) *out_close_playback = false;
+    if (!state) return false;
+    if (state->playback_visible) {
+        state->playback_visible = false;
+        state->evidence_visible = true;
+        if (out_close_playback) *out_close_playback = true;
+        return true;
+    }
+    if (state->evidence_visible) { state->evidence_visible = false; return true; }
+    if (state->help_visible) { state->help_visible = false; return true; }
+    if (state->estes_mode) { state->estes_mode = false; return true; }
+    if (state->controls_visible) { state->controls_visible = false; return true; }
+    return false;
 }

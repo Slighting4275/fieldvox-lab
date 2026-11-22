@@ -22,6 +22,7 @@ void fv_local_player_pause(void);
 void fv_local_player_toggle(void);
 void fv_local_player_mute(void);
 void fv_local_player_seek(int64_t ms);
+void fv_local_player_seek_delta(int64_t delta_ms);
 void fv_local_player_scrub_begin(void);
 void fv_local_player_scrub_end(void);
 void fv_local_player_bookmark(void);

@@ -3,6 +3,7 @@
 #include "fv_native_radio.h"
 #include "fv_fragment_engine.h"
 #include "fv_jni_helpers.h"
+#include "fv_media_decode.h"
 #include "fv_station_policy.h"
 #include "fv_station_blob_data.h"
 #include <android/log.h>
@@ -136,29 +137,16 @@ static size_t append_pcm(int16_t *pcm,size_t count,const uint8_t *data,size_t by
     return count;
 }
 static int16_t *decode(const char *path,unsigned generation,size_t *frames) {
-    AMediaExtractor *extractor=AMediaExtractor_new(); AMediaCodec *codec=NULL;
-    AMediaFormat *format=NULL; int16_t *pcm=NULL; *frames=0;
-    if(!extractor) return NULL;
-    const int fd=open(path,O_RDONLY|O_CLOEXEC); if(fd<0) goto done;
+    AMediaExtractor *extractor=NULL; AMediaCodec *codec=NULL;
+    int16_t *pcm=NULL; *frames=0;
+    const int fd=open(path,O_RDONLY|O_CLOEXEC); if(fd<0) return NULL;
     const off_t bytes=lseek(fd,0,SEEK_END);
-    const media_status_t status=AMediaExtractor_setDataSourceFd(extractor,fd,0,bytes); close(fd);
-    if(status!=AMEDIA_OK) goto done;
-    const size_t tracks=AMediaExtractor_getTrackCount(extractor); int track=-1;char mime[80]={0};
-    for(size_t i=0;i<tracks;i++) {
-        AMediaFormat *candidate=AMediaExtractor_getTrackFormat(extractor,i); const char *type=NULL;
-        if(candidate && AMediaFormat_getString(candidate,AMEDIAFORMAT_KEY_MIME,&type) && type && strncmp(type,"audio/",6)==0) {
-            format=candidate;track=(int)i;snprintf(mime,sizeof(mime),"%s",type);break;
-        }
-        if(candidate) AMediaFormat_delete(candidate);
-    }
-    if(track<0) goto done;
-    codec=AMediaCodec_createDecoderByType(mime);
-    if(!codec || AMediaCodec_configure(codec,format,NULL,NULL,0)!=AMEDIA_OK || AMediaCodec_start(codec)!=AMEDIA_OK) goto done;
+    int32_t rate=48000,channels=1,encoding=2;
+    const bool opened=bytes>0 && fv_media_open_audio_track(fd,bytes,false,&extractor,&codec,&rate,&channels,NULL);
+    close(fd);
+    if(!opened) goto done;
     pcm=malloc(FV_FRAGMENT_CLIP_FRAMES*sizeof(*pcm)); if(!pcm) goto done;
-    AMediaExtractor_selectTrack(extractor,(size_t)track);
-    int32_t rate=48000,channels=1,encoding=2; double phase=0.0;float previous=0.0f;
-    AMediaFormat_getInt32(format,AMEDIAFORMAT_KEY_SAMPLE_RATE,&rate);
-    AMediaFormat_getInt32(format,AMEDIAFORMAT_KEY_CHANNEL_COUNT,&channels);
+    double phase=0.0;float previous=0.0f;
     bool input_eos=false; const long started=now_ms();
     while(current(generation) && now_ms()-started<5000L && *frames<FV_FRAGMENT_CLIP_FRAMES) {
         if(!input_eos) {
@@ -191,8 +179,7 @@ static int16_t *decode(const char *path,unsigned generation,size_t *frames) {
     }
 done:
     if(codec) { AMediaCodec_stop(codec);AMediaCodec_delete(codec); }
-    if(format) AMediaFormat_delete(format);
-    AMediaExtractor_delete(extractor);
+    if(extractor) AMediaExtractor_delete(extractor);
     if(!*frames || !current(generation)) { free(pcm);pcm=NULL;*frames=0; }
     return pcm;
 }
@@ -289,4 +276,18 @@ bool fv_radio_take_result(int16_t **pcm,size_t *frames,int *station,FvVoxDecimal
 }
 bool fv_radio_busy(void) {
     pthread_mutex_lock(&radio.mutex);const bool busy=radio.busy;pthread_mutex_unlock(&radio.mutex);return busy;
+}
+static bool live_is_busy(void *ctx) { (void)ctx; return fv_radio_busy(); }
+static int live_select(void *ctx, int hop) { (void)ctx; return fv_radio_selected_station(hop); }
+static bool live_request(void *ctx, int hop, const FvVoxDecimalTrigger *t) { (void)ctx; return fv_radio_request(hop, t); }
+static bool live_take(void *ctx, int16_t **pcm, size_t *frames, int *station, FvVoxDecimalTrigger *t, int *fd) {
+    (void)ctx; return fv_radio_take_result(pcm, frames, station, t, fd);
+}
+FvFragmentLiveSource fv_radio_live_source(void) {
+    return (FvFragmentLiveSource){
+        .is_busy = live_is_busy,
+        .select_station = live_select,
+        .request = live_request,
+        .take_result = live_take
+    };
 }

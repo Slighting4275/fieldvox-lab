@@ -95,6 +95,55 @@ void fv_wav_build_header(uint8_t header[static 44], uint32_t sample_rate,
     memcpy(header + 36, "data", 4);
     put_le32(header + 40, pcm_bytes);
 }
+static bool write_all_fd(int fd, const void *data, size_t bytes) {
+    const uint8_t *p = data;
+    while (bytes) {
+        const ssize_t written = write(fd, p, bytes);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return false;
+        p += (size_t)written;
+        bytes -= (size_t)written;
+    }
+    return true;
+}
+bool fv_wav_write_fd(int fd, uint32_t sample_rate, uint16_t channels,
+                     const int16_t *pcm, size_t frames) {
+    if (fd < 0 || !channels || channels > 8u || (frames && !pcm) ||
+        frames > (size_t)(UINT32_MAX / (2u * (size_t)channels))) return false;
+    uint8_t header[44];
+    const uint32_t pcm_bytes = (uint32_t)(frames * (size_t)channels * 2u);
+    fv_wav_build_header(header, sample_rate, channels, pcm_bytes);
+    if (!write_all_fd(fd, header, sizeof(header))) return false;
+    uint8_t bytes[2048];
+    const size_t total_samples = frames * (size_t)channels;
+    for (size_t off = 0; off < total_samples;) {
+        size_t chunk = total_samples - off;
+        if (chunk > 1024u) chunk = 1024u;
+        for (size_t i = 0; i < chunk; i++) {
+            const uint16_t v = (uint16_t)pcm[off + i];
+            bytes[2u * i] = (uint8_t)v;
+            bytes[2u * i + 1u] = (uint8_t)(v >> 8u);
+        }
+        if (!write_all_fd(fd, bytes, chunk * 2u)) return false;
+        off += chunk;
+    }
+    return true;
+}
+bool fv_wav_write_file(const char *path, uint32_t sample_rate, uint16_t channels,
+                       const int16_t *pcm, size_t frames) {
+    if (!path || !*path) return false;
+    char temp[700];
+    const int n = snprintf(temp, sizeof(temp), "%s.tmp-XXXXXX", path);
+    if (n < 0 || (size_t)n >= sizeof(temp)) return false;
+    const int fd = mkstemp(temp);
+    if (fd < 0) return false;
+    bool ok = fv_wav_write_fd(fd, sample_rate, channels, pcm, frames);
+    if (ok && fsync(fd) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    if (ok) ok = rename(temp, path) == 0;
+    if (!ok) unlink(temp);
+    return ok;
+}
 static uint16_t le16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1]<<8u)); }
 static uint32_t le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1]<<8u) | ((uint32_t)p[2]<<16u) | ((uint32_t)p[3]<<24u);
@@ -228,27 +277,4 @@ bool fv_bookmarks_save(const char *recording,const int64_t *marks,size_t count) 
     if (ok) ok=rename(temp,path)==0;
     if (!ok) unlink(temp);
     return ok;
-}
-static uint8_t channel(int value) { return (uint8_t)(value<0 ? 0 : (value>255 ? 255 : value)); }
-bool fv_yuv420_to_argb(uint32_t *dst,int dw,int dh,int sw,int sh,int left,int top,int right,int bottom,
-                       const uint8_t *planes[3],const size_t lengths[3],const int rs[3],const int ps[3]) {
-    if (!dst || !planes || !lengths || !rs || !ps || dw<=0 || dh<=0 || dw>4096 || dh>4096 ||
-        sw<=0 || sh<=0 || sw>8192 || sh>8192 || left<0 || top<0 || right>sw || bottom>sh || right<=left || bottom<=top) return false;
-    for (int p=0;p<3;p++) {
-        if (!planes[p] || rs[p]<=0 || ps[p]<=0 || rs[p]>1048576 || ps[p]>16) return false;
-        const size_t xx=(size_t)(right-1)/(p ? 2u : 1u),yy=(size_t)(bottom-1)/(p ? 2u : 1u);
-        if (xx*(size_t)ps[p]>=(size_t)rs[p] || yy*(size_t)rs[p]+xx*(size_t)ps[p]>=lengths[p]) return false;
-    }
-    for (int y=0;y<dh;y++) {
-        const int sy=top+(int)((int64_t)y*(bottom-top)/dh);
-        for (int x=0;x<dw;x++) {
-            const int sx=left+(int)((int64_t)x*(right-left)/dw);
-            const int l=(int)planes[0][(size_t)sy*(size_t)rs[0]+(size_t)sx*(size_t)ps[0]]-16;
-            const int u=(int)planes[1][(size_t)(sy/2)*(size_t)rs[1]+(size_t)(sx/2)*(size_t)ps[1]]-128;
-            const int v=(int)planes[2][(size_t)(sy/2)*(size_t)rs[2]+(size_t)(sx/2)*(size_t)ps[2]]-128;
-            const uint32_t r=channel((298*l+459*v+128)>>8),g=channel((298*l-55*u-136*v+128)>>8),b=channel((298*l+541*u+128)>>8);
-            dst[(size_t)y*(size_t)dw+(size_t)x]=0xff000000u | (r<<16u) | (g<<8u) | b;
-        }
-    }
-    return true;
 }
