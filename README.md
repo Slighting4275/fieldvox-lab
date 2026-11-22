@@ -1,6 +1,8 @@
 # FieldVox Lab
 
-FieldVox Lab is an experimental Android workstation for sensor-triggered radio audio, offline fragment playback, camera monitoring, and session recording. Its application runtime is written in **C23**, using Android's `NativeActivity`, Camera2 NDK, AAudio, native media codecs, and Android media/effect APIs called through C JNI. There are no project Java, Kotlin, or C++ runtime sources.
+FieldVox Lab gives you a sensor-triggered spirit box, a filtered camera view, and session recording in one native Android app. Motion and magnetic field readings can trigger short fragments from online radio, or you can use cached radio clips when you’re offline. Switch to Estes blackout mode and tap to mark moments while the screen stays dark.
+
+Hear something through the static that makes you stop and listen? Tap Mark Hit to save up to three seconds of audio from before you tapped, along with the source details and sensor readings. Record the hunt on video, then jump straight to marked events in the built-in library.
 
 ## New audio features
 
@@ -134,6 +136,8 @@ adb shell run-as org.fieldvox.lab ls -lh files/fieldvox-hits
 Use `ffprobe -hide_banner <recording.mp4>` to inspect an exported recording's actual media properties.
 
 ## Implementation
+
+The application runtime is written in **C23**, using Android's `NativeActivity`, Camera2 NDK, AAudio, native media codecs, and Android media/effect APIs called through C JNI. There are no project Java, Kotlin, or C++ runtime sources.
 
 | Module | Responsibility |
 | --- | --- |
