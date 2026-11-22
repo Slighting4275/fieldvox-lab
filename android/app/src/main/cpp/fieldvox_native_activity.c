@@ -809,28 +809,48 @@ static void playback_time(char *out,size_t capacity,int64_t ms) {
     if (ms<0) ms=0;
     snprintf(out,capacity,"%lld:%02lld.%03lld",(long long)(ms/60000),(long long)(ms/1000%60),(long long)(ms%1000));
 }
-static void draw_local_playback(Ui *ui,const FvLocalPlayerSnapshot *p,const FvUiScreenLayout *layout) {
-    FvCanvas *c=ui->c;const float d=ui->d,x=ui->x0,w=ui->w;
-    const bool landscape=layout->landscape;
-    const float top=layout->play_top,preview_y=layout->play_preview_y,preview_h=layout->play_preview_h;
-    const float wave_y=layout->play_wave_y,wave_h=layout->play_wave_h,buttons_y=layout->play_buttons_y;
-    const float header_end=layout->play_header_end;
-    const float footer_start=layout->play_footer_start;
-    const float mid_h=fmaxf(40.0f*d,footer_start-header_end);
-    fvg_clear(c,0xFF080808);
+static void set_window_fullscreen(ANativeActivity *activity, bool fullscreen) {
+    if (!activity) return;
+    ANativeActivity_setWindowFlags(activity,
+                                   fullscreen ? AWINDOW_FLAG_FULLSCREEN : 0u,
+                                   fullscreen ? 0u : AWINDOW_FLAG_FULLSCREEN);
+}
+
+static void draw_local_playback(Ui *ui, const FvLocalPlayerSnapshot *p, const FvUiScreenLayout *layout) {
+    FvCanvas *c = ui->c;
+    const float d = ui->d, x = ui->x0, w = ui->w;
+    const float top = layout->play_top;
+    const float wave_y = layout->play_wave_y, wave_h = layout->play_wave_h, buttons_y = layout->play_buttons_y;
+    const float header_end = layout->play_header_end;
+    const float footer_start = layout->play_footer_start;
+    const float mid_h = layout->play_mid_h;
+    const bool show_controls = ui->rects[W_PLAY_BACK].visible;
+    fvg_clear(c, 0xFF080808);
     if (p->video) {
-        fv_local_player_draw_video(c,0.0f,preview_y,(float)c->w,preview_h);
-        fvg_fill_rect(c,0.0f,0.0f,(float)c->w,header_end,0x99000000);
-        fvg_fill_rect(c,0.0f,footer_start,(float)c->w,(float)c->h-footer_start,0xB8000000);
-        if (!p->video_frames && !p->error) fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x,header_end,w,mid_h,"Loading local video…",0xFFAAAAAA,false);
-    } else {
-        fvg_text_center(c,FVG_FONT_SANS,text_sp(ui,landscape ? 16.0f : 20.0f),x,header_end,w,mid_h,p->error ? "RECORDING UNAVAILABLE" : "SAVED AUDIO",0xFFDDDDDD,true);
+        fv_local_player_draw_video(c);
+        if (!p->video_frames && !p->error) {
+            fvg_text_center(c, FVG_FONT_SANS, text_sp(ui, 12.0f), x, header_end, w, mid_h,
+                            "Loading local video…", 0xFFAAAAAA, false);
+        }
+        if (!show_controls) return;
+        fvg_fill_rect(c, 0.0f, 0.0f, (float)c->w, header_end, 0x99000000);
+        fvg_fill_rect(c, 0.0f, footer_start, (float)c->w, (float)c->h - footer_start, 0xB8000000);
+    } else if (p->error) {
+        fvg_text_center(c, FVG_FONT_SANS, text_sp(ui, layout->landscape ? 16.0f : 20.0f),
+                        x, header_end, w, mid_h, "RECORDING UNAVAILABLE", 0xFFDDDDDD, true);
+        if (!show_controls) return;
+    } else if (!show_controls) {
+        return;
     }
     draw_placed_pill(ui,W_PLAY_BACK,"< LIBRARY",PILL_IDLE);
     draw_placed_pill(ui,W_PLAY_MUTE,p->muted ? "MUTED" : "MUTE",p->muted ? PILL_ACTIVE : PILL_IDLE);
     fvg_text_center(c,FVG_FONT_SANS, text_sp(ui,12.0f),x+84.0f*d,top,w-152.0f*d,34.0f*d,"LOCAL PLAYBACK",0xFFFFFFFF,true);
     fvg_text_center(c,FVG_FONT_SANS,fit_size(FVG_FONT_SANS, text_sp(ui,12.0f),p->name,w,false),x,top+38.0f*d,w,25.0f*d,p->name,0xFFDDDDDD,false);
     fvg_round_rect(c,x,wave_y,w,wave_h,8.0f*d,0xFF141414,0xFF444444,d);
+    if (!p->video && !p->error && wave_h > 120.0f * d) {
+        fvg_text_center(c, FVG_FONT_SANS, text_sp(ui, 12.0f), x, wave_y + 10.0f * d, w, 20.0f * d,
+                        "SAVED AUDIO", 0xFF777777, true);
+    }
     const float mid=wave_y+wave_h*0.5f;
     fvg_line(c,x,mid,x+w,mid,d,0xFF555555);
     if (p->waveform_ready) {
@@ -1310,8 +1330,13 @@ static void handle_widget(WidgetId id) {
             evidence_page_locked();break;
         case W_LIBRARY_REFRESH: refresh_evidence_locked();break;
         case W_PLAY_BACK:
-            fv_local_player_close();g_app.ui.playback_visible=false;g_app.ui.evidence_visible=true;
-            refresh_evidence_locked();break;
+            fv_local_player_close();
+            g_app.ui.playback_visible = false;
+            g_app.ui.playback_audio_only = false;
+            g_app.ui.playback_controls_hidden = false;
+            g_app.ui.evidence_visible = true;
+            refresh_evidence_locked();
+            break;
         case W_PLAY_TOGGLE: fv_local_player_toggle();break;
         case W_PLAY_REWIND_5: fv_local_player_seek_delta(-5000);break;
         case W_PLAY_REWIND_10: fv_local_player_seek_delta(-10000);break;
@@ -1329,6 +1354,7 @@ static void handle_widget(WidgetId id) {
 static void handle_tap(float x, float y_screen) {
     ANativeActivity *activity = NULL;
     int vib_ms = 0;
+    int fullscreen_cmd = 0;
     char open_path[512] = {0};
     bool open_muted = false;
     pthread_mutex_lock(&g_state_mutex);
@@ -1355,10 +1381,14 @@ static void handle_tap(float x, float y_screen) {
             if (g_app.recording_active || g_app.video_recording_active) {
                 set_status_locked("Stop recording before local playback");
             } else {
+                const bool is_mp4 = strcmp(g_app.evidence[idx].mime, "video/mp4") == 0;
                 snprintf(open_path, sizeof(open_path), "%s", g_app.evidence[idx].path);
                 open_muted = g_app.audio_muted;
                 g_app.ui.evidence_visible = false;
                 g_app.ui.playback_visible = true;
+                g_app.ui.playback_audio_only = !is_mp4;
+                g_app.ui.playback_controls_hidden = is_mp4;
+                fullscreen_cmd = 1;
                 set_status_locked("Loading recording on this phone");
             }
             vib_ms = 15;
@@ -1366,11 +1396,13 @@ static void handle_tap(float x, float y_screen) {
     } else if (hit >= 0) {
         LOGI("tap widget %d", hit);
         handle_widget((WidgetId)hit);
+        if (hit == W_PLAY_BACK) fullscreen_cmd = -1;
         vib_ms = g_app.ui.playback_visible ? 15 : 18;
     } else if (g_app.ui.help_visible || g_app.ui.evidence_visible) {
         vib_ms = 15;
     }
     pthread_mutex_unlock(&g_state_mutex);
+    if (fullscreen_cmd != 0) set_window_fullscreen(activity, fullscreen_cmd > 0);
     if (vib_ms > 0) fv_android_vibrate(activity, vib_ms);
     if (open_path[0]) fv_local_player_open(open_path, open_muted);
 }
@@ -1506,6 +1538,8 @@ static void *input_thread_func(void *arg) {
                 handled = 1;
             }
             if (AInputEvent_getType(event)==AINPUT_EVENT_TYPE_KEY && AKeyEvent_getKeyCode(event)==AKEYCODE_BACK) {
+                ANativeActivity *back_act = NULL;
+                bool exited_playback = false;
                 pthread_mutex_lock(&g_state_mutex);
                 const bool up = AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP;
                 if (g_app.ui.playback_visible || g_app.ui.evidence_visible ||
@@ -1515,9 +1549,12 @@ static void *input_thread_func(void *arg) {
                     if (up && fv_ui_back_pressed(&g_app.ui, &close_playback) && close_playback) {
                         fv_local_player_close();
                         refresh_evidence_locked();
+                        back_act = g_app.activity;
+                        exited_playback = true;
                     }
                 }
                 pthread_mutex_unlock(&g_state_mutex);
+                if (exited_playback) set_window_fullscreen(back_act, false);
             }
             AInputQueue_finishEvent(queue, event, handled);
             pthread_mutex_unlock(&g_input_mutex);

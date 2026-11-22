@@ -29,5 +29,5 @@ void fv_local_player_bookmark(void);
 void fv_local_player_jump_mark(bool forward);
 bool fv_local_player_active(void);
 void fv_local_player_snapshot(FvLocalPlayerSnapshot *snapshot);
-void fv_local_player_draw_video(FvCanvas *canvas, float x, float y, float w, float h);
+void fv_local_player_draw_video(FvCanvas *canvas);
 #endif

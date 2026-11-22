@@ -217,7 +217,7 @@ static bool open_media(JNIEnv *env,const PlayerMethods *m,const char *path,uint6
         if (!fv_jni_check(env,"FieldVoxPlayer","create playback surface",true) || !surface) return false;
         (*env)->CallVoidMethod(env,*player,m->surface,surface);ok=fv_jni_check(env,"FieldVoxPlayer","set playback surface",true);
         (*env)->DeleteLocalRef(env,surface);if (!ok) return false;
-        const float scale=fminf(1.0f,960.0f/(float)(width>height ? width : height));
+        const float scale=fminf(1.0f,1920.0f/(float)(width>height ? width : height));
         const int dw=(int)((float)width*scale),dh=(int)((float)height*scale);
         if (dw<=0 || dh<=0) return false;
         uint32_t *pixels=calloc((size_t)dw*(size_t)dh,sizeof(*pixels));if (!pixels) return false;
@@ -379,9 +379,8 @@ void fv_local_player_jump_mark(bool forward) {
 }
 bool fv_local_player_active(void) { pthread_mutex_lock(&p.mutex);const bool active=p.state.visible;pthread_mutex_unlock(&p.mutex);return active; }
 void fv_local_player_snapshot(FvLocalPlayerSnapshot *out) { if (out) { pthread_mutex_lock(&p.mutex);*out=p.state;pthread_mutex_unlock(&p.mutex); } }
-void fv_local_player_draw_video(FvCanvas *c,float x,float y,float w,float h) {
-    (void)x;(void)y;
-    if (!c || w<=0.0f || h<=0.0f) return;
+void fv_local_player_draw_video(FvCanvas *c) {
+    if (!c) return;
     pthread_mutex_lock(&p.mutex);
     if (p.pixels && p.state.video_frames && p.pixel_w>0 && p.pixel_h>0) {
         fvg_blit_cover(c,p.pixels,p.pixel_w,p.pixel_h);

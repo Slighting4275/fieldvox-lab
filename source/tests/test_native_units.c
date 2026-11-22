@@ -195,6 +195,25 @@ static void test_local_bank_cache_cap(void) {
     rm_tree_recursive(dir);
 }
 
+static void check_playback_layout(int w, int h, float d, bool audio_only, const bool is_video[4]) {
+    WidgetRect rects[W_COUNT];
+    FvUiScreenLayout layout;
+    FvUiState st = {
+        .playback_visible = true,
+        .playback_audio_only = audio_only,
+        .playback_controls_hidden = false
+    };
+    fv_ui_layout_active(rects, w, h, d, &st, 0, is_video, &layout);
+    assert(layout.play_header_end < layout.play_footer_start);
+    assert(rects[W_PLAY_BACK].visible && rects[W_PLAY_MUTE].visible && rects[W_PLAY_SEEK].visible);
+    assert(rects[W_PLAY_TOGGLE].visible && rects[W_PLAY_MARK].visible);
+    assert(rects[W_PLAY_BACK].y >= 0.0f && rects[W_PLAY_MARK].y + rects[W_PLAY_MARK].h <= (float)h + 0.01f);
+    assert(rects[W_PLAY_BACK].y + rects[W_PLAY_BACK].h < rects[W_PLAY_SEEK].y);
+    assert(rects[W_PLAY_SEEK].y + rects[W_PLAY_SEEK].h < rects[W_PLAY_TOGGLE].y);
+    assert(rects[W_PLAY_TOGGLE].y + rects[W_PLAY_TOGGLE].h < rects[W_PLAY_MARK].y);
+    if (audio_only && h > 2000) assert(rects[W_PLAY_SEEK].h > 1000.0f);
+}
+
 static void test_ui_controller_and_layout(void) {
     assert(fv_ui_grain_ms_to_percent(65) == 0);
     assert(fv_ui_grain_ms_to_percent(1000) == 100);
@@ -257,22 +276,27 @@ static void test_ui_controller_and_layout(void) {
     assert(fv_ui_back_pressed(&st, &close_playback) && !st.controls_visible && !close_playback);
     assert(!fv_ui_back_pressed(&st, &close_playback));
 
-    /* Playback layout fills full phone screen height in portrait and landscape without button overlap */
-    st = (FvUiState){.playback_visible = true};
-    fv_ui_layout_active(rects, 1344, 2992, 3.0f, &st, 0, is_video, &layout);
-    assert(layout.play_preview_y == 0.0f && fabsf(layout.play_preview_h - 2992.0f) < 0.01f);
-    assert(rects[W_PLAY_BACK].visible && rects[W_PLAY_MUTE].visible && rects[W_PLAY_SEEK].visible);
-    assert(rects[W_PLAY_TOGGLE].visible && rects[W_PLAY_MARK].visible);
-    assert(rects[W_PLAY_BACK].y + rects[W_PLAY_BACK].h < rects[W_PLAY_SEEK].y);
-    assert(rects[W_PLAY_SEEK].y + rects[W_PLAY_SEEK].h < rects[W_PLAY_TOGGLE].y);
-    assert(rects[W_PLAY_TOGGLE].y + rects[W_PLAY_TOGGLE].h < rects[W_PLAY_MARK].y);
+    /* Playback layout fills full phone screen height in portrait, landscape, short landscape, and audio-only */
+    check_playback_layout(1344, 2992, 3.0f, false, is_video);
+    check_playback_layout(2992, 1344, 3.0f, false, is_video);
+    check_playback_layout(1920, 720, 2.0f, false, is_video);
+    check_playback_layout(2400, 1080, 3.0f, false, is_video);
+    check_playback_layout(1344, 2992, 3.0f, true, is_video);
 
-    fv_ui_layout_active(rects, 2992, 1344, 3.0f, &st, 0, is_video, &layout);
-    assert(layout.play_preview_y == 0.0f && fabsf(layout.play_preview_h - 1344.0f) < 0.01f);
-    assert(layout.play_header_end < layout.play_footer_start);
-    assert(rects[W_PLAY_BACK].y + rects[W_PLAY_BACK].h < rects[W_PLAY_SEEK].y);
-    assert(rects[W_PLAY_SEEK].y + rects[W_PLAY_SEEK].h < rects[W_PLAY_TOGGLE].y);
-    assert(rects[W_PLAY_TOGGLE].y + rects[W_PLAY_TOGGLE].h < rects[W_PLAY_MARK].y);
+    /* Video playback starts with unobstructed full-bleed video and toggles overlay controls on tap */
+    st = (FvUiState){
+        .playback_visible = true,
+        .playback_audio_only = false,
+        .playback_controls_hidden = true
+    };
+    fv_ui_layout_active(rects, 1344, 2992, 3.0f, &st, 0, is_video, &layout);
+    assert(!rects[W_PLAY_BACK].visible && !rects[W_PLAY_SEEK].visible && !rects[W_PLAY_TOGGLE].visible);
+    assert(fv_ui_handle_tap(&st, rects, 600.0f, 1500.0f, 3.0f, &estes_hit) == -1);
+    assert(!st.playback_controls_hidden);
+    fv_ui_layout_active(rects, 1344, 2992, 3.0f, &st, 0, is_video, &layout);
+    assert(rects[W_PLAY_BACK].visible && rects[W_PLAY_SEEK].visible && rects[W_PLAY_TOGGLE].visible);
+    assert(fv_ui_handle_tap(&st, rects, 600.0f, 1500.0f, 3.0f, &estes_hit) == -1);
+    assert(st.playback_controls_hidden);
 }
 
 int main(void) {

@@ -38,6 +38,8 @@ typedef struct {
     bool help_visible;
     bool evidence_visible;
     bool playback_visible;
+    bool playback_audio_only;
+    bool playback_controls_hidden;
     bool estes_mode;
 } FvUiState;
 
@@ -53,8 +55,8 @@ typedef struct {
     float drawer_y, drawer_h;
     float help_y, help_h;
     float evidence_y, evidence_h, evidence_row_y, evidence_row_h;
-    float play_top, play_preview_y, play_preview_h, play_wave_y, play_wave_h, play_buttons_y;
-    float play_header_end, play_footer_start;
+    float play_top, play_wave_y, play_wave_h, play_buttons_y;
+    float play_header_end, play_footer_start, play_mid_h;
 } FvUiScreenLayout;
 
 int fv_ui_grain_ms_to_percent(int grain_ms);
