@@ -34,6 +34,7 @@ bool fv_wav_write_fd(int fd, uint32_t sample_rate, uint16_t channels,
 bool fv_wav_write_file(const char *path, uint32_t sample_rate, uint16_t channels,
                        const int16_t *pcm, size_t frames);
 int64_t fv_playback_clamp_seek(int64_t target_ms, int64_t duration_ms);
+size_t fv_adts_sync_offset(const uint8_t *buf, size_t len);
 bool fv_bookmark_add(int64_t marks[FV_BOOKMARKS_MAX], size_t *count, int64_t ms);
 int64_t fv_bookmark_next(const int64_t *marks, size_t count, int64_t ms, bool forward);
 bool fv_bookmarks_load(const char *recording, int64_t marks[FV_BOOKMARKS_MAX], size_t *count);

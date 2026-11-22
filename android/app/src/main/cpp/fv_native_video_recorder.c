@@ -215,7 +215,7 @@ static void drain_encoder_locked(bool is_video, int64_t timeout_us, bool wait_fo
         } else if (status >= 0) {
             size_t out_size = 0;
             const uint8_t *out = AMediaCodec_getOutputBuffer(codec, (size_t)status, &out_size);
-            if (out && info.size > 0) {
+            if (out && info.size > 0 && !(info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG)) {
                 queue_or_write_packet_locked(is_video, out, &info);
             }
             AMediaCodec_releaseOutputBuffer(codec, (size_t)status, false);

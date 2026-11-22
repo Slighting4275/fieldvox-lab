@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_media_decode.h"
 #include "fv_camera_effects.h"
+#include "fv_recording_data.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 bool fv_media_image_to_argb(AImage *image, uint32_t *dst, int dst_w, int dst_h) {
     if (!image || !dst || dst_w <= 0 || dst_h <= 0) return false;
@@ -41,7 +43,11 @@ bool fv_media_open_audio_track(int fd, off_t byte_size, bool force_pcm16,
     AMediaExtractor *extractor = AMediaExtractor_new();
     AMediaCodec *codec = NULL;
     AMediaFormat *format = NULL;
-    if (!extractor || AMediaExtractor_setDataSourceFd(extractor, fd, 0, byte_size) != AMEDIA_OK) goto fail;
+    uint8_t probe[4096];
+    const ssize_t probe_n = pread(fd, probe, sizeof(probe), 0);
+    const off_t skip = probe_n > 0 ? (off_t)fv_adts_sync_offset(probe, (size_t)probe_n) : 0;
+    const off_t start_off = skip < byte_size ? skip : 0;
+    if (!extractor || AMediaExtractor_setDataSourceFd(extractor, fd, start_off, byte_size - start_off) != AMEDIA_OK) goto fail;
 
     const size_t tracks = AMediaExtractor_getTrackCount(extractor);
     for (size_t i = 0; i < tracks; i++) {

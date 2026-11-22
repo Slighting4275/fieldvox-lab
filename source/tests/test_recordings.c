@@ -57,6 +57,17 @@ int main(void) {
     assert(!fv_bookmark_add(marks,&count,FV_BOOKMARKS_MAX));
     assert(fv_playback_clamp_seek(INT64_MIN,1000)==0 && fv_playback_clamp_seek(INT64_MAX,1000)==1000);
     assert(fv_playback_clamp_seek(999,1000)==999 && fv_playback_clamp_seek(9,0)==0);
+    /* Leading partial Icecast AAC bytes before a verified ADTS frame pair must be skipped. */
+    uint8_t adts_stream[512];
+    memset(adts_stream,0x55,sizeof(adts_stream));
+    adts_stream[43]=0xFFu; adts_stream[44]=0xF1u; adts_stream[45]=0x50u;
+    adts_stream[46]=0x80u; adts_stream[47]=0x17u; adts_stream[48]=0x9Fu; adts_stream[49]=0xFCu;
+    /* frame_len = (0 << 11) | (0x17 << 3) | (0x9F >> 5) = 184 + 4 = 188 */
+    adts_stream[43u+188u]=0xFFu; adts_stream[44u+188u]=0xF1u;
+    assert(fv_adts_sync_offset(adts_stream,sizeof(adts_stream))==43u);
+    assert(fv_adts_sync_offset(adts_stream+43u,sizeof(adts_stream)-43u)==0u);
+    const uint8_t mp3_hdr[8]={0xFFu,0xFBu,0x92u,0x64u,0,0,0,0};
+    assert(fv_adts_sync_offset(mp3_hdr,sizeof(mp3_hdr))==0u);
     for (int i=0;i<12;i++) {
         snprintf(other,sizeof(other),"%s/session-%02d.mp4",directory,i);f=fopen(other,"wb");assert(f);fputc(0,f);fclose(f);
     }

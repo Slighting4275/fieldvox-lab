@@ -146,9 +146,12 @@ done:
 }
 static void *analyze_waveform(void *arg) {
     const WaveformJob *job=arg;float peaks[FV_PLAYBACK_BINS]={0};
+    JNIEnv *env=NULL;
+    const bool attached=p.vm && (*p.vm)->AttachCurrentThread(p.vm,&env,NULL)==JNI_OK;
     const size_t n=strlen(job->path);
     const bool wav=n>=4 && strcmp(job->path+n-4,".wav")==0;
     const bool ok=wav ? fv_wav_waveform(job->path,peaks,&job->cancel) : compressed_waveform(job,peaks);
+    if (attached && p.vm) (*p.vm)->DetachCurrentThread(p.vm);
     pthread_mutex_lock(&p.mutex);
     if (!cancelled(job) && job->generation==p.generation) {
         if (ok) { memcpy(p.state.waveform,peaks,sizeof(peaks));p.state.waveform_ready=true; }

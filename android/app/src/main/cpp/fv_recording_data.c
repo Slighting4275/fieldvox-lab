@@ -233,6 +233,19 @@ int64_t fv_playback_clamp_seek(int64_t ms,int64_t duration) {
     if (ms<0 || duration<=0) return 0;
     return ms>duration ? duration : ms;
 }
+size_t fv_adts_sync_offset(const uint8_t *buf,size_t len) {
+    if (!buf || len<7u) return 0u;
+    if (memcmp(buf,"ID3",3)==0 || memcmp(buf,"OggS",4)==0 ||
+        memcmp(buf,"fLaC",4)==0 || memcmp(buf,"RIFF",4)==0) return 0u;
+    if (buf[0]==0xFFu && (buf[1]&0xE0u)==0xE0u && (buf[1]&0x06u)!=0x00u) return 0u;
+    for (size_t i=0;i+7u<=len;i++) {
+        if (buf[i]!=0xFFu || (buf[i+1]&0xF6u)!=0xF0u) continue;
+        const size_t flen=(((size_t)buf[i+3]&0x03u)<<11)|((size_t)buf[i+4]<<3)|(((size_t)buf[i+5]&0xE0u)>>5);
+        if (flen<7u || i+flen+2u>len) continue;
+        if (buf[i+flen]==0xFFu && (buf[i+flen+1]&0xF6u)==0xF0u) return i;
+    }
+    return 0u;
+}
 bool fv_bookmark_add(int64_t marks[FV_BOOKMARKS_MAX],size_t *count,int64_t ms) {
     if (!marks || !count || *count>FV_BOOKMARKS_MAX || ms<0) return false;
     size_t i=0;while (i<*count && marks[i]<ms) i++;
