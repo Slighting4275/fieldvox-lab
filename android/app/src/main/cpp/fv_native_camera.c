@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_native_camera.h"
 #include "fv_recording_data.h"
 

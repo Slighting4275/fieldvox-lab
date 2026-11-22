@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #ifndef FIELDVOX_GFX_H
 #define FIELDVOX_GFX_H
 

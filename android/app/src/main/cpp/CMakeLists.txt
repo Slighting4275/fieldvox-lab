@@ -23,6 +23,7 @@ add_library(
     fv_camera_effects.c
     fv_native_video_recorder.c
     fv_gfx.c
+    fv_ui_layout.c
     fv_android_text.c
     fv_grain_gate.c
     fv_hit_capture.c
@@ -32,9 +33,7 @@ add_library(
     fv_native_radio.c
     fv_platform_voices.c
     fv_core.c
-    fv_source_audit.c
     fv_stage1r_native_audio.c
-    fv_stage1u_native_blob_decoder.c
     fv_sensor_dsp.c
     fv_local_bank.c
     fv_fragment_engine.c

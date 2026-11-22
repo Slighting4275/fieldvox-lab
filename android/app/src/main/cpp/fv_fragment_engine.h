@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #ifndef FV_FRAGMENT_ENGINE_H
 #define FV_FRAGMENT_ENGINE_H
 #include <stdbool.h>

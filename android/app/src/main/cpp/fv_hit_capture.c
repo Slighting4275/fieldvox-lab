@@ -1,5 +1,7 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _GNU_SOURCE
 #include "fv_hit_capture.h"
+#include "fv_recording_data.h"
 
 #include <fcntl.h>
 #include <errno.h>
@@ -60,19 +62,9 @@ static int finish_file(FILE *f) {
     return failure;
 }
 
-static void put_u32(uint8_t *dst, uint32_t n) {
-    for (unsigned i = 0; i < 4; i++) dst[i] = (uint8_t)(n >> (8u * i));
-}
-
 static bool write_wav(FILE *f, const int16_t *ring) {
-    uint8_t header[44] = {0};
-    const uint32_t bytes = valid_frames * 2u;
-    memcpy(header, "RIFF", 4); put_u32(header + 4, bytes + 36u);
-    memcpy(header + 8, "WAVEfmt ", 8); put_u32(header + 16, 16);
-    header[20] = 1; header[22] = 1;
-    put_u32(header + 24, FV_HIT_RATE); put_u32(header + 28, FV_HIT_RATE * 2u);
-    header[32] = 2; header[34] = 16;
-    memcpy(header + 36, "data", 4); put_u32(header + 40, bytes);
+    uint8_t header[44];
+    fv_wav_build_header(header, FV_HIT_RATE, 1u, valid_frames * 2u);
     bool ok = fwrite(header, 1, sizeof(header), f) == sizeof(header);
     const uint32_t start = (write_frame + FV_HIT_FRAMES - valid_frames) % FV_HIT_FRAMES;
     /* Encode explicitly as little endian rather than depending on the host. */

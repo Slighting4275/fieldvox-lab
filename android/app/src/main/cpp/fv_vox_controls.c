@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_vox_controls.h"
 #include "fv_native_audio.h"
 

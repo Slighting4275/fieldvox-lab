@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #ifndef FV_SENSOR_DSP_H
 #define FV_SENSOR_DSP_H
 #include <stddef.h>
@@ -61,7 +62,15 @@ void fv_vox_clamp_grain_boundary(int total_duration_ms, float seek_fraction,
 /*
  * Four scheduled echo repetitions: Volume_k = base_vol * 0.2 * (0.3)^k.
  */
+enum { FV_VOX_ECHO_TAPS = 4 };
+typedef struct {
+    uint64_t delay;
+    float volume;
+} FvVoxEchoTap;
+
 float fv_vox_echo_tap_volume(float base_vol, int tap_index);
 uint64_t fv_vox_echo_tap_delay_ms(uint64_t delay_interval_ms, int tap_index);
+size_t fv_vox_echo_schedule(float base_vol, uint64_t interval,
+                            FvVoxEchoTap out_taps[static FV_VOX_ECHO_TAPS]);
 
 #endif

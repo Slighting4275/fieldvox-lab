@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_local_player.h"
 #include <android/log.h>
 #include <android/native_window_jni.h>

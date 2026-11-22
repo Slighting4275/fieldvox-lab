@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 /* FieldVox Lab C23 NativeActivity: sensor-derived fragments, on-demand radio
  * clips, persistent offline playback, camera monitoring and aligned recording. */
 
@@ -26,6 +27,7 @@
 
 #include "fv_core.h"
 #include "fv_gfx.h"
+#include "fv_ui_layout.h"
 #include "fv_android_text.h"
 #include "fv_grain_gate.h"
 #include "fv_hit_capture.h"
@@ -61,38 +63,22 @@
 
 static const int FV_SWEEP_CADENCE_MS[4] = {100, 250, 500, 1000};
 
-#include "fv_sensor_dsp.h"
-
 /* ---------------------------------------------------------------------------------------------
- * Widgets
+ * Widgets & Enums
  * ------------------------------------------------------------------------------------------- */
 
 typedef enum {
-    W_CAL, W_CADENCE, W_DIRECTION, W_PITCH,
-    W_ECHO, W_REVERB, W_NOISE, W_REV,
-    W_SESS, W_REC, W_START, W_MIC, W_CTRL,
-    W_SB11, W_VOCAL, W_REMPOD, W_PAN,
-    W_ESTES, W_CAMHUD, W_SENS_DOWN, W_SENS_UP,
-    W_COOL_DOWN, W_COOL_UP,
-    W_MARK_HIT, W_CAM_PREVIEW,
-    W_VIDEO_REC, W_CAM_TINT, W_CLOSE_DRAWER,
-    W_TORCH, W_HELP, W_MUTE,
-    W_SENS_LOW, W_SENS_MED, W_SENS_HIGH, W_COOL_CYCLE,
-    W_EVIDENCE_OPEN_0, W_EVIDENCE_OPEN_1, W_EVIDENCE_OPEN_2, W_EVIDENCE_OPEN_3,
-    W_CLOSE_EVIDENCE, W_CLOSE_HELP, W_AUTO_GATE,
-    W_VIS_PREV, W_VIS_NEXT, W_VIS_COLOR, W_VOICE_DUCK, W_ADVANCED,
-    W_ECHO_LEVEL, W_REVERB_LEVEL, W_DISTORTION_LEVEL, W_GRAIN_LEVEL,
-    W_LIBRARY_PREV, W_LIBRARY_NEXT, W_LIBRARY_REFRESH,
-    W_PLAY_BACK, W_PLAY_TOGGLE, W_PLAY_REWIND_5, W_PLAY_REWIND_10, W_PLAY_FORWARD_5,
-    W_PLAY_SEEK, W_PLAY_MUTE, W_PLAY_MARK, W_PLAY_MARK_PREV, W_PLAY_MARK_NEXT,
-    W_SOURCE_MODE, W_EVIDENCE_BANK_0, W_EVIDENCE_BANK_1, W_EVIDENCE_BANK_2, W_EVIDENCE_BANK_3,
-    W_COUNT
-} WidgetId;
+    FV_SWEEP_REV = -1,
+    FV_SWEEP_RND = 0,
+    FV_SWEEP_FWD = 1
+} FvSweepDirection;
 
-typedef struct {
-    float x, y, w, h; /* content coordinates (before scrolling) */
-    bool visible;
-} WidgetRect;
+typedef enum {
+    FV_PITCH_OVERRIDE_AUTO = 0,
+    FV_PITCH_OVERRIDE_LOW = 1,
+    FV_PITCH_OVERRIDE_NORMAL = 2,
+    FV_PITCH_OVERRIDE_HIGH = 3
+} FvPitchOverride;
 
 typedef struct {
     char path[512];
@@ -150,9 +136,9 @@ typedef struct {
     int echo_percent, reverb_percent, distortion_percent, grain_ms;
     int visualizer_style, visualizer_color;
     int cadence_idx;
-    int direction;           /* 1 FWD, -1 REV, 0 RND */
+    FvSweepDirection direction;
     int pitch_semitones;     /* Rounded telemetry of the active pitch ratio. */
-    int pitch_override;      /* 0 automatic, 1 low, 2 normal, 3 high. */
+    FvPitchOverride pitch_override;
     bool echo_fx, reverb_fx, noise_fx, reverse_fx;
     bool sb11_dual, vocal_filter, rem_pod_active, spatial_pan;
     bool estes_mode, cam_hud_active, cam_hud_red;
@@ -254,8 +240,8 @@ static const char *cadence_label(int idx) {
     return labels[idx & 3];
 }
 
-static const char *direction_label(int direction) {
-    return direction > 0 ? "FWD" : (direction < 0 ? "REV" : "RND");
+static const char *direction_label(FvSweepDirection direction) {
+    return direction == FV_SWEEP_FWD ? "FWD" : (direction == FV_SWEEP_REV ? "REV" : "RND");
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -285,11 +271,7 @@ static float fit_size(int font, float size_px, const char *text, float max_w, bo
 }
 
 static void place(Ui *ui, WidgetId id, float x, float y, float w, float h) {
-    ui->rects[id].x = x;
-    ui->rects[id].y = y;
-    ui->rects[id].w = w;
-    ui->rects[id].h = h;
-    ui->rects[id].visible = true;
+    fv_ui_place(ui->rects, id, x, y, w, h);
 }
 
 typedef struct {
@@ -351,9 +333,9 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
     FvCanvas *c = ui->c;
     const uint32_t color = visualizer_colors[s->visualizer_color % 4];
     fvg_round_rect(c, x, y, w, h, 14.0f*d, 0xB8000000, 0x44FFFFFF, d);
-    const float inset = 40.0f*d, plot_y = y + 8.0f*d;
-    const float plot_h = fmaxf(12.0f*d, h - 46.0f*d), plot_w = w - inset*2.0f;
-    place(ui, W_CAM_PREVIEW, x + inset, plot_y, plot_w, plot_h);
+    FvUiVisualizerGeom g;
+    fv_ui_layout_floating_visualizer(ui->rects, x, y, w, h, d, &g);
+    const float inset = g.inset, plot_y = g.plot_y, plot_h = g.plot_h, plot_w = g.plot_w;
     if (s->visualizer_style == 2) {
         static uint32_t tinted_history[WF_WIDTH*WF_HEIGHT];
         for (int i=0; i<WF_WIDTH*WF_HEIGHT; i++) {
@@ -381,10 +363,10 @@ static void draw_floating_visualizer(Ui *ui, const FieldVoxApp *s, float x, floa
                            fmaxf(d, step-2.0f*d), bh, d, color, 0, 0);
         }
     }
-    const float arrow_h = fminf(44.0f*d, h);
+    const float arrow_h = g.arrow_h;
     draw_pill(ui, W_VIS_PREV, x+2.0f*d, y+(h-arrow_h)*0.5f, 34.0f*d, arrow_h, "<", PILL_IDLE);
     draw_pill(ui, W_VIS_NEXT, x+w-36.0f*d, y+(h-arrow_h)*0.5f, 34.0f*d, arrow_h, ">", PILL_IDLE);
-    const float footer_h = 30.0f*d, footer_y = y+h-footer_h-2.0f*d;
+    const float footer_h = g.footer_h, footer_y = g.footer_y;
     fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), x+inset, footer_y, plot_w*0.60f, footer_h,
                     visualizer_names[s->visualizer_style % 3], color, false);
     draw_pill(ui, W_VIS_COLOR, x+inset+plot_w*0.62f, footer_y, plot_w*0.38f, footer_h,
@@ -479,11 +461,12 @@ static void draw_top_header(Ui *ui, const FieldVoxApp *s, float x, float y, floa
 static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now_ms) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
-    const float half_w = (w - 6.0f * d) * 0.5f;
+    FvUiBadgeGeom bg;
+    fv_ui_layout_perimeter_badges(ui->rects, x, y, w, h, d, &bg);
+    const float half_w = bg.half_w;
 
     /* Left Badge: EMF Meter - tap to zero-calibrate! */
-    const float lx = x;
-    place(ui, W_CAL, lx, y, half_w, h);
+    const float lx = bg.left_x;
     const bool cal = now_ms < s->cal_flash_until_ms;
     const uint32_t emf_stroke = cal ? 0xFF00E676 : (s->emf_spike ? 0xFFFF1744 :
                                 (s->emf_delta >= 1.5f ? 0xFFFFD600 : 0x55FFFFFF));
@@ -519,8 +502,7 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
     }
 
     /* Right Badge: Environment Telemetry - tap to toggle REM-POD! */
-    const float rx = x + half_w + 6.0f * d;
-    place(ui, W_REMPOD, rx, y, half_w, h);
+    const float rx = bg.right_x;
     char telem[96];
     uint32_t tel_bg = 0xA8000000;
     uint32_t tel_stroke = 0x55FFFFFF;
@@ -559,25 +541,14 @@ static void draw_perimeter_badges(Ui *ui, const FieldVoxApp *s, float x, float y
 static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float y, float w, float h, long now) {
     FvCanvas *c = ui->c;
     const float d = ui->d;
-    const float cx = x + w * 0.5f;
-    const float cy = y + h * 0.5f;
+    FvUiDockGeom dock;
+    fv_ui_layout_bottom_action_bar(ui->rects, x, y, w, h, d, &dock);
+    const float cx = dock.cx, cy = dock.cy, r_outer = dock.r_outer;
+    const float btn_h = dock.btn_h, btn_y = dock.btn_y, btn_w = dock.btn_w;
 
-    /* Outer circular shutter radius (28dp portrait, 22dp landscape) */
-    const float r_outer = (h >= 52.0f * d ? 28.0f : 21.0f) * d;
-    const float gap = 5.0f * d;
-    const float btn_h = (h >= 52.0f * d ? 38.0f : 30.0f) * d;
-    const float btn_y = cy - btn_h * 0.5f;
-
-    /* Space available on each flank of the center shutter */
-    const float side_clearance = r_outer + 8.0f * d;
-    const float avail_w = (w * 0.5f) - side_clearance;
-    const float btn_w = (avail_w - gap) * 0.5f;
-
-    /* --- Left Flank: SWEEP (ARM/LIVE) & MARK HIT --- */
+    /* --- Left Flank: LIBRARY & MARK HIT --- */
     {
-        /* Button 1: W_START (Radio Sweep Live Toggle) */
-        const float b1_x = x;
-        place(ui, W_SESS, b1_x, btn_y, btn_w, btn_h);
+        const float b1_x = dock.b1_x;
         const uint32_t b1_bg = 0xC0181818;
         const uint32_t b1_stroke = 0x77FFFFFF;
         fvg_round_rect(c, b1_x, btn_y, btn_w, btn_h, 10.0f * d, b1_bg, b1_stroke, fmaxf(1.0f, 1.2f * d));
@@ -585,8 +556,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
                         b1_x, btn_y, btn_w, btn_h, "LIBRARY", 0xFFFFFFFF, true);
 
         /* Button 2: W_MARK_HIT (Pre-Roll Lossless Audio Capture) */
-        const float b2_x = b1_x + btn_w + gap;
-        place(ui, W_MARK_HIT, b2_x, btn_y, btn_w, btn_h);
+        const float b2_x = dock.b2_x;
         fvg_round_rect(c, b2_x, btn_y, btn_w, btn_h, 10.0f * d, 0xD0241406, 0xFFFF9100, fmaxf(1.0f, 1.2f * d));
         char hit_lbl[32];
         if (s->session_hit_count > 0) {
@@ -600,10 +570,6 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
 
     /* --- Center: FieldVox Circular Camera Shutter (W_VIDEO_REC) --- */
     {
-        /* Generous touch bounding box */
-        const float hit_pad = 6.0f * d;
-        place(ui, W_VIDEO_REC, cx - r_outer - hit_pad, cy - r_outer - hit_pad,
-              (r_outer + hit_pad) * 2.0f, (r_outer + hit_pad) * 2.0f);
 
         /* Translucent dark glass disc under the shutter */
         fvg_circle(c, cx, cy, r_outer + 2.0f * d, 0x88000000, 0, 0);
@@ -648,8 +614,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
     /* --- Right Flank: LENS (Spectral Filter) & SETTINGS (Drawer) --- */
     {
         /* Button 3: W_CAM_TINT (Spectral Lens Switcher) */
-        const float b3_x = cx + side_clearance;
-        place(ui, W_CAM_TINT, b3_x, btn_y, btn_w, btn_h);
+        const float b3_x = dock.b3_x;
         fvg_round_rect(c, b3_x, btn_y, btn_w, btn_h, 10.0f * d, 0xC0181818, 0xFFEAEAEA, fmaxf(1.0f, 1.2f * d));
 
         char lens_name[32];
@@ -659,8 +624,7 @@ static void draw_bottom_action_bar(Ui *ui, const FieldVoxApp *s, float x, float 
         fvg_text_center(c, FVG_FONT_SANS, s3, b3_x, btn_y, btn_w, btn_h, lens_name, 0xFFFFFFFF, true);
 
         /* Button 4: W_CTRL (DSP & Paranormal Settings Drawer) */
-        const float b4_x = b3_x + btn_w + gap;
-        place(ui, W_CTRL, b4_x, btn_y, btn_w, btn_h);
+        const float b4_x = dock.b4_x;
         const uint32_t b4_bg = s->controls_visible ? 0xDD280A35 : 0xC0181818;
         fvg_round_rect(c, b4_x, btn_y, btn_w, btn_h, 10.0f * d, b4_bg, 0xFFAAAAAA, fmaxf(1.0f, 1.2f * d));
         const char *b4_label = s->controls_visible ? "CLOSE" : "CONTROLS";
@@ -725,28 +689,29 @@ static void draw_slide_up_drawer(Ui *ui, const FieldVoxApp *s, float x, float y,
     fvg_round_rect(c, x, y, w, h, 14.0f * d, 0xF5081019, 0xFF6FE7FF, fmaxf(1.0f, d * 1.5f));
 
     /* Drawer Header */
-    const float header_h = 28.0f * d;
+    FvUiAdvDrawerGeom adv;
+    fv_ui_layout_advanced_drawer(ui->rects, x, y, w, h, d, &adv);
+    const float header_h = adv.header_h;
     const char *header = "ADVANCED • TAP TITLE FOR AUDIO";
     fvg_text_center(c, FVG_FONT_SANS, text_sp(ui,12.0f), x, y + 2.0f * d, w, header_h, header, 0xFF6FE7FF, true);
 
-    place(ui, W_ADVANCED, x, y, w-48.0f*d, header_h);
     /* Close Button in Header */
-    const float close_w = 40.0f * d, close_h = 22.0f * d;
-    const float close_x = x + w - close_w - 6.0f * d, close_y = y + 4.0f * d;
-    draw_pill(ui, W_CLOSE_DRAWER, close_x, close_y, close_w, close_h, "X", PILL_IDLE);
+    draw_pill(ui, W_CLOSE_DRAWER, adv.close_x, adv.close_y, adv.close_w, adv.close_h, "X", PILL_IDLE);
 
-    float cur_y = y + header_h + 4.0f * d;
-    const float gap = 3.0f * d;
-    const float pill_h = (h - header_h - 32.0f * d) / 5.0f;
+    float cur_y = adv.cur_y;
+    const float gap = adv.gap;
+    const float pill_h = adv.pill_h;
 
     /* Row 1: Sweep Controls (Cadence, Direction, Pitch, Cal) */
-    const float p4_w = (w - gap * 3.0f - 16.0f * d) / 4.0f;
+    const float p4_w = adv.p4_w;
     {
         const bool cal = now < s->cal_flash_until_ms;
         PillStyle cal_style = PILL_IDLE;
         if (cal) cal_style.text = 0xFF00E676;
         PillStyle pitch_style = PILL_IDLE;
-        const char *pitch_label = s->pitch_override == 0 ? "PITCH AUTO" : (s->pitch_override == 1 ? "LOW" : (s->pitch_override == 2 ? "NORMAL" : "HIGH"));
+        const char *pitch_label = s->pitch_override == FV_PITCH_OVERRIDE_AUTO ? "PITCH AUTO" :
+            (s->pitch_override == FV_PITCH_OVERRIDE_LOW ? "LOW" :
+            (s->pitch_override == FV_PITCH_OVERRIDE_NORMAL ? "NORMAL" : "HIGH"));
         if (s->pitch_semitones < 0) {
             pitch_style = (PillStyle){0xFF0C1F2D, 0xFF6FE7FF, 0xFF6FE7FF};
 
@@ -1009,14 +974,14 @@ static void render_frame(ANativeWindow_Buffer *buf) {
         return;
     }
 
-    const bool landscape = w > h;
-    const float top_inset = (landscape ? 36.0f : 58.0f) * d;
-    const float side_inset = (landscape ? 36.0f : 12.0f) * d;
-    const float bottom_inset = (landscape ? 10.0f : 32.0f) * d;
+    const FvUiScreenLayout layout = fv_ui_compute_screen(w, h, d);
+    const bool landscape = layout.landscape;
+    const float top_inset = layout.top_inset;
+    const float bottom_inset = layout.bottom_inset;
 
     WidgetRect rects[W_COUNT];
     memset(rects, 0, sizeof(rects));
-    Ui ui = {&canvas, d, 0.0f, side_inset, (float)w - 2.0f * side_inset, rects, &s.text_scale};
+    Ui ui = {&canvas, d, 0.0f, layout.ui_x0, layout.ui_w, rects, &s.text_scale};
 
     if (s.playback_visible) {
         FvLocalPlayerSnapshot playback;
@@ -1033,12 +998,9 @@ static void render_frame(ANativeWindow_Buffer *buf) {
     draw_viewfinder_background(&canvas, &s, w, h, d, now);
 
     /* 2. Top Status Header HUD */
-    const float header_h = (landscape ? 48.0f : 66.0f) * d;
-    draw_top_header(&ui, &s, ui.x0, top_inset, ui.w, header_h, now);
+    draw_top_header(&ui, &s, ui.x0, top_inset, ui.w, layout.header_h, now);
 
     /* 3. Status Line (Amber/Gold) */
-    const float status_y = top_inset + header_h + 3.0f * d;
-    const float status_h = (landscape ? 14.0f : 18.0f) * d;
     {
         char status_line[160];
         if (now < s.status_until_ms) {
@@ -1054,28 +1016,16 @@ static void render_frame(ANativeWindow_Buffer *buf) {
                      s.local_only ? "LOCAL" : "LIVE", s.local_only ? "Choose a WAV with BANK in LIBRARY" : "waiting for a sensor fragment…");
         }
         const float ss = fit_size(FVG_FONT_SANS, text_sp(&ui,12.0f), status_line, ui.w, false);
-        fvg_text_center(&canvas, FVG_FONT_SANS, ss, ui.x0, status_y, ui.w, status_h, status_line, 0xFFFFE6A0, false);
+        fvg_text_center(&canvas, FVG_FONT_SANS, ss, ui.x0, layout.status_y, ui.w, layout.status_h, status_line, 0xFFFFE6A0, false);
     }
 
     /* 4. Perimeter HUD Badges (EMF & Sensors) */
-    const float badge_y = status_y + status_h + 3.0f * d;
-    const float badge_h = (landscape ? 24.0f : 30.0f) * d;
-    draw_perimeter_badges(&ui, &s, ui.x0, badge_y, ui.w, badge_h, now);
+    draw_perimeter_badges(&ui, &s, ui.x0, layout.badge_y, ui.w, layout.badge_h, now);
 
-    /* 5. Bottom Action Bar position (FieldVox camera dock) */
-    const float bottom_bar_h = (landscape ? 46.0f : 66.0f) * d;
-    const float bottom_bar_y = (float)h - bottom_inset - bottom_bar_h;
-
-    /* 6. Centered Floating Sound Visualizer (only rendered and clickable when drawer is closed) */
-    const float vis_h = (landscape ? 74.0f : 130.0f) * d;
-    const float vis_top = bottom_bar_y - vis_h - 8.0f * d;
+    /* 5-7. Floating Visualizer & Bottom Action Bar (only rendered and clickable when drawer is closed) */
     if (!s.controls_visible) {
-        draw_floating_visualizer(&ui, &s, ui.x0, vis_top, ui.w, vis_h, now);
-    }
-
-    /* 7. Bottom Action Bar (only rendered and clickable when drawer is closed) */
-    if (!s.controls_visible) {
-        draw_bottom_action_bar(&ui, &s, ui.x0, bottom_bar_y, ui.w, bottom_bar_h, now);
+        draw_floating_visualizer(&ui, &s, ui.x0, layout.vis_top, ui.w, layout.vis_h, now);
+        draw_bottom_action_bar(&ui, &s, ui.x0, layout.bottom_bar_y, ui.w, layout.bottom_bar_h, now);
     }
 
     /* 8. Slide-Up Drawer Overlay (if toggled) */
@@ -1202,10 +1152,11 @@ static void handle_widget(WidgetId id) {
             set_status_locked(msg);
             break;
         case W_DIRECTION:
-            g_app.direction = g_app.direction > 0 ? -1 : (g_app.direction < 0 ? 0 : 1);
+            g_app.direction = g_app.direction == FV_SWEEP_FWD ? FV_SWEEP_REV :
+                              (g_app.direction == FV_SWEEP_REV ? FV_SWEEP_RND : FV_SWEEP_FWD);
             break;
         case W_PITCH:
-            g_app.pitch_override = (g_app.pitch_override + 1) % 4;
+            g_app.pitch_override = (FvPitchOverride)(((int)g_app.pitch_override + 1) % 4);
             break;
         case W_ECHO:
             g_app.echo_percent = g_app.echo_percent ? 0 : 50;
@@ -1518,24 +1469,14 @@ static void handle_tap(float x, float y_screen, int screen_w) {
         return;
     }
 
-    bool hit = false;
-    for (int i = W_COUNT - 1; i >= 0; i--) {
-        const WidgetRect *r = &g_app.widgets[i];
-        if (!r->visible) continue;
-        if (x >= r->x && x <= r->x + r->w && y_screen >= r->y && y_screen <= r->y + r->h) {
-            LOGI("tap widget %d", i);
-            handle_widget((WidgetId)i);
-            hit = true;
-            vibrate = true;
-            break;
-        }
-    }
-
-    if (!hit && g_app.controls_visible) {
+    const int hit = fv_ui_resolve_tap(g_app.widgets, x, y_screen);
+    if (hit >= 0) {
+        LOGI("tap widget %d", hit);
+        handle_widget((WidgetId)hit);
+        vibrate = true;
+    } else {
         const float d = g_app.density > 0.5f ? g_app.density : 3.0f;
-        const WidgetRect *close_r = &g_app.widgets[W_CLOSE_DRAWER];
-        const float drawer_top = close_r->visible ? (close_r->y - 6.0f * d) : 0.0f;
-        if (close_r->visible && y_screen < drawer_top) {
+        if (fv_ui_tap_dismisses_drawer(g_app.widgets, g_app.controls_visible, hit, y_screen, d)) {
             g_app.controls_visible = false;
         }
     }
@@ -1587,11 +1528,7 @@ static bool camera_swipe_eligible_locked(void) {
 }
 static bool camera_swipe_start_locked(float x, float y) {
     if (!camera_swipe_eligible_locked()) return false;
-    for (int i=0; i<W_COUNT; i++) {
-        const WidgetRect *r=&g_app.widgets[i];
-        if (r->visible && x>=r->x && x<=r->x+r->w && y>=r->y && y<=r->y+r->h) return false;
-    }
-    return true;
+    return !fv_ui_any_hit(g_app.widgets, x, y);
 }
 static void *input_thread_func(void *arg) {
     (void)arg;
@@ -1912,26 +1849,8 @@ static void *sensor_thread_func(void *arg) {
 
 static void write_wav_header(FILE *file, uint32_t frames) {
     if (!file) return;
-    const uint32_t pcm_bytes = frames * 2u;
-    const uint32_t riff_size = pcm_bytes + 36u;
-    const uint32_t sample_rate = SAMPLE_RATE;
-    const uint32_t byte_rate = SAMPLE_RATE * 2u;
-    const uint16_t channels = 1;
-    const uint16_t bits = 16;
-    const uint16_t block_align = 2;
-    uint8_t header[44] = {0};
-    memcpy(header, "RIFF", 4);
-    memcpy(header + 4, &riff_size, 4);
-    memcpy(header + 8, "WAVEfmt ", 8);
-    header[16] = 16;
-    header[20] = 1;
-    memcpy(header + 22, &channels, 2);
-    memcpy(header + 24, &sample_rate, 4);
-    memcpy(header + 28, &byte_rate, 4);
-    memcpy(header + 32, &block_align, 2);
-    memcpy(header + 34, &bits, 2);
-    memcpy(header + 36, "data", 4);
-    memcpy(header + 40, &pcm_bytes, 4);
+    uint8_t header[44];
+    fv_wav_build_header(header, SAMPLE_RATE, 1u, frames * 2u);
     fseek(file, 0, SEEK_SET);
     fwrite(header, 1, sizeof(header), file);
 }
@@ -2117,7 +2036,8 @@ static void *audio_thread_func(void *arg) {
         const bool noise = g_app.noise_fx, reverse = g_app.reverse_fx, rem_pod = g_app.rem_pod_active;
         const bool pan = g_app.spatial_pan;
         const bool muted = g_app.audio_muted;
-        const int direction = g_app.direction, pitch_override = g_app.pitch_override;
+        const FvSweepDirection direction = g_app.direction;
+        const FvPitchOverride pitch_override = g_app.pitch_override;
         const int rem_tier = g_app.rem_pod_tier;
         const float azimuth = g_app.compass_azimuth;
         const float emf_delta = g_app.emf_delta, emf_threshold = g_app.threshold;
@@ -2127,8 +2047,8 @@ static void *audio_thread_func(void *arg) {
         g_app.fragment_pending = false; g_app.pending_gates = 0;
         /* Visible channel counter ticks at the cadence, independent of the audio. */
         if (sweep && now - g_app.last_channel_tick_ms >= FV_SWEEP_CADENCE_MS[g_app.cadence_idx]) {
-            g_app.channel_counter = direction == 0 ? (int)((uint32_t)rand() % CHANNEL_RING)
-                                                   : (g_app.channel_counter + direction + CHANNEL_RING) % CHANNEL_RING;
+            g_app.channel_counter = direction == FV_SWEEP_RND ? (int)((uint32_t)rand() % CHANNEL_RING)
+                                                              : (g_app.channel_counter + (int)direction + CHANNEL_RING) % CHANNEL_RING;
             g_app.last_channel_tick_ms = now;
         }
         pthread_mutex_unlock(&g_state_mutex);
@@ -2198,7 +2118,10 @@ static void *audio_thread_func(void *arg) {
             next_auto = clock + (uint64_t)(2000 + 80*reverb_level)*48u;
         }
         if (sweep && (requested || auto_request) && !admitted && !fv_fragment_live_pending(fragments) && !ducked) {
-            if (pitch_override) fragment.pitch_factor = pitch_override == 1 ? 0.6f : (pitch_override == 2 ? 1.0f : 1.2f);
+            if (pitch_override != FV_PITCH_OVERRIDE_AUTO) {
+                fragment.pitch_factor = pitch_override == FV_PITCH_OVERRIDE_LOW ? 0.6f :
+                                        (pitch_override == FV_PITCH_OVERRIDE_NORMAL ? 1.0f : 1.2f);
+            }
             if (local_only) {
                 static int16_t local_pcm[48000];
                 const size_t local_frames = fv_local_bank_fragment(fragment.seek_offset,
@@ -2571,7 +2494,7 @@ void ANativeActivity_onCreate(ANativeActivity *activity, void *savedState, size_
     g_app.grain_ms = 200;
     g_app.echo_percent = g_app.reverb_percent = g_app.distortion_percent = 50;
     g_app.echo_fx = g_app.reverb_fx = true;
-    g_app.direction = 1;
+    g_app.direction = FV_SWEEP_FWD;
     g_app.threshold = 1.65f;
     g_app.cooldown_ms = 450;
     g_app.cam_filter = FV_CAM_FILTER_NORMAL;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "fv_fragment_store.h"
 #include "fv_recording_data.h"
@@ -24,9 +25,6 @@ static struct {
     char directory[512];
     unsigned sequence;
 } store = {.mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
-static void le32(uint8_t *p, uint32_t value) {
-    for (unsigned i = 0; i < 4; i++) p[i] = (uint8_t)(value >> (8u * i));
-}
 /* Pair a compressed original with the WAV used by native recording/analysis.
  * pread keeps shared descriptor offsets unchanged while voices read the source. */
 static bool save_original(int source, const char *wav) {
@@ -87,12 +85,8 @@ static bool save_job(const Job *job) {
     if (fd < 0) return false;
     FILE *f = fdopen(fd, "wb");
     if (!f) { close(fd); unlink(temp); return false; }
-    uint8_t header[44] = {0};
-    memcpy(header, "RIFF", 4); le32(header + 4, 36u + (uint32_t)job->frames * 2u);
-    memcpy(header + 8, "WAVEfmt ", 8); le32(header + 16, 16u);
-    header[20] = 1; header[22] = 1; le32(header + 24, FV_FRAGMENT_RATE);
-    le32(header + 28, FV_FRAGMENT_RATE * 2u); header[32] = 2; header[34] = 16;
-    memcpy(header + 36, "data", 4); le32(header + 40, (uint32_t)job->frames * 2u);
+    uint8_t header[44];
+    fv_wav_build_header(header, FV_FRAGMENT_RATE, 1u, (uint32_t)job->frames * 2u);
     bool ok = fwrite(header, 1, sizeof(header), f) == sizeof(header);
     uint8_t bytes[2048];
     for (size_t off = 0; ok && off < job->frames;) {
@@ -127,6 +121,18 @@ static void *store_worker(void *unused) {
     }
     return NULL;
 }
+static int parse_clip_station_id(const char *filename) {
+    if (!filename || strncmp(filename, "clip-", 5) != 0) return -1;
+    const char *separator = strchr(filename + 5, '-');
+    if (!separator) return -1;
+    char *end = NULL;
+    errno = 0;
+    const long value = strtol(separator + 1, &end, 10);
+    if (errno == 0 && end != separator + 1 && *end == '-' && value >= -1 && value < 512) {
+        return (int)value;
+    }
+    return -1;
+}
 static int only_clips(const struct dirent *entry) {
     const size_t len = strlen(entry->d_name);
     return len > 9u && strncmp(entry->d_name, "clip-", 5) == 0 && strcmp(entry->d_name + len - 4u, ".wav") == 0;
@@ -142,13 +148,8 @@ bool fv_fragment_store_start(const char *app_directory, FvFragmentEngine *engine
     const int count = scandir(store.directory, &entries, only_clips, alphasort);
     if (count > 0) {
         for (int i = 0; i < count; i++) {
-            char path[800]; int station = -1;
-            const char *separator=strchr(entries[i]->d_name+5,'-');
-            if (separator) {
-                char *end=NULL; errno=0;
-                const long value=strtol(separator+1,&end,10);
-                if (errno==0 && end!=separator+1 && *end=='-' && value>=-1 && value<512) station=(int)value;
-            }
+            char path[800];
+            const int station = parse_clip_station_id(entries[i]->d_name);
             const int len = snprintf(path, sizeof(path), "%s/%s", store.directory, entries[i]->d_name);
             int16_t *pcm = NULL; size_t frames = 0;
             if (len > 0 && (size_t)len < sizeof(path) && fv_wav_load_mono_48k(path, &pcm, &frames)) {

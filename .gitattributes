@@ -2,13 +2,12 @@
 # Classify primary native programming languages
 *.c linguist-detectable=true
 *.h linguist-detectable=true
-*.zig linguist-detectable=true
 
 # Binary assets and blob streams
 *.fvblobs binary
 *.wav binary
 
-# Treat build-system boilerplate as vendored so language statistics reflect native C, Zig, and blobs.
+# Treat build-system boilerplate as vendored so language statistics reflect native C and blobs.
 *.kts linguist-vendored=true
 *.kts linguist-detectable=false
 *.jar linguist-vendored=true

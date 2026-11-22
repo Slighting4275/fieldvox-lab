@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 /*
  * FieldVox anti-aliased software rasteriser. See fv_gfx.h.
  */

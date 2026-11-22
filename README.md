@@ -82,7 +82,7 @@ Echo, reverb, and distortion start at 50%, with a 200 ms sweep interval. Speakin
 
 ## Download the APK
 
-[Download FieldVox Lab 0.5.2-native](https://codeberg.org/Exalted6165/fieldvox-lab/raw/branch/main/apk/fieldvox-lab-debug.apk). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `9`.
+[Download FieldVox Lab 0.5.2-native](https://gitlab.com/exalted6165/fieldvox-lab/-/raw/main/apk/fieldvox-lab-debug.apk) (from the public GitLab mirror; canonical source on [Codeberg](https://codeberg.org/Exalted6165/fieldvox-lab)). This is a signed debug build for Android 11 or newer, with ARM64 and x86_64 support. Its application ID is `org.fieldvox.lab` and its version code is `9`.
 
 The APK and its SHA-256 checksum are stored under [`apk/`](apk/). Download it to the phone and open it to install or update FieldVox. Android may ask you to allow installation from the browser or file manager. Updating a compatible signed installation preserves app data.
 
@@ -100,7 +100,7 @@ Requirements: a C23-capable host compiler, Android SDK platform/build tools 37, 
 Run from the repository root, using your Android SDK path:
 
 ```bash
-ANDROID_HOME=/home/baconfat/Android/Sdk ./android/gradlew -p android :app:assembleDebug
+ANDROID_HOME=/path/to/Android/Sdk ./android/gradlew -p android :app:assembleDebug
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n org.fieldvox.lab/android.app.NativeActivity
 ```

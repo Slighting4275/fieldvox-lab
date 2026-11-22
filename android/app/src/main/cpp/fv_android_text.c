@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_android_text.h"
 #include <math.h>
 #include <stddef.h>
@@ -18,6 +19,7 @@ float fv_text_sp(const FvTextScale *scale,float sp) {
 #include <android/bitmap.h>
 #include <android/log.h>
 #include "fv_gfx.h"
+#include "fv_jni_helpers.h"
 static JavaVM *java_vm;
 static _Thread_local struct {
     JNIEnv *env;
@@ -29,26 +31,16 @@ static _Thread_local struct {
     float last_size[FVG_FONT_COUNT],top_px[FVG_FONT_COUNT],bottom_px[FVG_FONT_COUNT];
 } text;
 static bool checked(JNIEnv *env,const char *operation) {
-    if (!(*env)->ExceptionCheck(env)) return true;
-    (*env)->ExceptionClear(env);
-    __android_log_print(ANDROID_LOG_WARN,"FieldVoxText","Platform font operation failed: %s",operation);
-    return false;
+    return fv_jni_check(env,"FieldVoxText",operation,false);
 }
 static jclass global_class(JNIEnv *env,const char *name) {
-    jclass local=(*env)->FindClass(env,name);
-    if (!checked(env,name) || !local) return NULL;
-    jclass global=(*env)->NewGlobalRef(env,local); (*env)->DeleteLocalRef(env,local);
-    return checked(env,"font class reference") ? global : NULL;
+    return fv_jni_global_class(env,"FieldVoxText",name,false);
 }
 static jmethodID method(JNIEnv *env,jclass cls,const char *name,const char *sig) {
-    if (!cls) return NULL;
-    jmethodID id=(*env)->GetMethodID(env,cls,name,sig);
-    return checked(env,name) ? id : NULL;
+    return fv_jni_method(env,"FieldVoxText",cls,name,sig,false);
 }
 static jfieldID field(JNIEnv *env,jclass cls,const char *name,const char *sig) {
-    if (!cls) return NULL;
-    jfieldID id=(*env)->GetFieldID(env,cls,name,sig);
-    return checked(env,name) ? id : NULL;
+    return fv_jni_field(env,"FieldVoxText",cls,name,sig,false);
 }
 static bool prepare(void) {
     if (text.initialized) return true;

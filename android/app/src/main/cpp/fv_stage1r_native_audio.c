@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -5,6 +6,7 @@
 #include <unistd.h>
 
 #include "fv_native_audio.h"
+#include "fv_recording_data.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -620,8 +622,8 @@ static int16_t s_native_echo_buffer[FV_DSP_ECHO_BUFFER_SAMPLES];
 static uint32_t s_native_echo_index = 0;
 static uint64_t s_native_noise_prng = 0x854351239ULL;
 
-/* 5-second Pre-roll Ring Buffer for instant, zero-latency hit marking */
-#define FV_PREROLL_SECONDS 5
+/* 3-second Pre-roll Ring Buffer for instant, zero-latency hit marking */
+#define FV_PREROLL_SECONDS 3
 #define FV_PREROLL_SAMPLES (48000 * FV_PREROLL_SECONDS)
 static int16_t s_preroll_ring[FV_PREROLL_SAMPLES];
 static uint32_t s_preroll_write = 0;
@@ -982,25 +984,8 @@ bool fv_audio_export_preroll_wav(const char *path, int pre_seconds) {
     const uint32_t pcm_bytes = sample_count * 2;
     FILE *f = fopen(path, "wb");
     if (!f) return false;
-    const uint32_t riff_size = pcm_bytes + 36;
-    const uint32_t sample_rate = 48000;
-    const uint16_t channels = 1;
-    const uint16_t bits = 16;
-    const uint32_t byte_rate = sample_rate * channels * (bits / 8);
-    const uint16_t block_align = channels * (bits / 8);
-    uint8_t header[44] = {0};
-    memcpy(&header[0], "RIFF", 4);
-    memcpy(&header[4], &riff_size, 4);
-    memcpy(&header[8], "WAVEfmt ", 8);
-    header[16] = 16;
-    header[20] = 1;
-    memcpy(&header[22], &channels, 2);
-    memcpy(&header[24], &sample_rate, 4);
-    memcpy(&header[28], &byte_rate, 4);
-    memcpy(&header[32], &block_align, 2);
-    memcpy(&header[34], &bits, 2);
-    memcpy(&header[36], "data", 4);
-    memcpy(&header[40], &pcm_bytes, 4);
+    uint8_t header[44];
+    fv_wav_build_header(header, 48000u, 1u, pcm_bytes);
     bool ok = fwrite(header, 1, sizeof(header), f) == sizeof(header);
     const uint32_t start_idx = (s_preroll_write + FV_PREROLL_SAMPLES - sample_count) % FV_PREROLL_SAMPLES;
     const uint32_t first_count = sample_count < FV_PREROLL_SAMPLES - start_idx
@@ -1051,30 +1036,7 @@ Java_org_fieldvox_lab_MainActivity_nativeExportPreRollWav(JNIEnv *env, jobject t
     }
 
     uint8_t header[44];
-    uint32_t riff_size = pcm_bytes + 36;
-    uint32_t sample_rate = 48000;
-    uint16_t channels = 1;
-    uint16_t bits = 16;
-    uint32_t byte_rate = sample_rate * channels * (bits / 8);
-    uint16_t block_align = channels * (bits / 8);
-
-    memcpy(&header[0], "RIFF", 4);
-    header[4] = (uint8_t)(riff_size & 0xff); header[5] = (uint8_t)((riff_size >> 8) & 0xff);
-    header[6] = (uint8_t)((riff_size >> 16) & 0xff); header[7] = (uint8_t)((riff_size >> 24) & 0xff);
-    memcpy(&header[8], "WAVE", 4);
-    memcpy(&header[12], "fmt ", 4);
-    header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0;
-    header[20] = 1; header[21] = 0;
-    header[22] = (uint8_t)(channels & 0xff); header[23] = 0;
-    header[24] = (uint8_t)(sample_rate & 0xff); header[25] = (uint8_t)((sample_rate >> 8) & 0xff);
-    header[26] = (uint8_t)((sample_rate >> 16) & 0xff); header[27] = (uint8_t)((sample_rate >> 24) & 0xff);
-    header[28] = (uint8_t)(byte_rate & 0xff); header[29] = (uint8_t)((byte_rate >> 8) & 0xff);
-    header[30] = (uint8_t)((byte_rate >> 16) & 0xff); header[31] = (uint8_t)((byte_rate >> 24) & 0xff);
-    header[32] = (uint8_t)(block_align & 0xff); header[33] = 0;
-    header[34] = (uint8_t)(bits & 0xff); header[35] = 0;
-    memcpy(&header[36], "data", 4);
-    header[40] = (uint8_t)(pcm_bytes & 0xff); header[41] = (uint8_t)((pcm_bytes >> 8) & 0xff);
-    header[42] = (uint8_t)((pcm_bytes >> 16) & 0xff); header[43] = (uint8_t)((pcm_bytes >> 24) & 0xff);
+    fv_wav_build_header(header, 48000u, 1u, pcm_bytes);
 
     fwrite(header, 1, 44, f);
 

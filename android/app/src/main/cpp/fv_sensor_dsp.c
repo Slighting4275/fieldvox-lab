@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_sensor_dsp.h"
 #include <math.h>
 #include <stdbool.h>
@@ -254,4 +255,15 @@ float fv_vox_echo_tap_volume(float base_vol, int tap_index) {
 uint64_t fv_vox_echo_tap_delay_ms(uint64_t delay_interval_ms, int tap_index) {
     if (tap_index < 1) return 0;
     return (uint64_t)tap_index * delay_interval_ms;
+}
+
+size_t fv_vox_echo_schedule(float base_vol, uint64_t interval,
+                            FvVoxEchoTap out_taps[static FV_VOX_ECHO_TAPS]) {
+    for (int tap = 1; tap <= FV_VOX_ECHO_TAPS; tap++) {
+        out_taps[tap - 1] = (FvVoxEchoTap){
+            .delay = fv_vox_echo_tap_delay_ms(interval, tap),
+            .volume = fv_vox_echo_tap_volume(base_vol, tap)
+        };
+    }
+    return FV_VOX_ECHO_TAPS;
 }

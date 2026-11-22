@@ -13,7 +13,7 @@ TYPOGRAPHY_FONT ?= $(shell fc-match -f "%{file}" sans 2>/dev/null)
 MAIN_SRC := src/main.c src/fv_core.c
 DUMP_SRC := src/fv_blobdump.c src/fv_core.c
 CSV_SRC := src/fv_csvvox.c src/fv_core.c
-TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_grain_gate.c ../android/app/src/main/cpp/fv_hit_capture.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_recording_data.c
+TEST_SRC := tests/test_native_units.c ../android/app/src/main/cpp/fv_stage1r_native_audio.c ../android/app/src/main/cpp/fv_grain_gate.c ../android/app/src/main/cpp/fv_hit_capture.c ../android/app/src/main/cpp/fv_vox_controls.c ../android/app/src/main/cpp/fv_sensor_dsp.c ../android/app/src/main/cpp/fv_local_bank.c ../android/app/src/main/cpp/fv_recording_data.c ../android/app/src/main/cpp/fv_ui_layout.c
 HDR := src/fv_core.h
 
 .PHONY: all clean run inspect dump extract csvtest audition test blobgen

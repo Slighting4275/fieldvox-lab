@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 /*
  * FieldVox bounded phonetic-grain gate (C). See fv_grain_gate.h.
  * Timing constants and random ranges match the Java MainActivity carrier gate.

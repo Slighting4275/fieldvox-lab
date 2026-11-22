@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "fv_local_bank.h"
 #include "fv_recording_data.h"

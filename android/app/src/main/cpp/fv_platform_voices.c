@@ -1,5 +1,8 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _GNU_SOURCE
 #include "fv_platform_voices.h"
+#include "fv_jni_helpers.h"
+#include "fv_recording_data.h"
 #include <android/log.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -58,14 +61,10 @@ static uint64_t millis(void) {
 }
 static float unit(float x) { return isfinite(x) ? fmaxf(0.0f,fminf(1.0f,x)) : 0.0f; }
 static bool checked(JNIEnv *env,const char *operation) {
-    if (!(*env)->ExceptionCheck(env)) return true;
-    LOGW("platform exception: %s",operation);
-    (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); return false;
+    return fv_jni_check(env,"FieldVoxVoices",operation,true);
 }
 static jmethodID method(JNIEnv *env,jclass c,const char *name,const char *signature) {
-    if (!c) return NULL;
-    jmethodID id=(*env)->GetMethodID(env,c,name,signature);
-    return checked(env,name) ? id : NULL;
+    return fv_jni_method(env,"FieldVoxVoices",c,name,signature,true);
 }
 static void source_release(Source *source) {
     if (source && --source->references==0u) { close(source->fd); free(source); }
@@ -77,14 +76,10 @@ static void clear_queue(FvPlatformVoices *v) {
     }
 }
 static jclass find_class(JNIEnv *env,const char *name) {
-    jclass c=(*env)->FindClass(env,name);
-    return checked(env,name) ? c : NULL;
+    return fv_jni_find_class(env,"FieldVoxVoices",name,true);
 }
 static jclass global_class(JNIEnv *env,const char *name) {
-    jclass local=find_class(env,name); if (!local) return NULL;
-    jclass global=(*env)->NewGlobalRef(env,local);
-    (*env)->DeleteLocalRef(env,local);
-    return checked(env,"class reference") ? global : NULL;
+    return fv_jni_global_class(env,"FieldVoxVoices",name,true);
 }
 static bool init_api(JNIEnv *env,Api *a,Player players[PLAYERS]) {
     memset(a,0,sizeof(*a));
@@ -418,10 +413,12 @@ static void *voice_worker(void *context) {
                 if (played && event.primary && event.source->settings.echo>0.0f) {
                     const uint64_t start=event.source->start;
                     const unsigned interval=(unsigned)(event.source->settings.echo*200.0f);
-                    for (int tap=1;tap<=4;tap++) for (unsigned i=0;i<EVENTS;i++) if (!v->events[i].source) {
+                    FvVoxEchoTap taps[FV_VOX_ECHO_TAPS];
+                    const size_t tap_count=fv_vox_echo_schedule(1.0f,interval,taps);
+                    for (size_t t_idx=0;t_idx<tap_count;t_idx++) for (unsigned i=0;i<EVENTS;i++) if (!v->events[i].source) {
                         event.source->references++;
-                        v->events[i]=(Event){.source=event.source,.generation=current,.due=start+(uint64_t)(unsigned)tap*interval,
-                            .volume=fv_vox_echo_tap_volume(1.0f,tap),.primary=false}; break;
+                        v->events[i]=(Event){.source=event.source,.generation=current,.due=start+taps[t_idx].delay,
+                            .volume=taps[t_idx].volume,.primary=false}; break;
                     }
                 }
                 pthread_mutex_unlock(&v->mutex);
@@ -482,7 +479,6 @@ bool fv_platform_voices_healthy(FvPlatformVoices *v) {
     if (!v) return false;
     pthread_mutex_lock(&v->mutex); const bool healthy=v->healthy; pthread_mutex_unlock(&v->mutex); return healthy;
 }
-static void le32(uint8_t *at,uint32_t value) { for (unsigned i=0;i<4u;i++) at[i]=(uint8_t)(value>>(8u*i)); }
 static bool write_all(int fd,const void *data,size_t bytes) {
     const uint8_t *p=data;
     while (bytes) { ssize_t n=write(fd,p,bytes); if (n<0 && errno==EINTR) continue; if (n<=0) return false; p+=(size_t)n; bytes-=(size_t)n; }
@@ -490,10 +486,8 @@ static bool write_all(int fd,const void *data,size_t bytes) {
 }
 static int pcm_source(const int16_t *pcm,size_t frames) {
     const int fd=memfd_create("fieldvox-source",MFD_CLOEXEC); if (fd<0) return -1;
-    uint8_t header[44]={0}; memcpy(header,"RIFF",4); le32(header+4,36u+(uint32_t)frames*2u);
-    memcpy(header+8,"WAVEfmt ",8); le32(header+16,16); header[20]=1; header[22]=1;
-    le32(header+24,FV_FRAGMENT_RATE); le32(header+28,FV_FRAGMENT_RATE*2u); header[32]=2; header[34]=16;
-    memcpy(header+36,"data",4); le32(header+40,(uint32_t)frames*2u);
+    uint8_t header[44];
+    fv_wav_build_header(header,FV_FRAGMENT_RATE,1u,(uint32_t)frames*2u);
     /* Android targets are little-endian; no conversion or short-grain flush. */
     if (!write_all(fd,header,sizeof(header)) || !write_all(fd,pcm,frames*sizeof(*pcm))) { close(fd); return -1; }
     return fd;

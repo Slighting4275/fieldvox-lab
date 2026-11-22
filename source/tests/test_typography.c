@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "../../android/app/src/main/cpp/fv_gfx.h"
 #include "../../android/app/src/main/cpp/fv_android_text.h"
 #include <assert.h>

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #ifndef FIELDVOX_NATIVE_RADIO_H
 #define FIELDVOX_NATIVE_RADIO_H
 #include <jni.h>

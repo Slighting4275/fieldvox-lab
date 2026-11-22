@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "../../android/app/src/main/cpp/fv_camera_effects.h"
 #include "../../android/app/src/main/cpp/fv_recording_data.h"
 #include <assert.h>

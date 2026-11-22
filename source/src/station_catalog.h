@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 /* Public radio endpoints. Regional language codes are preserved in full. */
 #ifndef FV_STATION_CATALOG_H
 #define FV_STATION_CATALOG_H

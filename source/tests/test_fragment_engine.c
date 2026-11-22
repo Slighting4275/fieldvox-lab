@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "../../android/app/src/main/cpp/fv_fragment_engine.h"
 #include "../../android/app/src/main/cpp/fv_fragment_store.h"
@@ -108,8 +109,9 @@ static void test_speaker_sources(void) {
     assert(fclose(f)==0);
     Speaker speaker={.accept=true,.fd=-1}; fv_fragment_set_speaker(e,test_speaker,&speaker);
     FvVoxDecimalTrigger t=normal(); t.prefer_live=false; t.seek_offset=0.6f;
-    /* A selected index equal to cache size is rejected, rather than wrapped. */
+    /* A selected index at or past cache size is rejected, rather than wrapped. */
     t.channel_hop=1; assert(!fv_fragment_trigger(e,&t,true,0,false));
+    t.channel_hop=2; assert(!fv_fragment_trigger(e,&t,true,0,false));
     t.channel_hop=0; assert(fv_fragment_trigger(e,&t,true,0,false));
     assert(speaker.calls==1u && speaker.frames==48000u && speaker.fd>=0);
     const int owned=speaker.fd;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "fv_native_radio.h"
 #include "fv_fragment_engine.h"
@@ -74,7 +75,7 @@ static bool download(JNIEnv *env,const char *url,FILE *file,unsigned generation)
     if(!connection || (*env)->ExceptionCheck(env) || !(*env)->IsInstanceOf(env,connection,http_class)) goto done;
     (*env)->CallVoidMethod(env,connection,connect_timeout,5000);
     (*env)->CallVoidMethod(env,connection,read_timeout,5000);
-    jstring key=(*env)->NewStringUTF(env,"User-Agent"),value=(*env)->NewStringUTF(env,"VXPlayer");
+    jstring key=(*env)->NewStringUTF(env,"User-Agent"),value=(*env)->NewStringUTF(env,"FieldVoxLab/0.5.2");
     if(!key || !value || (*env)->ExceptionCheck(env)) goto done;
     (*env)->CallVoidMethod(env,connection,header,key,value);
     if((*env)->ExceptionCheck(env)) goto done;

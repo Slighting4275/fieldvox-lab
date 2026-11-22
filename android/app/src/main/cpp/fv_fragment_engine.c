@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #define _POSIX_C_SOURCE 200809L
 #include "fv_fragment_engine.h"
 #include "fv_environment_reverb.h"
@@ -188,10 +189,12 @@ static bool admit(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,const int16_t
     e->seek_fraction=(float)((double)seek/(double)frames); e->last_station=station; e->last_cached=cached;
     if (e->settings.echo>0.0f) {
         const uint64_t interval=(uint64_t)(e->settings.echo*200.0f)*48u;
-        for (int tap=1;tap<=4;tap++) for (unsigned i=0;i<ECHO_EVENTS;i++) if (!e->echoes[i].audio) {
+        FvVoxEchoTap taps[FV_VOX_ECHO_TAPS];
+        const size_t tap_count=fv_vox_echo_schedule(1.0f,interval,taps);
+        for (size_t t_idx=0;t_idx<tap_count;t_idx++) for (unsigned i=0;i<ECHO_EVENTS;i++) if (!e->echoes[i].audio) {
             audio->references++;
-            e->echoes[i]=(Echo){.audio=audio,.due=clock+(uint64_t)tap*interval,
-                .volume=fv_vox_echo_tap_volume(1.0f,tap),.station=station,.cached=cached}; break;
+            e->echoes[i]=(Echo){.audio=audio,.due=clock+taps[t_idx].delay,
+                .volume=taps[t_idx].volume,.station=station,.cached=cached}; break;
         }
     }
     return true;
@@ -229,9 +232,8 @@ bool fv_fragment_trigger(FvFragmentEngine *e,const FvVoxDecimalTrigger *t,bool l
             fv_fragment_trigger_pcm(e,t,d->pcm,d->count,d->station,clock,speech);
     }
     if (!e->cache_count || !eligible(e,-1,clock,speech)) return false;
-    size_t index=(size_t)(unsigned)t->channel_hop;
-    if (index>e->cache_count) index%=e->cache_count;
-    if (index==e->cache_count) return false;
+    const size_t index=(size_t)(unsigned)t->channel_hop;
+    if (index>=e->cache_count) return false;
     Clip *c=&e->cache[index];
     if (c->uses>=5u) return false;
     c->uses++; mark_trigger(e,-1,clock);

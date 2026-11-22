@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #include "fv_environment_reverb.h"
 #include "third_party/lvm/Reverb/lib/LVREV.h"
 #include <math.h>

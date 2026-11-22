@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later AND AGPL-3.0-or-later */
 #ifndef FIELDVOX_HIT_CAPTURE_H
 #define FIELDVOX_HIT_CAPTURE_H
 
